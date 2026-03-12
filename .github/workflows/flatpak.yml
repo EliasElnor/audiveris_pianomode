@@ -67,6 +67,10 @@ jobs:
         with:
           name: flathub-content
 
+      - name: Fix repository owner
+        run: |
+          sed -i '/url:/s,Audiveris/audiveris,${{ github.repository }},' org.audiveris.audiveris.yml
+
       - name: Build flatpak ${{ github.sha }}
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
