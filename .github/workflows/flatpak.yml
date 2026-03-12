@@ -1,9 +1,8 @@
 name: Build flatpak package
 
-# execute this workflow on every push
-#on:
-#  - push
 on:
+  - pull_request
+  - release
   - workflow_dispatch
 
 permissions:
