@@ -25,6 +25,8 @@ Table of contents
 (March 2026)
 
 - User Interface
+  - Option to skip user confirmation on multiple delete
+  - Better rendering of dialog about new release content
   - Ability to set font attributes at a sentence level to apply them to all its member words.
   - Better text word resizing, keeping a constant height/width ratio.
   - Better drag n' drop for all clefs.
