@@ -104,6 +104,7 @@ import org.audiveris.omr.text.TextBuilder;
 import org.audiveris.omr.text.TextLine;
 import org.audiveris.omr.text.TextRole;
 import org.audiveris.omr.text.TextWord;
+import org.audiveris.omr.ui.action.AdvancedTopics;
 import org.audiveris.omr.ui.selection.LocationEvent;
 import static org.audiveris.omr.ui.selection.MouseMovement.PRESSING;
 import org.audiveris.omr.ui.selection.SelectionHint;
@@ -224,19 +225,25 @@ public class InterController
             @Override
             protected void build ()
             {
-                // If replacing a HeadInter, salvage its AugmentationRelation(s)
+                // If replacing a HeadInter, salvage its AugmentationRelation if any
                 final List<UITask> recoveredTasks = new ArrayList<>();
                 if (inter instanceof org.audiveris.omr.sig.inter.HeadInter) {
-                    final org.audiveris.omr.sheet.SystemInfo system = inter.getStaff().getSystem();
-                    final org.audiveris.omr.sig.SIGraph sig = system.getSig();
-                    final List<Inter> intersected = sig.intersectedInters(inter.getGlyph().getBounds());
-                    
+                    final SIGraph sig = inter.getStaff().getSystem().getSig();
+                    final List<Inter> intersected = sig.intersectedInters(inter.getBounds());
+
                     for (Inter comp : intersected) {
-                        if ((comp != inter) && (comp.getGlyph() == inter.getGlyph()) && (comp instanceof org.audiveris.omr.sig.inter.HeadInter)) {
-                            for (org.audiveris.omr.sig.relation.Relation rel : sig.incomingEdgesOf(comp)) {
-                                if (rel instanceof org.audiveris.omr.sig.relation.AugmentationRelation) {
-                                    Inter dot = sig.getEdgeSource(rel);
-                                    recoveredTasks.add(new LinkTask(sig, dot, inter, new org.audiveris.omr.sig.relation.AugmentationRelation()));
+                        if ((comp != inter) //
+                                && (comp.getGlyph() == inter.getGlyph())
+                                && (comp instanceof HeadInter)) {
+                            for (Relation rel : sig.incomingEdgesOf(comp)) {
+                                if (rel instanceof AugmentationRelation) {
+                                    final Inter dot = sig.getEdgeSource(rel);
+                                    recoveredTasks.add(
+                                            new LinkTask(
+                                                    sig,
+                                                    dot,
+                                                    inter,
+                                                    new AugmentationRelation()));
                                 }
                             }
                         }
@@ -249,7 +256,7 @@ public class InterController
                 // Addition task and other related tasks (additions, links) if any
                 final WrappedBoolean cancel = new WrappedBoolean(false);
                 seq.addAll(inter.preAdd(cancel, toPublish));
-                
+
                 // Re-apply salvaged links
                 seq.addAll(recoveredTasks);
 
@@ -2585,9 +2592,11 @@ public class InterController
                 return;
             }
 
-            if ((inters.size() == 1) || OMR.gui.displayConfirmation(
-                    "Do you confirm this multiple deletion?",
-                    "Deletion of " + inters.size() + " inters")) {
+            if ((inters.size() == 1) //
+                    || AdvancedTopics.allowMultipleDelete() //
+                    || OMR.gui.displayConfirmation(
+                            "Do you confirm this multiple deletion?",
+                            "Deletion of " + inters.size() + " inters")) {
                 removeInters(inters);
             }
         }
