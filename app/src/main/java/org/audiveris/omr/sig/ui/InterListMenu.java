@@ -31,6 +31,7 @@ import org.audiveris.omr.sig.inter.Inters;
 import org.audiveris.omr.sig.inter.KeyInter;
 import org.audiveris.omr.sig.inter.KeyInter.KeyConfig;
 import org.audiveris.omr.sig.relation.Relation;
+import org.audiveris.omr.ui.action.AdvancedTopics;
 import org.audiveris.omr.ui.selection.EntityListEvent;
 import org.audiveris.omr.ui.selection.MouseMovement;
 import org.audiveris.omr.ui.selection.SelectionHint;
@@ -98,13 +99,14 @@ public class InterListMenu
     private void insertDeletionItem (final SystemInfo system,
                                      final List<Inter> sysInters)
     {
-        JMenuItem item = new JMenuItem(
+        final JMenuItem item = new JMenuItem(
                 "Delete " + sysInters.size() + " inters for System #" + system.getId() + ":");
 
         // To delete all listed inters when item is clicked upon
         item.addActionListener( (ActionEvent e) -> {
-            if (OMR.gui.displayConfirmation(
-                    "Do you confirm the removal of " + sysInters.size() + " inter(s)?")) {
+            if (AdvancedTopics.allowMultipleDelete() //
+                    || OMR.gui.displayConfirmation(
+                            "Do you confirm the removal of " + sysInters.size() + " inter(s)?")) {
                 sheet.getInterController().removeInters(sysInters);
             }
         });

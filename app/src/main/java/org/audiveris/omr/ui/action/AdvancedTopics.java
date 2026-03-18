@@ -58,6 +58,16 @@ public abstract class AdvancedTopics
         return constants.processSystemsInParallel.isSet();
     }
 
+    /**
+     * Report whether a multiple delete is allowed without user confirmation
+     *
+     * @return true if so
+     */
+    public static boolean allowMultipleDelete ()
+    {
+        return constants.multipleDelete.isSet();
+    }
+
     //~ Inner Classes ------------------------------------------------------------------------------
 
     //-----------//
@@ -73,6 +83,10 @@ public abstract class AdvancedTopics
         final Constant.Boolean processSystemsInParallel = new Constant.Boolean(
                 false,
                 "Systems processed in parallel for relevant steps");
+
+        final Constant.Boolean multipleDelete = new Constant.Boolean(
+                false,
+                "Multiple delete without user confirmation");
 
         final Constant.Boolean useSamples = new Constant.Boolean(
                 false,
