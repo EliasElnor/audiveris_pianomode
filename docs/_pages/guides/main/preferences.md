@@ -25,7 +25,9 @@ Table of contents
 ---
 
 ## Standard processing options
-(Since 5.9)
+{: .d-inline-block }
+updated for 5.10
+{: .label .label-green}
 
 These options impact the way the engine can work, especially for demanding scores.
 - The **SWAPPED_SHEETS** option determines whether the engine should save a sheet to disk
@@ -41,6 +43,9 @@ which is 13 of the 20 defined steps. The overall transcription time saving is ap
 A drawback of this approach is that the results are not strictly reproducible, 
 since the systems compete for allocating and naming entities like
 [Inter](../../tutorials/main_concepts/glyph_inter.md#inter) instances.  
+This option is disabled by default.
+
+- The **MULTIPLE_DELETE** option determines whether the user can delete several Inters without confirmation.  
 This option is disabled by default.
 
 ## Early steps
