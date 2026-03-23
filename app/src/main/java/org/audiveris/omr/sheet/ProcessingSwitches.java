@@ -244,7 +244,7 @@ public class ProcessingSwitches
 
         final Constant.Boolean multiWholeHeadChords = new Constant.Boolean(
                 true,
-                "Multi-whole head chords");
+                "Multi whole-head chords");
 
         final Constant.Boolean chordNames = new Constant.Boolean(false, "Chord names");
 
@@ -257,11 +257,11 @@ public class ProcessingSwitches
         final Constant.Boolean articulations = new Constant.Boolean(true, "Articulations");
 
         final Constant.Boolean dynamicsAboveStaff = new Constant.Boolean(
-                false,
+                true,
                 "Dynamics located above staff");
 
         final Constant.Boolean dynamicsBelowStaff = new Constant.Boolean(
-                false,
+                true,
                 "Dynamics located below staff");
 
         final Constant.Boolean disconnectedBracedParts = new Constant.Boolean(

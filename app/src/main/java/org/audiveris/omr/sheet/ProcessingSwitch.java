@@ -46,12 +46,14 @@ import java.util.EnumSet;
  */
 public enum ProcessingSwitch
 {
+    // Staff switches
     oneLineStaves(ProcessingSwitches.constants.oneLineStaves),
     fourStringTablatures(ProcessingSwitches.constants.fourStringTablatures),
     fiveLineStaves(ProcessingSwitches.constants.fiveLineStaves),
     drumNotation(ProcessingSwitches.constants.drumNotation),
     sixStringTablatures(ProcessingSwitches.constants.sixStringTablatures),
 
+    // Item switches
     smallHeads(ProcessingSwitches.constants.smallHeads),
     smallBeams(ProcessingSwitches.constants.smallBeams),
     crossHeads(ProcessingSwitches.constants.crossHeads),
@@ -68,13 +70,14 @@ public enum ProcessingSwitch
     dynamicsAboveStaff(ProcessingSwitches.constants.dynamicsAboveStaff),
     dynamicsBelowStaff(ProcessingSwitches.constants.dynamicsBelowStaff),
 
+    // Processing switches
     keepGrayImages(ProcessingSwitches.constants.keepGrayImages),
     indentations(ProcessingSwitches.constants.indentations),
     bothSharedHeadDots(ProcessingSwitches.constants.bothSharedHeadDots),
     disconnectedBracedParts(ProcessingSwitches.constants.disconnectedBracedParts),
     implicitTuplets(ProcessingSwitches.constants.implicitTuplets),
 
-    // Obsolete switches:
+    // Obsolete switches
     poorInputMode(null),
     smallBlackHeads(null),
     smallVoidHeads(null),
@@ -99,7 +102,7 @@ public enum ProcessingSwitch
      */
     public static EnumSet<ProcessingSwitch> itemSwitches = EnumSet.range( //
             smallHeads,
-            articulations);
+            dynamicsBelowStaff);
 
     /**
      * The processing switches.
