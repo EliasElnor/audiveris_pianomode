@@ -169,10 +169,10 @@ public class HiLoPeakFinder
             modified = false;
 
             // Inspect both side x values, and pick up the one with largest gain
-            int before = (lower == pMin) ? 0 : function.getValue(lower - 1);
-            int after = (upper == pMax) ? 0 : function.getValue(upper + 1);
-            int gain = Math.max(before, after);
-            double gainRatio = (double) gain / (total + gain);
+            final int before = (lower == pMin) ? 0 : function.getValue(lower - 1);
+            final int after = (upper == pMax) ? 0 : function.getValue(upper + 1);
+            final int gain = Math.max(before, after);
+            final double gainRatio = (double) gain / (total + gain);
 
             // If side x represents a significant gain for whole peak, take it, otherwise stop
             if (gainRatio >= minGainRatio) {
@@ -191,7 +191,7 @@ public class HiLoPeakFinder
             }
         } while (modified);
 
-        Range peak = new Range(lower, main, upper);
+        final Range peak = new Range(lower, main, upper);
         logger.debug("{} peak{}", name, peak);
 
         return peak;
@@ -217,30 +217,30 @@ public class HiLoPeakFinder
         this.minDerivative = minDerivative;
         this.minGainRatio = minGainRatio;
 
-        final List<Range> peaks = new ArrayList<>();
+        peaks = new ArrayList<>();
         retrieveHiLos();
 
         // Map: originating hilo -> corresponding peak
-        Map<Range, Range> hiloToPeak = new HashMap<>();
+        final Map<Range, Range> hiloToPeak = new HashMap<>();
 
         // Process hilos by decreasing main value
-        List<Range> decreasing = new ArrayList<>(hilos);
+        final List<Range> decreasing = new ArrayList<>(hilos);
         Collections.sort(decreasing, byReverseMainValue);
 
         // Convert each hilo to a peak with adjusted limits
         for (Range hilo : decreasing) {
-            int i = hilos.indexOf(hilo);
+            final int i = hilos.indexOf(hilo);
             int pMin = Math.max(hilo.min - 1, 1);
 
             if (i > 0) {
-                Range prevHiLo = hilos.get(i - 1);
-                Range prevPeak = hiloToPeak.get(prevHiLo);
+                final Range prevHiLo = hilos.get(i - 1);
+                final Range prevPeak = hiloToPeak.get(prevHiLo);
                 pMin = Math.max(pMin, (prevPeak != null) ? (prevPeak.max + 1) : (prevHiLo.max + 1));
             }
 
             int pMax = hilo.max;
 
-            Range peak = createPeak(pMin, hilo.main, pMax);
+            final Range peak = createPeak(pMin, hilo.main, pMax);
             hiloToPeak.put(hilo, peak);
             peaks.add(peak);
         }
@@ -251,7 +251,7 @@ public class HiLoPeakFinder
             // Is there a min top value to check?
             if (quorum != null) {
                 for (int i = 0; i < peaks.size(); i++) {
-                    Range peak = peaks.get(i);
+                    final Range peak = peaks.get(i);
 
                     if (function.getValue(peak.main) < quorum.yMin) {
                         peaks.retainAll(peaks.subList(0, i));
@@ -259,8 +259,6 @@ public class HiLoPeakFinder
                 }
             }
         }
-
-        this.peaks = peaks;
 
         return peaks;
     }
@@ -294,7 +292,7 @@ public class HiLoPeakFinder
                                          int x2)
     {
         // Function derivatives
-        XYSeries derSeries = function.getDerivativeSeries(x1, x2);
+        final XYSeries derSeries = function.getDerivativeSeries(x1, x2);
 
         // Derivative positive threshold
         derSeries.add(x1, null);
@@ -360,7 +358,12 @@ public class HiLoPeakFinder
         return hiloSeries;
     }
 
+    //----------//
+    // getPeaks //
+    //----------//
     /**
+     * Report the sequence of detected peaks.
+     *
      * @return the peaks
      */
     public List<Range> getPeaks ()
@@ -487,6 +490,7 @@ public class HiLoPeakFinder
      *
      * @param plotter  plotter to populate
      * @param withZero true for zero line
+     * @param key      function name
      * @return plotter (for daisy chaining if so desired)
      */
     public ChartPlotter plot (ChartPlotter plotter,
@@ -578,7 +582,7 @@ public class HiLoPeakFinder
     // retrieveHiLos //
     //---------------//
     /**
-     * Retrieve sequence of HiLo's using derivative hysteresis.
+     * Retrieve the sequence of HiLo's using derivative hysteresis.
      * <p>
      * We look for sequences of one strong positive derivative peak closely followed by one strong
      * negative derivative peak.
@@ -600,7 +604,7 @@ public class HiLoPeakFinder
                 // Strong positive derivatives
                 if (loPeak != null) {
                     // End HiLo because a new Hi is starting
-                    Range hilo = new Range(
+                    final Range hilo = new Range(
                             hiPeak.min,
                             function.argMax(hiPeak.min, loPeak.max),
                             loPeak.max);
@@ -625,7 +629,7 @@ public class HiLoPeakFinder
                 }
             } else if (loPeak != null) {
                 // End HiLo because of weak derivatives
-                Range hilo = new Range(
+                final Range hilo = new Range(
                         hiPeak.min,
                         function.argMax(hiPeak.min, loPeak.max),
                         loPeak.max);
@@ -654,6 +658,16 @@ public class HiLoPeakFinder
     public void setQuorum (Quorum quorum)
     {
         this.quorum = quorum;
+    }
+
+    //----------//
+    // toString //
+    //----------//
+    @Override
+    public String toString ()
+    {
+        return new StringBuilder(getClass().getSimpleName()) //
+                .append('{').append(name).append('}').toString();
     }
 
     //~ Inner Classes ------------------------------------------------------------------------------
@@ -697,19 +711,13 @@ public class HiLoPeakFinder
      */
     public static class Quorum
     {
-        /**
-         * Quorum minimum value.
-         */
+        /** Quorum minimum value. */
         public final int yMin;
 
-        /**
-         * Range start if any.
-         */
+        /** Range start if any. */
         public final Integer xMin;
 
-        /**
-         * Range stop if any.
-         */
+        /** Range stop if any. */
         public final Integer xMax;
 
         /**

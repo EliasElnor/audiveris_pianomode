@@ -41,6 +41,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.awt.Point;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 
@@ -104,6 +106,10 @@ public class ScaleBuilder
 
     private static final Logger logger = LoggerFactory.getLogger(ScaleBuilder.class);
 
+    /** To sort peaks by main key. */
+    private static final Comparator<Range> byMainKey = (e1,
+                                                        e2) -> Double.compare(e1.main, e2.main);
+
     //~ Instance fields ----------------------------------------------------------------------------
 
     /** Related sheet. */
@@ -134,6 +140,7 @@ public class ScaleBuilder
     /** Guessed beam thickness if ever, for lack of 'beamKey'. */
     private Integer beamGuess;
 
+    /** User-specified interline value, if any. */
     private Integer interlineKey;
 
     //~ Constructors -------------------------------------------------------------------------------
@@ -216,6 +223,22 @@ public class ScaleBuilder
             return;
         }
 
+        final int largerInterline = interlineKey != null ? interlineKey
+                : (comboPeak2 == null) ? comboPeak.main : Math.max(comboPeak.main, comboPeak2.main);
+        final int minHeight = Math.max(
+                blackPeak.max,
+                (int) Math.rint(constants.beamMinFraction.getValue() * largerInterline));
+        final int maxHeight = Math.min(
+                largerInterline - blackPeak.min / 2,
+                (int) Math.rint(constants.beamMaxFraction.getValue() * largerInterline));
+        final double beamRatio = constants.beamRangeRatio.getValue();
+
+        // Beam measurement
+        final int quorum = histoKeeper.getBeamQuorum();
+        // NOTA: At this point in time, blackFinder.findPeaks() has already been used for staff line.
+        // Setting quorum for blackFinder here is just for the potential plot
+        histoKeeper.blackFinder.setQuorum(new Quorum(quorum, minHeight, maxHeight));
+
         // Significant beam peak detected?
         if (beamKey != null) {
             if (verbose) {
@@ -226,32 +249,16 @@ public class ScaleBuilder
         }
 
         // Beam guess
-        final int largerInterline = interlineKey != null ? interlineKey
-                : (comboPeak2 == null) ? comboPeak.main : Math.max(comboPeak.main, comboPeak2.main);
-        final int minHeight = Math.max(
-                blackPeak.max,
-                (int) Math.rint(constants.beamMinFraction.getValue() * largerInterline));
-        final int maxHeight = Math.min(
-                largerInterline - blackPeak.min / 2,
-                (int) Math.rint(constants.beamMaxFraction.getValue() * largerInterline));
-        final double beamRatio = constants.beamRangeRatio.getValue();
-        beamGuess = (int) Math.rint(maxHeight * beamRatio);
-
+        ///beamGuess = (int) Math.rint(maxHeight * beamRatio);
+        beamGuess = (minHeight + maxHeight) / 2;
         if (verbose) {
             logger.info(
                     String.format(
-                            "Beam  guessed height: %2d -- %.2f of %d interline",
+                            "Beam  guessed height: %2d -- mid of [%d..%d]",
                             beamGuess,
-                            beamRatio,
+                            minHeight,
                             maxHeight));
         }
-
-        // Beam measurement
-        final int quorum = histoKeeper.getBeamQuorum();
-
-        // NOTA: At this point in time, blackFinder.findPeaks() has already been used for staff line.
-        // Setting quorum for blackFinder here is just for the potential plot
-        histoKeeper.blackFinder.setQuorum(new Quorum(quorum, minHeight, maxHeight));
 
         final List<Integer> peaks = histoKeeper.blackFunction.getLocalMaxima(minHeight, maxHeight);
 
@@ -341,11 +348,13 @@ public class ScaleBuilder
             binary = sheet.getPicture().getVerticalTable(Picture.TableKey.BINARY);
             histoKeeper = new HistoKeeper();
 
+            // Populate histograms
             histoKeeper.buildBlacks();
-            histoKeeper.retrieveLinePeak(); // -> blackPeak (or StepException), beamKey?
-
             histoKeeper.buildCombos();
+
             histoKeeper.retrieveInterlinePeaks(); // -> comboPeak (or StepException), comboPeak2?
+
+            histoKeeper.retrieveLinePeak(); // -> blackPeak (or StepException), beamKey?
 
             if (dummy) {
                 computeBeamKeys(false); // Just for the chart
@@ -489,6 +498,10 @@ public class ScaleBuilder
                 1.9, // 2.0 led to a false second peak in merged grand staff
                 "Maximum ratio between second and first combined peak");
 
+        private final Constant.Ratio maxLineRatio = new Constant.Ratio(
+                0.5,
+                "Maximum ratio of line thickness over interline");
+
         private final Constant.Ratio beamMinFraction = new Constant.Ratio(
                 0.275,
                 "Minimum ratio between beam height and interline");
@@ -614,26 +627,21 @@ public class ScaleBuilder
                     final int y = run.getStart();
                     final int black = run.getLength();
 
-                    if ((black < blackPeak.min) || (black > blackPeak.max)) {
-                        lastBlack = 0;
-                    } else {
-                        if (y > yLast) {
-                            // Process the white run before this black run
-                            final int white = y - yLast;
+                    if (y > yLast) {
+                        // Process the white run before this black run
+                        final int white = y - yLast;
 
-                            // A white run between valid black runs?: B1, W, B2
-                            // Combo 1 is defined as B1 + W, that is [-----]
-                            // Combo 2 is defined as W + B2, that is     [-----]
-                            // combo1 + combo2 = 2 * (1/2 * B1 + W + 1/2 * B2) = 2 * combo
-                            if ((white <= maxWhite) && (lastBlack != 0)) {
-                                comboFunction.addValue(lastBlack + white, 1); // B1 + W
-                                comboFunction.addValue(white + black, 1); // W + B2
-                            }
+                        // A white run between valid black runs?: B1, W, B2
+                        // Combo 1 is defined as B1 + W, that is [-----]
+                        // Combo 2 is defined as W + B2, that is     [-----]
+                        // combo1 + combo2 = 2 * (1/2 * B1 + W + 1/2 * B2) = 2 * combo
+                        if ((white <= maxWhite) && (lastBlack != 0)) {
+                            comboFunction.addValue(lastBlack + white, 1); // B1 + W
+                            comboFunction.addValue(white + black, 1); // W + B2
                         }
-
-                        lastBlack = black;
                     }
 
+                    lastBlack = black;
                     yLast = y + black;
                 }
             }
@@ -788,6 +796,11 @@ public class ScaleBuilder
          * <p>
          * So, either we rely on user-declared switches regarding the staff lines,
          * or, preferably, we check for the existence of two significant black peaks.
+         * <p>
+         * We also have to correctly handle the case of a wide variety in staff line thickness that
+         * can result in two rather close peaks.
+         * We have to detect the case and merge the two peaks, rather than taking the first peak
+         * as staff line peak and taking the second peak as a beam peak.
          */
         public void retrieveLinePeak ()
             throws StepException
@@ -824,11 +837,24 @@ public class ScaleBuilder
             }
 
             if (blackPeaks.size() > 1) {
-                // Beside the line peak, we also have a significant beam peak
+                // We can have a double line peak
+                // Or, beside the line peak, we can have a significant beam peak
+                Collections.sort(blackPeaks, byMainKey);
+
                 final Range p0 = blackPeaks.get(0);
                 final Range p1 = blackPeaks.get(1);
-                blackPeak = (p1.main < p0.main) ? p1 : p0;
-                beamKey = (p1.main < p0.main) ? p0.main : p1.main;
+                final double maxLineRatio = constants.maxLineRatio.getValue();
+                final int maxLineKey = (int) Math.rint(comboPeak.main * maxLineRatio);
+
+                if (p1.main <= maxLineKey) {
+                    // Double line peak
+                    logger.debug("Merging two line black peaks {} & {}", p0, p1);
+                    blackPeak = new Range(p0.min, p1.main, p1.max);
+                } else {
+                    // Significant beam peak
+                    blackPeak = p0;
+                    beamKey = p1.main;
+                }
             } else {
                 blackPeak = blackPeaks.get(0);
             }
