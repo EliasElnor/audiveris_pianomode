@@ -64,7 +64,6 @@ import org.slf4j.LoggerFactory;
 
 import java.awt.Rectangle;
 import java.awt.geom.Line2D;
-import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -354,7 +353,7 @@ public class ChordsBuilder
         final boolean multiWhole = switches.getValue(ProcessingSwitch.multiWholeHeadChords);
         final int maxDeltaPitch = constants.maxDeltaPitch.getValue();
         final Scale scale = system.getSheet().getScale();
-        final double xTolerance = scale.getInterline().doubleValue() / 2.0;
+        final int maxHorizontalGap = scale.toPixels(constants.maxHorizontalGap);
 
         Collections.sort(wholeHeads, Inters.byCenterOrdinate);
 
@@ -384,10 +383,9 @@ public class ChordsBuilder
                     }
 
                     // Check horizontal fit: direct overlap or very close horizontally
-                    Rectangle bChord = chord.getBounds();
-                    Rectangle b2 = h2.getBounds();
-                    boolean xMatch = (GeoUtil.xOverlap(bChord, b2) > 0)
-                            || (GeoUtil.xGap(bChord, b2) < xTolerance);
+                    final Rectangle bChord = chord.getBounds();
+                    final Rectangle b2 = h2.getBounds();
+                    final boolean xMatch = GeoUtil.xGap(bChord, b2) <= maxHorizontalGap;
 
                     if (xMatch) {
                         chord.addMember(h2);
@@ -564,5 +562,9 @@ public class ChordsBuilder
                 "pitch",
                 12,
                 "Maximum delta pitch between two wholes in the same chord");
+
+        private final Scale.Fraction maxHorizontalGap = new Scale.Fraction(
+                0.5,
+                "Maximum horizontal gap between two wholes in the same chord");
     }
 }
