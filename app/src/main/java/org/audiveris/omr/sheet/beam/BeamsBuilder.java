@@ -640,7 +640,7 @@ public class BeamsBuilder
             final double meanJitter = 0.5 * (topJitter + botJitter);
             distImpact = 1 - (meanJitter / params.maxJitterRatio);
         } catch (Exception ex) {
-            logger.info("Error computing beam jitter {} {}", ex.toString(), structure);
+            logger.debug("Error computing beam jitter {} {}", ex.toString(), structure);
 
             return false;
         }
