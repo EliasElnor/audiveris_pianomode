@@ -1383,6 +1383,7 @@ public class SheetStub
             final EnumSet<OmrStep> neededSteps = getNeededSteps(target);
 
             if (neededSteps.isEmpty()) {
+                ok = true;
                 return;
             }
 
