@@ -353,8 +353,8 @@ if (file_exists(get_stylesheet_directory() . '/assets/games/functions-games.php'
  * 100% client-side OMR (Optical Music Recognition) — no server dependencies.
  * REST API for saving results + Admin dashboard for scan management.
  */
-require_once get_stylesheet_directory() . '/page-omr-scanner-api.php';
-require_once get_stylesheet_directory() . '/omr-admin.php';
+require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-scanner-api.php';
+require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
 
 /**
  * Enqueue OCR Scanner assets when the template is active
@@ -365,7 +365,7 @@ function pianomode_omr_scanner_assets() {
     }
     wp_enqueue_style(
         'pm-omr-scanner',
-        get_stylesheet_directory_uri() . '/assets/css/omr-scanner.css',
+        get_stylesheet_directory_uri() . '/assets/OCR-Scan/omr-scanner.css',
         [],
         '2.0.0'
     );
