@@ -1,11 +1,12 @@
 <?php
 /**
  * Template Name: OCR Scanner - Partition vers MIDI
- * Description: Upload a sheet music photo or PDF, process it through Audiveris OMR,
- *              and play the result with AlphaTab (interactive piano player).
+ * Description: Upload a sheet music photo or PDF, process it 100% in the browser
+ *              using the PianoMode OMR engine, and play/download as MusicXML + MIDI.
+ *              No server dependencies — everything runs client-side.
  *
  * @package Blocksy-child
- * @version 1.0.0
+ * @version 2.0.0
  */
 
 get_header();
@@ -27,7 +28,8 @@ $theme_uri = get_stylesheet_directory_uri();
             </div>
             <h1>Sheet Music <span>OCR Scanner</span></h1>
             <p>Transform any photo or PDF of sheet music into an interactive, playable score.
-               Upload your partition and listen to it instantly with real piano sounds.</p>
+               Upload your partition and listen to it instantly with real piano sounds.<br>
+               <strong>100% browser-based</strong> — no installation required.</p>
         </div>
     </section>
 
@@ -45,7 +47,7 @@ $theme_uri = get_stylesheet_directory_uri();
             </svg>
 
             <h3>Drag & drop your score here or <span>browse</span></h3>
-            <p class="pm-omr-upload-hint">PDF, PNG, JPG or TIFF — Max 20 MB</p>
+            <p class="pm-omr-upload-hint">PDF, PNG, JPG or TIFF — Max 20 MB — Processed locally in your browser</p>
 
             <!-- File preview -->
             <div class="pm-omr-file-preview" id="omr-file-preview">
@@ -102,6 +104,15 @@ $theme_uri = get_stylesheet_directory_uri();
                 </li>
             </ul>
             <div class="pm-omr-progress-status" id="omr-progress-status"></div>
+        </div>
+
+        <!-- Detection Preview Canvas (shows detected notes overlay) -->
+        <div class="pm-omr-preview" id="omr-preview" style="display:none;">
+            <div class="pm-omr-preview-header">
+                <span>Detection Preview</span>
+                <button type="button" class="pm-omr-preview-toggle" id="omr-preview-toggle">Hide</button>
+            </div>
+            <canvas id="omr-preview-canvas" style="width:100%; border-radius:8px;"></canvas>
         </div>
 
         <!-- Result Panel -->
@@ -176,13 +187,19 @@ $theme_uri = get_stylesheet_directory_uri();
                 </div>
             </div>
 
-            <!-- Download / New scan actions -->
+            <!-- Download actions: MusicXML + MIDI + New Scan -->
             <div class="pm-omr-actions" id="omr-actions">
-                <a class="pm-omr-action-btn pm-omr-action-btn--download" id="omr-download-btn" href="#" download>
+                <a class="pm-omr-action-btn pm-omr-action-btn--download" id="omr-download-xml" href="#" download>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                     </svg>
                     Download MusicXML
+                </a>
+                <a class="pm-omr-action-btn pm-omr-action-btn--midi" id="omr-download-midi" href="#" download>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                        <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                    </svg>
+                    Download MIDI
                 </a>
                 <button type="button" class="pm-omr-action-btn pm-omr-action-btn--new" id="omr-new-scan-btn">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
@@ -191,6 +208,9 @@ $theme_uri = get_stylesheet_directory_uri();
                     New Scan
                 </button>
             </div>
+
+            <!-- Stats -->
+            <div class="pm-omr-stats" id="omr-stats"></div>
         </div>
 
         <!-- How It Works -->
@@ -214,7 +234,7 @@ $theme_uri = get_stylesheet_directory_uri();
                         </svg>
                     </div>
                     <h3>OCR Analysis</h3>
-                    <p>Our engine detects staves, notes, rests, dynamics and all musical symbols.</p>
+                    <p>Our browser-based engine detects staves, notes, rests and musical symbols — no server needed.</p>
                 </div>
                 <div class="pm-omr-how-card">
                     <div class="pm-omr-how-card-icon">
@@ -223,8 +243,8 @@ $theme_uri = get_stylesheet_directory_uri();
                             <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                         </svg>
                     </div>
-                    <h3>MusicXML</h3>
-                    <p>The score is converted to standard MusicXML, a universal digital music format.</p>
+                    <h3>MusicXML &amp; MIDI</h3>
+                    <p>The score is converted to MusicXML and MIDI — download both formats instantly.</p>
                 </div>
                 <div class="pm-omr-how-card">
                     <div class="pm-omr-how-card-icon">
@@ -232,8 +252,8 @@ $theme_uri = get_stylesheet_directory_uri();
                             <polygon points="5 3 19 12 5 21 5 3"/>
                         </svg>
                     </div>
-                    <h3>Listen & Play</h3>
-                    <p>The interactive player renders the score and plays it with realistic piano sounds.</p>
+                    <h3>Listen &amp; Play</h3>
+                    <p>The interactive player renders the score and plays it with realistic piano sounds. Use the MIDI in Piano Hero!</p>
                 </div>
             </div>
 
@@ -242,14 +262,28 @@ $theme_uri = get_stylesheet_directory_uri();
                 <span class="pm-omr-format-badge">PNG</span>
                 <span class="pm-omr-format-badge">JPG</span>
                 <span class="pm-omr-format-badge">TIFF</span>
-                <span class="pm-omr-format-badge">→ MusicXML</span>
+                <span class="pm-omr-format-badge">&rarr; MusicXML</span>
+                <span class="pm-omr-format-badge">&rarr; MIDI</span>
             </div>
         </section>
 
     </div><!-- .pm-omr-container -->
 </div><!-- .pm-omr-page -->
 
-<!-- ===== AlphaTab Library ===== -->
+<!-- ===== External Libraries ===== -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+    if (typeof pdfjsLib !== 'undefined') {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+</script>
+
+<!-- OMR Engine (client-side) -->
+<script src="<?php echo esc_url( $theme_uri . '/assets/js/omr-engine-part1.js' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/js/omr-engine-part2.js' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/js/omr-engine-part3.js' ); ?>"></script>
+
+<!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
 
 <!-- ===== Inline JavaScript ===== -->
@@ -260,37 +294,40 @@ $theme_uri = get_stylesheet_directory_uri();
     // -------------------------------------------------------
     // DOM references
     // -------------------------------------------------------
-    const dropzone      = document.getElementById('omr-dropzone');
-    const fileInput      = document.getElementById('omr-file-input');
-    const filePreview    = document.getElementById('omr-file-preview');
-    const fileName       = document.getElementById('omr-file-name');
-    const fileSize       = document.getElementById('omr-file-size');
-    const fileRemove     = document.getElementById('omr-file-remove');
-    const scanBtn        = document.getElementById('omr-scan-btn');
-    const progressPanel  = document.getElementById('omr-progress');
-    const progressStatus = document.getElementById('omr-progress-status');
-    const errorPanel     = document.getElementById('omr-error');
-    const errorText      = document.getElementById('omr-error-text');
-    const errorClose     = document.getElementById('omr-error-close');
-    const resultPanel    = document.getElementById('omr-result');
-    const downloadBtn    = document.getElementById('omr-download-btn');
-    const newScanBtn     = document.getElementById('omr-new-scan-btn');
+    var dropzone       = document.getElementById('omr-dropzone');
+    var fileInput      = document.getElementById('omr-file-input');
+    var filePreview    = document.getElementById('omr-file-preview');
+    var fileName       = document.getElementById('omr-file-name');
+    var fileSize       = document.getElementById('omr-file-size');
+    var fileRemove     = document.getElementById('omr-file-remove');
+    var scanBtn        = document.getElementById('omr-scan-btn');
+    var progressPanel  = document.getElementById('omr-progress');
+    var progressStatus = document.getElementById('omr-progress-status');
+    var errorPanel     = document.getElementById('omr-error');
+    var errorText      = document.getElementById('omr-error-text');
+    var errorClose     = document.getElementById('omr-error-close');
+    var resultPanel    = document.getElementById('omr-result');
+    var downloadXml    = document.getElementById('omr-download-xml');
+    var downloadMidi   = document.getElementById('omr-download-midi');
+    var newScanBtn     = document.getElementById('omr-new-scan-btn');
+    var statsPanel     = document.getElementById('omr-stats');
+    var previewPanel   = document.getElementById('omr-preview');
+    var previewCanvas  = document.getElementById('omr-preview-canvas');
+    var previewToggle  = document.getElementById('omr-preview-toggle');
 
     // AlphaTab elements
-    const atMain         = document.getElementById('omr-at-main');
-    const atProgress     = document.getElementById('omr-at-progress');
-    const atPlay         = document.getElementById('omr-at-play');
-    const atStop         = document.getElementById('omr-at-stop');
-    const atPlayIcon     = document.getElementById('omr-at-play-icon');
-    const atTime         = document.getElementById('omr-at-time');
-    const atTempoValue   = document.getElementById('omr-at-tempo-value');
-    const atVolume       = document.getElementById('omr-at-volume');
+    var atMain       = document.getElementById('omr-at-main');
+    var atProgress   = document.getElementById('omr-at-progress');
+    var atPlay       = document.getElementById('omr-at-play');
+    var atStop       = document.getElementById('omr-at-stop');
+    var atPlayIcon   = document.getElementById('omr-at-play-icon');
+    var atTime       = document.getElementById('omr-at-time');
+    var atTempoValue = document.getElementById('omr-at-tempo-value');
+    var atVolume     = document.getElementById('omr-at-volume');
 
-    let selectedFile = null;
-    let atApi = null;
-
-    // REST endpoint
-    const API_URL = '<?php echo esc_url( rest_url( 'pianomode/v1/omr-scan' ) ); ?>';
+    var selectedFile = null;
+    var atApi = null;
+    var lastResult = null;
 
     // -------------------------------------------------------
     // Utilities
@@ -305,61 +342,50 @@ $theme_uri = get_stylesheet_directory_uri();
     function hide(el) { el.classList.remove('visible'); }
 
     // -------------------------------------------------------
-    // Dropzone / File selection
+    // Dropzone
     // -------------------------------------------------------
-    function initDropzone() {
-        // Click to browse
-        dropzone.addEventListener('click', function(e) {
-            if (e.target.closest('.pm-omr-file-remove')) return;
-            fileInput.click();
-        });
+    dropzone.addEventListener('click', function(e) {
+        if (e.target.closest('.pm-omr-file-remove')) return;
+        fileInput.click();
+    });
 
-        fileInput.addEventListener('change', function() {
-            if (this.files.length) handleFile(this.files[0]);
-        });
+    fileInput.addEventListener('change', function() {
+        if (this.files.length) handleFile(this.files[0]);
+    });
 
-        // Drag events
-        ['dragenter', 'dragover'].forEach(function(evt) {
-            dropzone.addEventListener(evt, function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                dropzone.classList.add('dragover');
-            });
+    ['dragenter', 'dragover'].forEach(function(evt) {
+        dropzone.addEventListener(evt, function(e) {
+            e.preventDefault(); e.stopPropagation();
+            dropzone.classList.add('dragover');
         });
+    });
 
-        ['dragleave', 'drop'].forEach(function(evt) {
-            dropzone.addEventListener(evt, function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                dropzone.classList.remove('dragover');
-            });
+    ['dragleave', 'drop'].forEach(function(evt) {
+        dropzone.addEventListener(evt, function(e) {
+            e.preventDefault(); e.stopPropagation();
+            dropzone.classList.remove('dragover');
         });
+    });
 
-        dropzone.addEventListener('drop', function(e) {
-            var files = e.dataTransfer.files;
-            if (files.length) handleFile(files[0]);
-        });
+    dropzone.addEventListener('drop', function(e) {
+        if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
 
-        // Remove file
-        fileRemove.addEventListener('click', function(e) {
-            e.stopPropagation();
-            clearFile();
-        });
-    }
+    fileRemove.addEventListener('click', function(e) {
+        e.stopPropagation();
+        clearFile();
+    });
 
     function handleFile(file) {
-        // Validate extension
         var allowed = ['application/pdf', 'image/png', 'image/jpeg', 'image/tiff'];
-        if (allowed.indexOf(file.type) === -1) {
+        if (allowed.indexOf(file.type) === -1 && !file.name.match(/\.(pdf|png|jpe?g|tiff?)$/i)) {
             showError('Please select a PDF, PNG, JPG, or TIFF file.');
             return;
         }
-        // Validate size (20 MB)
         if (file.size > 20 * 1024 * 1024) {
             showError('File is too large. Maximum size is 20 MB.');
             return;
         }
-
         selectedFile = file;
         fileName.textContent = file.name;
         fileSize.textContent = formatBytes(file.size);
@@ -384,11 +410,7 @@ $theme_uri = get_stylesheet_directory_uri();
         errorText.textContent = msg;
         show(errorPanel);
     }
-
-    function hideError() {
-        hide(errorPanel);
-    }
-
+    function hideError() { hide(errorPanel); }
     errorClose.addEventListener('click', hideError);
 
     // -------------------------------------------------------
@@ -398,91 +420,78 @@ $theme_uri = get_stylesheet_directory_uri();
 
     function updateProgress(activeStep, statusText) {
         show(progressPanel);
-        steps.forEach(function(s) {
-            var n = parseInt(s.getAttribute('data-step'), 10);
-            s.classList.remove('active', 'done', 'error');
-            if (n < activeStep) s.classList.add('done');
-            else if (n === activeStep) s.classList.add('active');
-        });
+        for (var i = 0; i < steps.length; i++) {
+            var n = parseInt(steps[i].getAttribute('data-step'), 10);
+            steps[i].classList.remove('active', 'done', 'error');
+            if (n < activeStep) steps[i].classList.add('done');
+            else if (n === activeStep) steps[i].classList.add('active');
+        }
         progressStatus.textContent = statusText || '';
     }
 
     function markStepError(step, statusText) {
-        steps.forEach(function(s) {
-            var n = parseInt(s.getAttribute('data-step'), 10);
-            s.classList.remove('active');
-            if (n === step) s.classList.add('error');
-        });
+        for (var i = 0; i < steps.length; i++) {
+            var n = parseInt(steps[i].getAttribute('data-step'), 10);
+            steps[i].classList.remove('active');
+            if (n === step) steps[i].classList.add('error');
+        }
         progressStatus.textContent = statusText || '';
     }
 
     function resetProgress() {
         hide(progressPanel);
-        steps.forEach(function(s) { s.classList.remove('active', 'done', 'error'); });
+        for (var i = 0; i < steps.length; i++) {
+            steps[i].classList.remove('active', 'done', 'error');
+        }
         progressStatus.textContent = '';
     }
 
     // -------------------------------------------------------
-    // Upload & Process
+    // Scan: run OMR engine client-side
     // -------------------------------------------------------
     scanBtn.addEventListener('click', function() {
         if (!selectedFile) return;
-        uploadAndProcess(selectedFile);
+        processFile(selectedFile);
     });
 
-    function uploadAndProcess(file) {
-        // Reset UI
+    function processFile(file) {
         hideError();
         hide(resultPanel);
+        previewPanel.style.display = 'none';
         scanBtn.disabled = true;
         scanBtn.textContent = 'Processing...';
 
-        // Step 1: Upload
-        updateProgress(1, 'Uploading your score...');
+        // Use the client-side OMR engine
+        PianoModeOMR.Engine.process(file, function(step, message) {
+            updateProgress(step, message);
+        }).then(function(result) {
+            lastResult = result;
 
-        var formData = new FormData();
-        formData.append('score_file', file);
+            // Show detection preview
+            drawPreview(result);
 
-        fetch(API_URL, {
-            method: 'POST',
-            body: formData,
-            credentials: 'same-origin'
-        })
-        .then(function(response) {
-            // Step 2: OCR
-            updateProgress(2, 'Analysing musical notation (this may take a minute)...');
-            return response.json().then(function(data) {
-                return { ok: response.ok, status: response.status, data: data };
-            });
-        })
-        .then(function(result) {
-            if (!result.ok) {
-                var errMsg = (result.data && result.data.message) ? result.data.message : 'An error occurred during processing.';
-                throw new Error(errMsg);
-            }
+            // Setup downloads
+            var baseName = file.name.replace(/\.[^.]+$/, '');
+            downloadXml.href = result.musicxmlUrl;
+            downloadXml.setAttribute('download', baseName + '.musicxml');
+            downloadMidi.href = result.midiUrl;
+            downloadMidi.setAttribute('download', baseName + '.mid');
 
-            // Step 3: Conversion complete
-            updateProgress(3, 'MusicXML generated, loading player...');
+            // Stats
+            statsPanel.innerHTML =
+                '<strong>' + result.noteCount + '</strong> notes detected in ' +
+                '<strong>' + result.staves.length + '</strong> staff(s) — ' +
+                result.events.length + ' musical events';
 
-            var musicxmlUrl = result.data.musicxml_url;
-            var filename    = result.data.filename;
+            // Load in AlphaTab
+            updateProgress(4, 'Score ready — loading player...');
+            show(resultPanel);
+            initAlphaTab(result.musicxmlUrl);
 
-            // Setup download
-            downloadBtn.href = musicxmlUrl;
-            downloadBtn.setAttribute('download', filename);
+            scanBtn.textContent = 'Analyse & Convert to Playable Score';
+            scanBtn.disabled = false;
 
-            // Step 4: Load in AlphaTab
-            setTimeout(function() {
-                updateProgress(4, 'Score ready!');
-                initAlphaTab(musicxmlUrl);
-                show(resultPanel);
-
-                // Reset button
-                scanBtn.textContent = 'Analyse & Convert to Playable Score';
-                scanBtn.disabled = false;
-            }, 500);
-        })
-        .catch(function(err) {
+        }).catch(function(err) {
             markStepError(2, err.message);
             showError(err.message);
             scanBtn.textContent = 'Analyse & Convert to Playable Score';
@@ -491,10 +500,67 @@ $theme_uri = get_stylesheet_directory_uri();
     }
 
     // -------------------------------------------------------
+    // Detection preview canvas
+    // -------------------------------------------------------
+    function drawPreview(result) {
+        if (!result || !result.staves || result.staves.length === 0) return;
+
+        previewPanel.style.display = 'block';
+
+        // We re-process to get the canvas — use the stored data
+        var isPDF = selectedFile.type === 'application/pdf' || selectedFile.name.toLowerCase().endsWith('.pdf');
+        var loadFn = isPDF ? PianoModeOMR.ImageProcessor.loadPDF : PianoModeOMR.ImageProcessor.loadImage;
+
+        loadFn(selectedFile).then(function(loaded) {
+            previewCanvas.width = loaded.width;
+            previewCanvas.height = loaded.height;
+            var ctx = previewCanvas.getContext('2d');
+            ctx.drawImage(loaded.canvas, 0, 0);
+
+            // Draw staff lines in blue
+            ctx.strokeStyle = 'rgba(0, 120, 255, 0.5)';
+            ctx.lineWidth = 2;
+            for (var s = 0; s < result.staves.length; s++) {
+                var staff = result.staves[s];
+                for (var l = 0; l < staff.lines.length; l++) {
+                    var y = staff.lines[l];
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(loaded.width, y);
+                    ctx.stroke();
+                }
+            }
+
+            // Draw detected noteheads in red/green
+            for (var i = 0; i < result.noteHeads.length; i++) {
+                var nh = result.noteHeads[i];
+                ctx.strokeStyle = nh.isFilled ? 'rgba(255, 60, 60, 0.8)' : 'rgba(60, 200, 60, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(nh.minX, nh.minY, nh.width, nh.height);
+
+                // Label with pitch
+                ctx.fillStyle = '#FFD700';
+                ctx.font = 'bold 12px monospace';
+                ctx.fillText(nh.pitchName || '', nh.minX, nh.minY - 4);
+            }
+        });
+    }
+
+    previewToggle.addEventListener('click', function() {
+        var canvas = previewCanvas;
+        if (canvas.style.display === 'none') {
+            canvas.style.display = 'block';
+            previewToggle.textContent = 'Hide';
+        } else {
+            canvas.style.display = 'none';
+            previewToggle.textContent = 'Show';
+        }
+    });
+
+    // -------------------------------------------------------
     // AlphaTab Initialization
     // -------------------------------------------------------
     function initAlphaTab(musicxmlUrl) {
-        // Destroy previous instance if any
         if (atApi) {
             try { atApi.destroy(); } catch(e) {}
             atApi = null;
@@ -503,6 +569,7 @@ $theme_uri = get_stylesheet_directory_uri();
 
         atProgress.textContent = 'Loading...';
         atProgress.style.opacity = '1';
+        atProgress.style.display = '';
         atPlay.disabled = true;
         atStop.disabled = true;
         atTime.textContent = '00:00 / 00:00';
@@ -549,73 +616,46 @@ $theme_uri = get_stylesheet_directory_uri();
 
         atApi = new alphaTab.AlphaTabApi(atMain, settings);
 
-        // Error handling
         atApi.error.on(function(e) {
             atProgress.textContent = 'Error loading score';
             atProgress.style.color = '#ff4444';
-            console.error('[AlphaTab] Error:', e.message || e);
         });
 
-        // Score loaded — find piano track
         atApi.scoreLoaded.on(function(score) {
             if (!score.tracks || score.tracks.length === 0) return;
-
             var pianoTrack = null;
             var maxNotes = 0;
 
             for (var i = 0; i < score.tracks.length; i++) {
                 var track = score.tracks[i];
-
-                // Priority: track named "Piano"
                 if (track.name && track.name.toLowerCase().indexOf('piano') !== -1) {
                     pianoTrack = track;
                     break;
                 }
-
-                // Fallback: track with most notes
                 var noteCount = 0;
-                if (track.staves && track.staves.length > 0) {
+                if (track.staves) {
                     track.staves.forEach(function(staff) {
-                        if (staff.bars && staff.bars.length > 0) {
-                            staff.bars.forEach(function(bar) {
-                                if (bar.voices && bar.voices.length > 0) {
-                                    bar.voices.forEach(function(voice) {
-                                        if (voice.beats && voice.beats.length > 0) {
-                                            voice.beats.forEach(function(beat) {
-                                                if (!beat.isRest && beat.notes) {
-                                                    noteCount += beat.notes.length;
-                                                }
-                                            });
-                                        }
-                                    });
-                                }
+                        if (staff.bars) staff.bars.forEach(function(bar) {
+                            if (bar.voices) bar.voices.forEach(function(voice) {
+                                if (voice.beats) voice.beats.forEach(function(beat) {
+                                    if (!beat.isRest && beat.notes) noteCount += beat.notes.length;
+                                });
                             });
-                        }
+                        });
                     });
                 }
-
-                if (noteCount > maxNotes) {
-                    maxNotes = noteCount;
-                    pianoTrack = track;
-                }
+                if (noteCount > maxNotes) { maxNotes = noteCount; pianoTrack = track; }
             }
 
-            if (pianoTrack) {
-                atApi.renderTracks([pianoTrack]);
-            } else {
-                atApi.renderTracks([score.tracks[0]]);
-            }
+            atApi.renderTracks([pianoTrack || score.tracks[0]]);
         });
 
-        // Loading events
         atApi.soundFontLoad.on(function(e) {
             var pct = Math.floor((e.loaded / e.total) * 100);
             atProgress.textContent = 'Loading sounds... ' + pct + '%';
         });
 
-        atApi.renderStarted.on(function() {
-            atProgress.textContent = 'Rendering...';
-        });
+        atApi.renderStarted.on(function() { atProgress.textContent = 'Rendering...'; });
 
         atApi.renderFinished.on(function() {
             atProgress.textContent = 'Ready';
@@ -629,7 +669,6 @@ $theme_uri = get_stylesheet_directory_uri();
             atApi.masterVolume = atVolume.value / 100;
         });
 
-        // Play / Pause
         atPlay.onclick = function() { atApi.playPause(); };
         atStop.onclick = function() { atApi.stop(); };
 
@@ -641,18 +680,14 @@ $theme_uri = get_stylesheet_directory_uri();
             }
         });
 
-        // Time display
         atApi.playerPositionChanged.on(function(e) {
             function fmt(ms) {
-                var s = Math.floor(ms / 1000);
-                var m = Math.floor(s / 60);
-                var sec = s % 60;
+                var s = Math.floor(ms / 1000), m = Math.floor(s / 60), sec = s % 60;
                 return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
             }
             atTime.textContent = fmt(e.currentTime) + ' / ' + fmt(e.endTime);
         });
 
-        // Tempo controls
         document.getElementById('omr-at-tempo-down').onclick = function() {
             currentTempo = Math.max(0.25, currentTempo - 0.1);
             atApi.playbackSpeed = currentTempo;
@@ -664,7 +699,6 @@ $theme_uri = get_stylesheet_directory_uri();
             atTempoValue.textContent = Math.round(currentTempo * 100) + '%';
         };
 
-        // Toggle buttons
         var metronomeBtn = document.getElementById('omr-at-metronome');
         metronomeBtn.onclick = function() {
             metronomeBtn.classList.toggle('active');
@@ -683,10 +717,7 @@ $theme_uri = get_stylesheet_directory_uri();
             atApi.countInVolume = countinBtn.classList.contains('active') ? 1 : 0;
         };
 
-        // Volume
-        atVolume.oninput = function() {
-            atApi.masterVolume = this.value / 100;
-        };
+        atVolume.oninput = function() { atApi.masterVolume = this.value / 100; };
     }
 
     // -------------------------------------------------------
@@ -696,6 +727,8 @@ $theme_uri = get_stylesheet_directory_uri();
         hide(resultPanel);
         resetProgress();
         clearFile();
+        previewPanel.style.display = 'none';
+        statsPanel.innerHTML = '';
 
         if (atApi) {
             try { atApi.destroy(); } catch(e) {}
@@ -703,14 +736,15 @@ $theme_uri = get_stylesheet_directory_uri();
             atMain.innerHTML = '';
         }
 
-        // Scroll to top of upload zone
+        // Revoke object URLs to free memory
+        if (lastResult) {
+            try { URL.revokeObjectURL(lastResult.musicxmlUrl); } catch(e) {}
+            try { URL.revokeObjectURL(lastResult.midiUrl); } catch(e) {}
+            lastResult = null;
+        }
+
         dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
-
-    // -------------------------------------------------------
-    // Initialize
-    // -------------------------------------------------------
-    initDropzone();
 
 })();
 </script>
