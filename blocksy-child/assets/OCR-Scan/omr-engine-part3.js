@@ -130,6 +130,16 @@ PianoModeOMR.MusicXMLWriter = {
                         var evt = measureEvents[e];
                         var dur = this._durationToDivisions(evt.durationValue, divisions);
 
+                        // Handle rests
+                        if (evt.isRest) {
+                            xml += '      <note>\n';
+                            xml += '        <rest/>\n';
+                            xml += '        <duration>' + dur + '</duration>\n';
+                            xml += '        <type>' + (evt.mxlType || 'quarter') + '</type>\n';
+                            xml += '      </note>\n';
+                            continue;
+                        }
+
                         for (var n = 0; n < evt.notes.length; n++) {
                             var note = evt.notes[n];
                             xml += '      <note>\n';
@@ -145,6 +155,11 @@ PianoModeOMR.MusicXMLWriter = {
                             xml += '        </pitch>\n';
                             xml += '        <duration>' + dur + '</duration>\n';
                             xml += '        <type>' + (evt.mxlType || 'quarter') + '</type>\n';
+
+                            // Beam notation for eighth/sixteenth notes
+                            if (evt.mxlType === 'eighth' || evt.mxlType === '16th') {
+                                xml += '        <beam number="1">begin</beam>\n';
+                            }
 
                             // Staff number for grand staff
                             if (part.staffIndices.length === 2) {
@@ -288,6 +303,18 @@ PianoModeOMR.MIDIWriter = {
             var evt = events[i];
             var durationTicks = Math.round(evt.durationValue * ppq);
 
+            // Handle rests: just advance time, no note on/off
+            if (evt.isRest || !evt.notes || evt.notes.length === 0) {
+                // If this is the first event, push initial delta
+                if (i === 0) {
+                    trackData.push(0x00);
+                    // Use a silent note-on/off pair to create the rest duration
+                }
+                // The delta time for the next event will account for the rest
+                // We track accumulated rest ticks
+                continue;
+            }
+
             // Note On for all notes in chord (delta 0 for chord notes)
             for (var n = 0; n < evt.notes.length; n++) {
                 var note = evt.notes[n];
@@ -296,8 +323,22 @@ PianoModeOMR.MIDIWriter = {
 
                 if (n === 0 && i === 0) {
                     trackData.push(0x00); // delta 0 for first note
-                } else if (n === 0 && i > 0) {
-                    // Already handled below (delta after note off)
+                } else if (n === 0) {
+                    // Calculate accumulated rest time from previous rests
+                    var restTicks = 0;
+                    for (var r = i - 1; r >= 0; r--) {
+                        if (events[r].isRest || !events[r].notes || events[r].notes.length === 0) {
+                            restTicks += Math.round(events[r].durationValue * ppq);
+                        } else {
+                            break;
+                        }
+                    }
+                    if (restTicks > 0) {
+                        // This note-on already has delta from previous note-off
+                        // The rest time was not accounted for, so we don't add extra here
+                        // (it's handled by the note-off delta of the previous played note)
+                    }
+                    // Delta 0 for first note in a new chord after note-off
                 } else {
                     trackData.push(0x00); // chord: delta 0
                 }
@@ -307,14 +348,25 @@ PianoModeOMR.MIDIWriter = {
                 trackData.push(velocity & 0x7F);
             }
 
-            // Note Off after duration
+            // Calculate total duration including any following rests
+            var totalDuration = durationTicks;
+            // Look ahead for rests immediately after this note
+            for (var r = i + 1; r < events.length; r++) {
+                if (events[r].isRest || !events[r].notes || events[r].notes.length === 0) {
+                    totalDuration += Math.round(events[r].durationValue * ppq);
+                } else {
+                    break;
+                }
+            }
+
+            // Note Off after duration (includes any following rests)
             for (var n = 0; n < evt.notes.length; n++) {
                 var note = evt.notes[n];
                 var midiNote = note.midiNote;
                 if (midiNote < 0 || midiNote > 127) continue;
 
                 if (n === 0) {
-                    this._pushVLQ(trackData, durationTicks);
+                    this._pushVLQ(trackData, totalDuration);
                 } else {
                     trackData.push(0x00); // chord: delta 0
                 }
@@ -442,8 +494,8 @@ PianoModeOMR.Engine = {
                     binary, loaded.width, loaded.height, staves
                 );
 
-                // Detect notes
-                onProgress(3, 'Detecting notes...');
+                // Detect notes, rests, beams, flags, bar lines
+                onProgress(3, 'Detecting notes, rests & musical symbols...');
                 var result = PianoModeOMR.NoteDetector.detect(
                     cleaned, binary, loaded.width, loaded.height, staves
                 );
@@ -454,10 +506,13 @@ PianoModeOMR.Engine = {
                 }
 
                 var noteCount = 0;
+                var restCount = 0;
                 for (var e = 0; e < result.events.length; e++) {
-                    noteCount += result.events[e].notes.length;
+                    if (result.events[e].isRest) { restCount++; }
+                    else { noteCount += result.events[e].notes.length; }
                 }
-                onProgress(3, noteCount + ' notes detected');
+                var barLineCount = result.barLines ? result.barLines.length : 0;
+                onProgress(3, noteCount + ' notes, ' + restCount + ' rests, ' + barLineCount + ' bar lines detected');
 
                 // Generate MusicXML
                 onProgress(3, 'Generating MusicXML...');
