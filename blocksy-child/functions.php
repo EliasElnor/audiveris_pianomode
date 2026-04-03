@@ -349,13 +349,15 @@ if (file_exists(get_stylesheet_directory() . '/assets/games/functions-games.php'
 }
 
 /**
- * PIANOMODE OCR SCANNER - Audiveris OMR Integration
- * REST API endpoint for converting sheet music images/PDFs to MusicXML
+ * PIANOMODE OCR SCANNER
+ * 100% client-side OMR (Optical Music Recognition) — no server dependencies.
+ * REST API for saving results + Admin dashboard for scan management.
  */
 require_once get_stylesheet_directory() . '/page-omr-scanner-api.php';
+require_once get_stylesheet_directory() . '/omr-admin.php';
 
 /**
- * Enqueue OCR Scanner CSS when the template is active
+ * Enqueue OCR Scanner assets when the template is active
  */
 function pianomode_omr_scanner_assets() {
     if ( ! is_page_template( 'page-omr-scanner.php' ) ) {
@@ -365,7 +367,7 @@ function pianomode_omr_scanner_assets() {
         'pm-omr-scanner',
         get_stylesheet_directory_uri() . '/assets/css/omr-scanner.css',
         [],
-        '1.0.0'
+        '2.0.0'
     );
 }
 add_action( 'wp_enqueue_scripts', 'pianomode_omr_scanner_assets', 25 );

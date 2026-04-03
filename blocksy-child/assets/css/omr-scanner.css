@@ -732,6 +732,16 @@
     box-shadow: 0 8px 24px rgba(215, 191, 129, 0.3);
 }
 
+.pm-omr-action-btn--midi {
+    background: linear-gradient(135deg, #4CAF50, #388E3C);
+    color: var(--pm-white);
+}
+
+.pm-omr-action-btn--midi:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(76, 175, 80, 0.3);
+}
+
 .pm-omr-action-btn--new {
     background: rgba(255, 255, 255, 0.1);
     color: var(--pm-white);
@@ -833,6 +843,61 @@
     color: #aaa;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+/* =====================================================
+   DETECTION PREVIEW
+   ===================================================== */
+.pm-omr-preview {
+    margin-bottom: 2rem;
+    border-radius: var(--pm-radius);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pm-omr-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    background: rgba(255, 255, 255, 0.05);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #aaa;
+}
+
+.pm-omr-preview-toggle {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: #aaa;
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.pm-omr-preview-toggle:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+}
+
+/* =====================================================
+   STATS
+   ===================================================== */
+.pm-omr-stats {
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    font-size: 0.85rem;
+    color: #aaa;
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+.pm-omr-stats strong {
+    color: var(--pm-gold);
 }
 
 /* =====================================================
