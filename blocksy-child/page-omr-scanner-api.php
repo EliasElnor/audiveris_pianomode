@@ -1,19 +1,14 @@
 <?php
 /**
- * PianoMode OCR Scanner - REST API Endpoint
+ * PianoMode OCR Scanner - REST API (Save Results)
  *
- * Integrates the Audiveris OMR (Optical Music Recognition) engine to convert
- * sheet music photos and PDFs into MusicXML playable with AlphaTab.
+ * The actual OMR processing happens 100% client-side in JavaScript.
+ * This API only handles saving results to the server for history/admin.
  *
- * Required constant in wp-config.php:
- *   define('AUDIVERIS_JAR_PATH', '/absolute/path/to/Audiveris.jar');
- *
- * Optional constants:
- *   define('AUDIVERIS_JAVA_BIN', '/usr/bin/java');  // default: 'java'
- *   define('AUDIVERIS_TIMEOUT', 180);               // seconds, default: 180
+ * No server dependencies required (no Java, no Audiveris, no Tesseract).
  *
  * @package PianoMode
- * @version 1.0.0
+ * @version 2.0.0
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -21,336 +16,202 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // =====================================================
-// REGISTER REST ROUTE
+// REGISTER REST ROUTES
 // =====================================================
 
 add_action( 'rest_api_init', function () {
-    register_rest_route( 'pianomode/v1', '/omr-scan', [
+
+    // Save a completed scan result (MusicXML + MIDI)
+    register_rest_route( 'pianomode/v1', '/omr-save', [
         'methods'             => 'POST',
-        'callback'            => 'pianomode_omr_scan_handler',
-        'permission_callback' => '__return_true',
+        'callback'            => 'pianomode_omr_save_handler',
+        'permission_callback' => function() {
+            return is_user_logged_in();
+        },
+    ] );
+
+    // List saved scans for current user
+    register_rest_route( 'pianomode/v1', '/omr-history', [
+        'methods'             => 'GET',
+        'callback'            => 'pianomode_omr_history_handler',
+        'permission_callback' => function() {
+            return is_user_logged_in();
+        },
+    ] );
+
+    // Delete a saved scan
+    register_rest_route( 'pianomode/v1', '/omr-delete/(?P<id>\d+)', [
+        'methods'             => 'DELETE',
+        'callback'            => 'pianomode_omr_delete_handler',
+        'permission_callback' => function() {
+            return is_user_logged_in();
+        },
     ] );
 } );
 
 // =====================================================
-// MAIN HANDLER
+// SAVE HANDLER
 // =====================================================
 
 /**
- * Handle an OCR scan request.
- *
- * @param  WP_REST_Request $request
- * @return WP_REST_Response|WP_Error
+ * Save scan results (MusicXML + MIDI) to the server.
+ * Called optionally from the frontend after client-side processing.
  */
-function pianomode_omr_scan_handler( WP_REST_Request $request ) {
+function pianomode_omr_save_handler( WP_REST_Request $request ) {
+    $user_id = get_current_user_id();
 
-    // ---- Rate limiting: max 3 conversions per IP per hour ----
-    $ip       = sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0' );
-    $rate_key = 'omr_rate_' . md5( $ip );
+    // Rate limit: 10 saves per hour per user
+    $rate_key = 'omr_save_' . $user_id;
     $count    = (int) get_transient( $rate_key );
-
-    if ( $count >= 3 ) {
-        return new WP_Error(
-            'rate_limit',
-            __( 'Too many requests. Please wait before trying again (limit: 3 per hour).', 'pianomode' ),
-            [ 'status' => 429 ]
-        );
+    if ( $count >= 10 ) {
+        return new WP_Error( 'rate_limit', 'Too many saves. Please wait before trying again.', [ 'status' => 429 ] );
     }
-
     set_transient( $rate_key, $count + 1, HOUR_IN_SECONDS );
 
-    // ---- Check Audiveris is configured ----
-    $jar_path = defined( 'AUDIVERIS_JAR_PATH' ) ? AUDIVERIS_JAR_PATH : '';
+    // Get data
+    $title     = sanitize_text_field( $request->get_param( 'title' ) ?: 'Untitled Scan' );
+    $musicxml  = $request->get_param( 'musicxml' );
+    $note_count = absint( $request->get_param( 'note_count' ) ?: 0 );
+    $staff_count = absint( $request->get_param( 'staff_count' ) ?: 0 );
 
-    if ( empty( $jar_path ) || ! file_exists( $jar_path ) ) {
-        return new WP_Error(
-            'not_configured',
-            __( 'Audiveris is not configured on this server. Please define AUDIVERIS_JAR_PATH in wp-config.php and ensure the JAR exists.', 'pianomode' ),
-            [ 'status' => 503 ]
-        );
+    if ( empty( $musicxml ) ) {
+        return new WP_Error( 'no_data', 'No MusicXML data provided.', [ 'status' => 400 ] );
     }
 
-    // ---- Validate uploaded file ----
-    $files = $request->get_file_params();
-
-    if ( empty( $files['score_file'] ) || $files['score_file']['error'] !== UPLOAD_ERR_OK ) {
-        $upload_err = $files['score_file']['error'] ?? UPLOAD_ERR_NO_FILE;
-        return new WP_Error(
-            'no_file',
-            pianomode_omr_upload_error_message( $upload_err ),
-            [ 'status' => 400 ]
-        );
+    // Validate MusicXML is actual XML
+    if ( strpos( $musicxml, '<?xml' ) === false || strpos( $musicxml, 'score-partwise' ) === false ) {
+        return new WP_Error( 'invalid_xml', 'Invalid MusicXML data.', [ 'status' => 400 ] );
     }
 
-    $file = $files['score_file'];
+    // Create output directory
+    $upload_dir = wp_upload_dir();
+    $scan_id    = uniqid( 'omr_', true );
+    $output_dir = $upload_dir['basedir'] . '/omr-scans/' . $scan_id;
 
-    // Size check: max 20 MB
-    if ( $file['size'] > 20 * 1024 * 1024 ) {
-        return new WP_Error(
-            'file_too_large',
-            __( 'The file must be smaller than 20 MB.', 'pianomode' ),
-            [ 'status' => 400 ]
-        );
+    if ( ! wp_mkdir_p( $output_dir ) ) {
+        return new WP_Error( 'mkdir_failed', 'Could not create output directory.', [ 'status' => 500 ] );
     }
 
-    // MIME type validation (using finfo for security, not user-supplied type)
-    if ( ! function_exists( 'finfo_open' ) ) {
-        return new WP_Error(
-            'no_finfo',
-            __( 'Server configuration error: fileinfo extension is required.', 'pianomode' ),
-            [ 'status' => 500 ]
-        );
+    // Save MusicXML
+    $xml_file = $output_dir . '/' . sanitize_file_name( $title ) . '.musicxml';
+    file_put_contents( $xml_file, $musicxml );
+
+    // Save MIDI if provided (base64 encoded)
+    $midi_b64  = $request->get_param( 'midi_base64' );
+    $midi_file = '';
+    if ( ! empty( $midi_b64 ) ) {
+        $midi_data = base64_decode( $midi_b64, true );
+        if ( $midi_data !== false ) {
+            $midi_file = $output_dir . '/' . sanitize_file_name( $title ) . '.mid';
+            file_put_contents( $midi_file, $midi_data );
+        }
     }
 
-    $finfo = new finfo( FILEINFO_MIME_TYPE );
-    $mime  = $finfo->file( $file['tmp_name'] );
+    // Build URLs
+    $xml_url  = $upload_dir['baseurl'] . '/omr-scans/' . $scan_id . '/' . basename( $xml_file );
+    $midi_url = $midi_file ? $upload_dir['baseurl'] . '/omr-scans/' . $scan_id . '/' . basename( $midi_file ) : '';
 
-    $allowed_mimes = [
-        'application/pdf' => 'pdf',
-        'image/png'       => 'png',
-        'image/jpeg'      => 'jpg',
-        'image/tiff'      => 'tiff',
+    // Save metadata to options (lightweight, no custom table needed)
+    $scan_meta = [
+        'id'          => $scan_id,
+        'user_id'     => $user_id,
+        'title'       => $title,
+        'xml_url'     => $xml_url,
+        'midi_url'    => $midi_url,
+        'note_count'  => $note_count,
+        'staff_count' => $staff_count,
+        'created_at'  => current_time( 'mysql' ),
     ];
 
-    if ( ! array_key_exists( $mime, $allowed_mimes ) ) {
-        return new WP_Error(
-            'invalid_type',
-            __( 'Only PDF, PNG, JPG, or TIFF files are accepted.', 'pianomode' ),
-            [ 'status' => 400 ]
-        );
+    $all_scans = get_option( 'pianomode_omr_scans', [] );
+    $all_scans[] = $scan_meta;
+
+    // Keep last 500 scans max
+    if ( count( $all_scans ) > 500 ) {
+        $all_scans = array_slice( $all_scans, -500 );
     }
 
-    $ext = $allowed_mimes[ $mime ];
-
-    // ---- Create working directories ----
-    $job_id     = uniqid( 'omr_', true );
-    $upload_dir = wp_upload_dir();
-    $base_dir   = $upload_dir['basedir'];
-
-    $temp_dir   = $base_dir . '/omr-temp/' . $job_id;
-    $output_dir = $base_dir . '/omr-output/' . $job_id;
-
-    if ( ! wp_mkdir_p( $temp_dir ) || ! wp_mkdir_p( $output_dir ) ) {
-        return new WP_Error(
-            'mkdir_failed',
-            __( 'Server error: could not create processing directories.', 'pianomode' ),
-            [ 'status' => 500 ]
-        );
-    }
-
-    // Protect temp input dir from direct web access
-    file_put_contents( $temp_dir . '/.htaccess', 'Deny from all' . PHP_EOL );
-
-    // ---- Save uploaded file ----
-    $input_file = $temp_dir . '/input.' . $ext;
-
-    if ( ! move_uploaded_file( $file['tmp_name'], $input_file ) ) {
-        pianomode_omr_cleanup_dir( $temp_dir );
-        return new WP_Error(
-            'move_failed',
-            __( 'Failed to save the uploaded file.', 'pianomode' ),
-            [ 'status' => 500 ]
-        );
-    }
-
-    // ---- Run Audiveris ----
-    $result = pianomode_run_audiveris( $jar_path, $input_file, $output_dir );
-
-    // Clean up temp input regardless of success
-    pianomode_omr_cleanup_dir( $temp_dir );
-
-    if ( is_wp_error( $result ) ) {
-        pianomode_omr_cleanup_dir( $output_dir );
-        return $result;
-    }
-
-    // ---- Find generated MusicXML ----
-    $mxl_files    = glob( $output_dir . '/*.mxl' ) ?: [];
-    $xml_files    = glob( $output_dir . '/*.xml' ) ?: [];
-    $output_files = array_merge( $mxl_files, $xml_files );
-
-    // Also search subdirectories (Audiveris sometimes creates nested output)
-    if ( empty( $output_files ) ) {
-        $mxl_files    = glob( $output_dir . '/**/*.mxl' ) ?: [];
-        $xml_files    = glob( $output_dir . '/**/*.xml' ) ?: [];
-        $output_files = array_merge( $mxl_files, $xml_files );
-    }
-
-    if ( empty( $output_files ) ) {
-        pianomode_omr_cleanup_dir( $output_dir );
-        return new WP_Error(
-            'no_output',
-            __( 'Audiveris could not recognise music in this file. Please use a clear, high-resolution image or a digital PDF of sheet music.', 'pianomode' ),
-            [ 'status' => 422 ]
-        );
-    }
-
-    // Prefer .mxl over plain .xml
-    $musicxml_path     = ! empty( $mxl_files ) ? $mxl_files[0] : $xml_files[0];
-    $musicxml_filename = basename( $musicxml_path );
-
-    // If file is in a subdirectory, move it to output root for clean URL
-    if ( dirname( $musicxml_path ) !== $output_dir ) {
-        $new_path = $output_dir . '/' . $musicxml_filename;
-        rename( $musicxml_path, $new_path );
-        $musicxml_path = $new_path;
-    }
-
-    $musicxml_url = $upload_dir['baseurl'] . '/omr-output/' . $job_id . '/' . $musicxml_filename;
-
-    // Add .htaccess to allow web access to output dir
-    file_put_contents( $output_dir . '/.htaccess', "Allow from all\n" );
+    update_option( 'pianomode_omr_scans', $all_scans, false );
 
     return rest_ensure_response( [
-        'success'      => true,
-        'job_id'       => $job_id,
-        'musicxml_url' => $musicxml_url,
-        'filename'     => $musicxml_filename,
+        'success'  => true,
+        'scan_id'  => $scan_id,
+        'xml_url'  => $xml_url,
+        'midi_url' => $midi_url,
     ] );
 }
 
 // =====================================================
-// AUDIVERIS EXECUTION
+// HISTORY HANDLER
 // =====================================================
 
-/**
- * Run the Audiveris CLI and wait for completion.
- *
- * @param  string $jar_path   Absolute path to the Audiveris JAR
- * @param  string $input_file Absolute path to the input PDF/image
- * @param  string $output_dir Absolute path to the output directory
- * @return true|WP_Error
- */
-function pianomode_run_audiveris( string $jar_path, string $input_file, string $output_dir ) {
+function pianomode_omr_history_handler( WP_REST_Request $request ) {
+    $user_id   = get_current_user_id();
+    $all_scans = get_option( 'pianomode_omr_scans', [] );
 
-    // Check Java
-    $java_bin = defined( 'AUDIVERIS_JAVA_BIN' ) ? AUDIVERIS_JAVA_BIN : 'java';
+    // Filter to current user
+    $user_scans = array_filter( $all_scans, function( $scan ) use ( $user_id ) {
+        return isset( $scan['user_id'] ) && (int) $scan['user_id'] === $user_id;
+    } );
 
-    exec( escapeshellcmd( $java_bin ) . ' -version 2>&1', $java_out, $java_code );
-    if ( $java_code !== 0 ) {
-        return new WP_Error(
-            'no_java',
-            __( 'Java is not installed on this server. Please install Java 17+ (OpenJDK) to use the OCR scanner.', 'pianomode' ),
-            [ 'status' => 503 ]
-        );
-    }
+    // Sort newest first
+    usort( $user_scans, function( $a, $b ) {
+        return strcmp( $b['created_at'] ?? '', $a['created_at'] ?? '' );
+    } );
 
-    // Build command
-    // -batch       : headless mode (no GUI)
-    // -transcribe  : run all recognition steps
-    // -export      : export to MusicXML
-    // -output <dir>: output directory
-    $cmd = sprintf(
-        '%s -Xmx512m -jar %s -batch -transcribe -export -output %s %s 2>&1',
-        escapeshellcmd( $java_bin ),
-        escapeshellarg( $jar_path ),
-        escapeshellarg( $output_dir ),
-        escapeshellarg( $input_file )
-    );
+    return rest_ensure_response( [
+        'success' => true,
+        'scans'   => array_values( $user_scans ),
+        'total'   => count( $user_scans ),
+    ] );
+}
 
-    $descriptors = [
-        0 => [ 'pipe', 'r' ],  // stdin
-        1 => [ 'pipe', 'w' ],  // stdout + stderr (merged via 2>&1)
-        2 => [ 'pipe', 'w' ],  // stderr pipe
-    ];
+// =====================================================
+// DELETE HANDLER
+// =====================================================
 
-    $process = proc_open( $cmd, $descriptors, $pipes );
+function pianomode_omr_delete_handler( WP_REST_Request $request ) {
+    $scan_index = (int) $request->get_param( 'id' );
+    $user_id    = get_current_user_id();
+    $all_scans  = get_option( 'pianomode_omr_scans', [] );
 
-    if ( ! is_resource( $process ) ) {
-        return new WP_Error(
-            'process_failed',
-            __( 'Failed to start the Audiveris process.', 'pianomode' ),
-            [ 'status' => 500 ]
-        );
-    }
-
-    fclose( $pipes[0] ); // close stdin
-    stream_set_blocking( $pipes[1], false );
-    stream_set_blocking( $pipes[2], false );
-
-    $timeout = defined( 'AUDIVERIS_TIMEOUT' ) ? (int) AUDIVERIS_TIMEOUT : 180;
-    $start   = time();
-    $output  = '';
-
-    while ( ( time() - $start ) < $timeout ) {
-        $status = proc_get_status( $process );
-        if ( ! $status['running'] ) {
+    // Find scan by index belonging to this user
+    $found = false;
+    foreach ( $all_scans as $i => $scan ) {
+        if ( $i === $scan_index && isset( $scan['user_id'] ) && (int) $scan['user_id'] === $user_id ) {
+            // Delete files
+            if ( ! empty( $scan['id'] ) ) {
+                $upload_dir = wp_upload_dir();
+                $dir = $upload_dir['basedir'] . '/omr-scans/' . $scan['id'];
+                pianomode_omr_cleanup_dir( $dir );
+            }
+            unset( $all_scans[ $i ] );
+            $found = true;
             break;
         }
-        // Drain output to prevent pipe buffer deadlock
-        $chunk = fread( $pipes[1], 8192 );
-        if ( $chunk ) {
-            $output .= $chunk;
-        }
-        usleep( 500000 ); // poll every 0.5s
     }
 
-    $timed_out = ( time() - $start ) >= $timeout;
-
-    // Drain remaining output
-    $output .= stream_get_contents( $pipes[1] );
-    stream_get_contents( $pipes[2] );
-    fclose( $pipes[1] );
-    fclose( $pipes[2] );
-
-    if ( $timed_out ) {
-        proc_terminate( $process );
-        proc_close( $process );
-        return new WP_Error(
-            'timeout',
-            __( 'Processing timed out. Please try with a shorter or simpler score.', 'pianomode' ),
-            [ 'status' => 504 ]
-        );
+    if ( ! $found ) {
+        return new WP_Error( 'not_found', 'Scan not found.', [ 'status' => 404 ] );
     }
 
-    $exit_code = proc_close( $process );
+    update_option( 'pianomode_omr_scans', array_values( $all_scans ), false );
 
-    if ( $exit_code !== 0 ) {
-        // Log the error for debugging (visible in wp-content/debug.log if WP_DEBUG_LOG is enabled)
-        if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
-            error_log( '[PianoMode OMR] Audiveris exit code: ' . $exit_code );
-            error_log( '[PianoMode OMR] Output: ' . substr( $output, -500 ) );
-        }
-        return new WP_Error(
-            'audiveris_error',
-            __( 'Audiveris could not process this file. Please ensure it contains clear, printed (not handwritten) sheet music.', 'pianomode' ),
-            [ 'status' => 422 ]
-        );
-    }
-
-    return true;
+    return rest_ensure_response( [ 'success' => true ] );
 }
 
 // =====================================================
 // HELPERS
 // =====================================================
 
-/**
- * Recursively delete a directory.
- */
-function pianomode_omr_cleanup_dir( string $dir ): void {
-    if ( ! is_dir( $dir ) ) {
-        return;
+if ( ! function_exists( 'pianomode_omr_cleanup_dir' ) ) {
+    function pianomode_omr_cleanup_dir( string $dir ): void {
+        if ( ! is_dir( $dir ) ) return;
+        $items = array_diff( (array) scandir( $dir ), [ '.', '..' ] );
+        foreach ( $items as $item ) {
+            $path = $dir . '/' . $item;
+            is_dir( $path ) ? pianomode_omr_cleanup_dir( $path ) : unlink( $path );
+        }
+        rmdir( $dir );
     }
-    $items = array_diff( (array) scandir( $dir ), [ '.', '..' ] );
-    foreach ( $items as $item ) {
-        $path = $dir . '/' . $item;
-        is_dir( $path ) ? pianomode_omr_cleanup_dir( $path ) : unlink( $path );
-    }
-    rmdir( $dir );
-}
-
-/**
- * Human-readable upload error message.
- */
-function pianomode_omr_upload_error_message( int $code ): string {
-    $messages = [
-        UPLOAD_ERR_NO_FILE    => __( 'No file was uploaded.', 'pianomode' ),
-        UPLOAD_ERR_INI_SIZE   => __( 'The file exceeds the server upload limit.', 'pianomode' ),
-        UPLOAD_ERR_FORM_SIZE  => __( 'The file is too large.', 'pianomode' ),
-        UPLOAD_ERR_PARTIAL    => __( 'The file was only partially uploaded. Please try again.', 'pianomode' ),
-        UPLOAD_ERR_NO_TMP_DIR => __( 'Server error: missing temporary folder.', 'pianomode' ),
-        UPLOAD_ERR_CANT_WRITE => __( 'Server error: failed to write file.', 'pianomode' ),
-    ];
-    return $messages[ $code ] ?? __( 'An unknown upload error occurred.', 'pianomode' );
 }
