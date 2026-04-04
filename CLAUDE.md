@@ -1,30 +1,24 @@
 # CLAUDE.md — PianoMode OCR Scanner Project
 
-## Current State (2026-04-03)
+## Current State (2026-04-04)
 Branch: `claude/integrate-audiveris-ocr-0XMux`
 
 ### What's Done
-- 3 JS engine files exist in `blocksy-child/assets/OCR-Scan/` (part1, part2, part3)
-- CSS, API, admin, page template all exist
+- Single merged `omr-engine.js` with all 6 modules (1674 lines)
+- Engine uses async steps (setTimeout yields) so UI updates during processing
+- Real progress bar with percentage (gold gradient, 0-100%)
+- CSS, API, admin, page template all functional
+- Old part files deleted
+- Hero padding fixed for header clearance
 - Everything pushed to remote
-
-### CRITICAL TODO (in order)
-1. **MERGE JS**: Combine omr-engine-part1/2/3.js → single `omr-engine.js` (bug: parts load out of order causing `Cannot read properties of undefined (reading 'detect')`)
-2. **DELETE old part files** after merge
-3. **FIX hero CSS**: Add `padding-top: 120px` to `.pm-omr-hero` (header covers title)
-4. **UPDATE template**: `page-omr-scanner.php` lines 282-284 → load single `omr-engine.js` instead of 3 parts
-5. **UPDATE functions.php**: line ~355 area, paths reference OCR-Scan folder
 
 ### File Locations
 ```
 blocksy-child/
 ├── page-omr-scanner.php          ← WP template (must stay at root)
 ├── assets/OCR-Scan/
-│   ├── omr-engine-part1.js       ← TO DELETE after merge
-│   ├── omr-engine-part2.js       ← TO DELETE after merge  
-│   ├── omr-engine-part3.js       ← TO DELETE after merge
-│   ├── omr-engine.js             ← TO CREATE (merged)
-│   ├── omr-scanner.css           ← page styles
+│   ├── omr-engine.js             ← Complete OMR engine (all 6 modules)
+│   ├── omr-scanner.css           ← page styles + progress bar
 │   ├── omr-scanner-api.php       ← REST API (save/history/delete)
 │   └── omr-admin.php             ← WP admin dashboard
 ├── functions.php                  ← loads API + admin + enqueues CSS
@@ -36,8 +30,9 @@ blocksy-child/
 - AlphaTab loaded from CDN for playback
 - Exports: MusicXML + MIDI
 - Admin panel under WP menu "OCR Scanner"
+- Async processing with UI yields between steps
 
-### JS Engine Structure (for merged file)
+### JS Engine Structure
 ```
 window.PianoModeOMR = {};
 PianoModeOMR.ImageProcessor  → loadImage, loadPDF, toGrayscale, otsuThreshold, binarize, cleanNoise
@@ -45,7 +40,7 @@ PianoModeOMR.StaffDetector   → detect, removeStaffLines, detectClefs
 PianoModeOMR.NoteDetector    → findBlobs, filterNoteHeads, detectStems, detectFlags, detectBeams, detectRests, detectBarLines, classifyDuration, assignPitch, organizeNotes, detect
 PianoModeOMR.MusicXMLWriter  → generate
 PianoModeOMR.MIDIWriter      → generate, toBlob, toBlobURL
-PianoModeOMR.Engine          → process(file, onProgress) → Promise
+PianoModeOMR.Engine          → process(file, onProgress) → Promise (async with yields)
 ```
 
 ### Theme Conventions
