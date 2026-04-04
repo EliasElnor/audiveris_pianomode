@@ -1553,118 +1553,151 @@ PianoModeOMR.MIDIWriter = {
 };
 
 // =====================================================
-// MAIN ORCHESTRATOR
+// MAIN ORCHESTRATOR (async steps for UI responsiveness)
 // =====================================================
 PianoModeOMR.Engine = {
 
     /**
+     * Yield control to the browser so the UI can repaint.
+     * Returns a promise that resolves after a short delay.
+     */
+    _yield: function() {
+        return new Promise(function(resolve) {
+            setTimeout(resolve, 20);
+        });
+    },
+
+    /**
      * Process an image or PDF file end-to-end.
+     * Each major step yields to the browser so progress updates render.
      *
      * @param {File} file - User-uploaded file
-     * @param {Function} onProgress - callback(step, message)
+     * @param {Function} onProgress - callback(step, message, percent)
      * @returns {Promise<Object>} { musicxml, midiBlob, midiUrl, events, staves, noteCount }
      */
     process: function(file, onProgress) {
         onProgress = onProgress || function() {};
         var self = this;
+        var isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
-        return new Promise(function(resolve, reject) {
-            var isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+        onProgress(1, 'Loading file...', 5);
 
-            onProgress(1, 'Loading file...');
+        var loadPromise = isPDF
+            ? PianoModeOMR.ImageProcessor.loadPDF(file)
+            : PianoModeOMR.ImageProcessor.loadImage(file);
 
-            var loadPromise = isPDF
-                ? PianoModeOMR.ImageProcessor.loadPDF(file)
-                : PianoModeOMR.ImageProcessor.loadImage(file);
+        return loadPromise.then(function(loaded) {
+            onProgress(1, 'Image loaded (' + loaded.width + 'x' + loaded.height + ')', 15);
+            return self._yield().then(function() { return loaded; });
 
-            loadPromise.then(function(loaded) {
-                onProgress(1, 'Image loaded (' + loaded.width + 'x' + loaded.height + ')');
+        }).then(function(loaded) {
+            // Grayscale
+            onProgress(2, 'Converting to grayscale...', 20);
+            var gray = PianoModeOMR.ImageProcessor.toGrayscale(loaded.imageData);
+            loaded._gray = gray;
+            return self._yield().then(function() { return loaded; });
 
-                // Grayscale
-                onProgress(2, 'Converting to grayscale...');
-                var gray = PianoModeOMR.ImageProcessor.toGrayscale(loaded.imageData);
+        }).then(function(loaded) {
+            // Binarize
+            onProgress(2, 'Binarizing image...', 30);
+            var gray = loaded._gray;
+            var threshold = PianoModeOMR.ImageProcessor.otsuThreshold(gray);
+            var binary = PianoModeOMR.ImageProcessor.binarize(gray, threshold);
+            loaded._binary = binary;
+            return self._yield().then(function() { return loaded; });
 
-                // Binarize
-                onProgress(2, 'Binarizing image...');
-                var threshold = PianoModeOMR.ImageProcessor.otsuThreshold(gray);
-                var binary = PianoModeOMR.ImageProcessor.binarize(gray, threshold);
+        }).then(function(loaded) {
+            // Detect staff lines
+            onProgress(2, 'Detecting staff lines...', 40);
+            var staves = PianoModeOMR.StaffDetector.detect(loaded._binary, loaded.width, loaded.height);
 
-                // Detect staff lines
-                onProgress(2, 'Detecting staff lines...');
-                var staves = PianoModeOMR.StaffDetector.detect(binary, loaded.width, loaded.height);
+            if (staves.length === 0) {
+                throw new Error('No staff lines detected. Please use a clear, high-resolution image of printed sheet music.');
+            }
 
-                if (staves.length === 0) {
-                    reject(new Error('No staff lines detected. Please use a clear, high-resolution image of printed sheet music.'));
-                    return;
-                }
+            onProgress(2, staves.length + ' staff(s) detected', 45);
+            staves = PianoModeOMR.StaffDetector.detectClefs(loaded._binary, loaded.width, staves);
+            loaded._staves = staves;
+            return self._yield().then(function() { return loaded; });
 
-                onProgress(2, staves.length + ' staff(s) detected');
+        }).then(function(loaded) {
+            // Remove staff lines
+            onProgress(2, 'Removing staff lines...', 50);
+            var cleaned = PianoModeOMR.StaffDetector.removeStaffLines(
+                loaded._binary, loaded.width, loaded.height, loaded._staves
+            );
+            loaded._cleaned = cleaned;
+            return self._yield().then(function() { return loaded; });
 
-                // Detect clefs
-                staves = PianoModeOMR.StaffDetector.detectClefs(binary, loaded.width, staves);
-
-                // Remove staff lines for note detection
-                onProgress(2, 'Removing staff lines...');
-                var cleaned = PianoModeOMR.StaffDetector.removeStaffLines(
-                    binary, loaded.width, loaded.height, staves
-                );
-
-                // Detect notes, rests, beams, flags, bar lines
-                onProgress(3, 'Detecting notes, rests & musical symbols...');
+        }).then(function(loaded) {
+            // Detect notes
+            onProgress(3, 'Detecting notes, rests & musical symbols...', 60);
+            return self._yield().then(function() {
                 var result = PianoModeOMR.NoteDetector.detect(
-                    cleaned, binary, loaded.width, loaded.height, staves
+                    loaded._cleaned, loaded._binary, loaded.width, loaded.height, loaded._staves
                 );
-
-                if (result.events.length === 0) {
-                    reject(new Error('No notes detected. The image may be too low quality or not contain standard music notation.'));
-                    return;
-                }
-
-                var noteCount = 0;
-                var restCount = 0;
-                for (var e = 0; e < result.events.length; e++) {
-                    if (result.events[e].isRest) { restCount++; }
-                    else { noteCount += result.events[e].notes.length; }
-                }
-                var barLineCount = result.barLines ? result.barLines.length : 0;
-                onProgress(3, noteCount + ' notes, ' + restCount + ' rests, ' + barLineCount + ' bar lines detected');
-
-                // Generate MusicXML
-                onProgress(3, 'Generating MusicXML...');
-                var title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ');
-                var musicxml = PianoModeOMR.MusicXMLWriter.generate(
-                    result.events, staves, { title: title }
-                );
-
-                // Generate MIDI
-                onProgress(3, 'Generating MIDI...');
-                var midiData = PianoModeOMR.MIDIWriter.generate(result.events, {});
-                var midiBlob = PianoModeOMR.MIDIWriter.toBlob(midiData);
-                var midiUrl = URL.createObjectURL(midiBlob);
-
-                // MusicXML blob
-                var xmlBlob = new Blob([musicxml], { type: 'application/xml' });
-                var xmlUrl = URL.createObjectURL(xmlBlob);
-
-                onProgress(4, 'Done! ' + noteCount + ' notes in ' + staves.length + ' staff(s)');
-
-                resolve({
-                    musicxml: musicxml,
-                    musicxmlBlob: xmlBlob,
-                    musicxmlUrl: xmlUrl,
-                    midiData: midiData,
-                    midiBlob: midiBlob,
-                    midiUrl: midiUrl,
-                    events: result.events,
-                    noteHeads: result.noteHeads,
-                    staves: staves,
-                    noteCount: noteCount,
-                    title: title
-                });
-
-            }).catch(function(err) {
-                reject(err);
+                loaded._result = result;
+                return loaded;
             });
+
+        }).then(function(loaded) {
+            var result = loaded._result;
+            onProgress(3, 'Analyzing detection results...', 75);
+
+            if (result.events.length === 0) {
+                throw new Error('No notes detected. The image may be too low quality or not contain standard music notation.');
+            }
+
+            var noteCount = 0;
+            var restCount = 0;
+            for (var e = 0; e < result.events.length; e++) {
+                if (result.events[e].isRest) { restCount++; }
+                else { noteCount += result.events[e].notes.length; }
+            }
+            var barLineCount = result.barLines ? result.barLines.length : 0;
+            onProgress(3, noteCount + ' notes, ' + restCount + ' rests, ' + barLineCount + ' bar lines', 80);
+
+            loaded._noteCount = noteCount;
+            loaded._restCount = restCount;
+            return self._yield().then(function() { return loaded; });
+
+        }).then(function(loaded) {
+            // Generate MusicXML
+            onProgress(3, 'Generating MusicXML...', 85);
+            var title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ');
+            var musicxml = PianoModeOMR.MusicXMLWriter.generate(
+                loaded._result.events, loaded._staves, { title: title }
+            );
+            loaded._musicxml = musicxml;
+            loaded._title = title;
+            return self._yield().then(function() { return loaded; });
+
+        }).then(function(loaded) {
+            // Generate MIDI
+            onProgress(3, 'Generating MIDI...', 92);
+            var midiData = PianoModeOMR.MIDIWriter.generate(loaded._result.events, {});
+            var midiBlob = PianoModeOMR.MIDIWriter.toBlob(midiData);
+            var midiUrl = URL.createObjectURL(midiBlob);
+
+            // MusicXML blob
+            var xmlBlob = new Blob([loaded._musicxml], { type: 'application/xml' });
+            var xmlUrl = URL.createObjectURL(xmlBlob);
+
+            onProgress(4, 'Done! ' + loaded._noteCount + ' notes in ' + loaded._staves.length + ' staff(s)', 100);
+
+            return {
+                musicxml: loaded._musicxml,
+                musicxmlBlob: xmlBlob,
+                musicxmlUrl: xmlUrl,
+                midiData: midiData,
+                midiBlob: midiBlob,
+                midiUrl: midiUrl,
+                events: loaded._result.events,
+                noteHeads: loaded._result.noteHeads,
+                staves: loaded._staves,
+                noteCount: loaded._noteCount,
+                title: loaded._title
+            };
         });
     }
 };

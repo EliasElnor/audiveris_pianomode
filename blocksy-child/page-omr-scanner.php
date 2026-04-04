@@ -104,6 +104,12 @@ $theme_uri = get_stylesheet_directory_uri();
                 </li>
             </ul>
             <div class="pm-omr-progress-status" id="omr-progress-status"></div>
+            <div class="pm-omr-progress-bar-container">
+                <div class="pm-omr-progress-bar" id="omr-progress-bar">
+                    <div class="pm-omr-progress-bar-fill" id="omr-progress-bar-fill"></div>
+                </div>
+                <span class="pm-omr-progress-percent" id="omr-progress-percent">0%</span>
+            </div>
         </div>
 
         <!-- Detection Preview Canvas (shows detected notes overlay) -->
@@ -301,6 +307,8 @@ $theme_uri = get_stylesheet_directory_uri();
     var scanBtn        = document.getElementById('omr-scan-btn');
     var progressPanel  = document.getElementById('omr-progress');
     var progressStatus = document.getElementById('omr-progress-status');
+    var progressBarFill = document.getElementById('omr-progress-bar-fill');
+    var progressPercent = document.getElementById('omr-progress-percent');
     var errorPanel     = document.getElementById('omr-error');
     var errorText      = document.getElementById('omr-error-text');
     var errorClose     = document.getElementById('omr-error-close');
@@ -416,7 +424,7 @@ $theme_uri = get_stylesheet_directory_uri();
     // -------------------------------------------------------
     var steps = document.querySelectorAll('.pm-omr-step');
 
-    function updateProgress(activeStep, statusText) {
+    function updateProgress(activeStep, statusText, percent) {
         show(progressPanel);
         for (var i = 0; i < steps.length; i++) {
             var n = parseInt(steps[i].getAttribute('data-step'), 10);
@@ -425,6 +433,10 @@ $theme_uri = get_stylesheet_directory_uri();
             else if (n === activeStep) steps[i].classList.add('active');
         }
         progressStatus.textContent = statusText || '';
+        if (typeof percent === 'number') {
+            progressBarFill.style.width = Math.min(100, Math.max(0, percent)) + '%';
+            progressPercent.textContent = Math.round(percent) + '%';
+        }
     }
 
     function markStepError(step, statusText) {
@@ -442,6 +454,8 @@ $theme_uri = get_stylesheet_directory_uri();
             steps[i].classList.remove('active', 'done', 'error');
         }
         progressStatus.textContent = '';
+        progressBarFill.style.width = '0%';
+        progressPercent.textContent = '0%';
     }
 
     // -------------------------------------------------------
@@ -460,8 +474,8 @@ $theme_uri = get_stylesheet_directory_uri();
         scanBtn.textContent = 'Processing...';
 
         // Use the client-side OMR engine
-        PianoModeOMR.Engine.process(file, function(step, message) {
-            updateProgress(step, message);
+        PianoModeOMR.Engine.process(file, function(step, message, percent) {
+            updateProgress(step, message, percent);
         }).then(function(result) {
             lastResult = result;
 
