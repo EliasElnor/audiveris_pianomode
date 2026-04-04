@@ -285,7 +285,7 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=2.1.1' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=3.0.0' ); ?>"></script>
 
 <!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
