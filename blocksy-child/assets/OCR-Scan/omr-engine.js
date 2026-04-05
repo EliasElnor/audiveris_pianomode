@@ -1,16 +1,19 @@
 /**
- * PianoMode OMR Engine v5.0 — Production-Grade Client-Side Music Recognition
+ * PianoMode OMR Engine v5.0 - Complete Client-Side Music Recognition
  * Converts sheet music images/PDFs into MusicXML + MIDI entirely in the browser.
  *
- * v5.0 improvements over v4.0:
- * - Projection-based barline detection (Audiveris StaffProjector approach)
- * - Measure-based note organization using detected barlines
- * - Proper time assignment within measures
- * - Beam group detection with morphological approach
- * - Improved key/time signature detection
- * - Proper grand staff handling
- * - MusicXML with correct timing, voices, backup/forward
- * - Fixed MIDI generation with proper delta times
+ * Modules: ImageProcessor, StaffDetector, NoteDetector, MusicXMLWriter, MIDIWriter, Engine
+ * No server dependencies. No Java. No Audiveris.
+ *
+ * Key v5.0 improvements over v4.0:
+ *   - Audiveris-style barline detection via vertical projection + derivative peaks
+ *   - Measure-based note organization (barline-bounded)
+ *   - Proper time/voice assignment within measures
+ *   - Beam group detection for duration classification
+ *   - Key/time signature detection (Audiveris KeyBuilder approach)
+ *   - Grand staff handling with proper MusicXML staves/voices
+ *   - Fixed MusicXML timing (backup/forward, divisions=16)
+ *   - Fixed MIDI rest handling and delta times
  *
  * @package PianoMode
  * @version 5.0.0
@@ -18,12 +21,13 @@
 (function() {
 'use strict';
 
+var VERSION = 'v5.0';
 var OMR = window.PianoModeOMR = {};
 
-// =====================================================
-// IMAGE PROCESSOR
-// =====================================================
-PianoModeOMR.ImageProcessor = {
+/* =========================================================================
+ *  MODULE 1: ImageProcessor
+ * ========================================================================= */
+OMR.ImageProcessor = {
 
     loadImage: function(file) {
         return new Promise(function(resolve, reject) {
@@ -41,7 +45,12 @@ PianoModeOMR.ImageProcessor = {
                     var ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    resolve({ imageData: imageData, width: canvas.width, height: canvas.height, canvas: canvas });
+                    resolve({
+                        imageData: imageData,
+                        width: canvas.width,
+                        height: canvas.height,
+                        canvas: canvas
+                    });
                 };
                 img.onerror = function() { reject(new Error('Failed to load image')); };
                 img.src = e.target.result;
@@ -53,221 +62,147 @@ PianoModeOMR.ImageProcessor = {
 
     loadPDF: function(file) {
         return new Promise(function(resolve, reject) {
+            if (typeof pdfjsLib === 'undefined') {
+                reject(new Error('PDF.js library not loaded'));
+                return;
+            }
             var reader = new FileReader();
             reader.onload = function(e) {
                 var typedArray = new Uint8Array(e.target.result);
-                if (typeof pdfjsLib === 'undefined') { reject(new Error('PDF.js library not loaded')); return; }
                 pdfjsLib.getDocument({ data: typedArray }).promise.then(function(pdf) {
-                    pdf.getPage(1).then(function(page) {
-                        var scale = 3.0;
-                        var viewport = page.getViewport({ scale: scale });
-                        var canvas = document.createElement('canvas');
-                        canvas.width = viewport.width;
-                        canvas.height = viewport.height;
-                        var ctx = canvas.getContext('2d');
-                        page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function() {
-                            var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                            resolve({ imageData: imageData, width: canvas.width, height: canvas.height, canvas: canvas, totalPages: pdf.numPages });
+                    return pdf.getPage(1);
+                }).then(function(page) {
+                    var scale = 3.0;
+                    var viewport = page.getViewport({ scale: scale });
+                    var canvas = document.createElement('canvas');
+                    canvas.width = Math.round(viewport.width);
+                    canvas.height = Math.round(viewport.height);
+                    var ctx = canvas.getContext('2d');
+                    return page.render({
+                        canvasContext: ctx,
+                        viewport: viewport
+                    }).promise.then(function() {
+                        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        resolve({
+                            imageData: imageData,
+                            width: canvas.width,
+                            height: canvas.height,
+                            canvas: canvas
                         });
                     });
-                }).catch(reject);
+                }).catch(function(err) {
+                    reject(new Error('PDF render failed: ' + err.message));
+                });
             };
-            reader.onerror = function() { reject(new Error('Failed to read PDF')); };
+            reader.onerror = function() { reject(new Error('Failed to read PDF file')); };
             reader.readAsArrayBuffer(file);
         });
     },
 
     toGrayscale: function(imageData) {
         var data = imageData.data;
-        var gray = new Uint8Array(imageData.width * imageData.height);
-        for (var i = 0; i < gray.length; i++) {
-            gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
+        var w = imageData.width;
+        var h = imageData.height;
+        var gray = new Uint8Array(w * h);
+        for (var i = 0; i < w * h; i++) {
+            var off = i * 4;
+            gray[i] = Math.round(0.299 * data[off] + 0.587 * data[off + 1] + 0.114 * data[off + 2]);
         }
         return gray;
     },
 
     otsuThreshold: function(gray) {
-        var hist = new Array(256).fill(0);
-        for (var i = 0; i < gray.length; i++) hist[gray[i]]++;
+        var hist = new Array(256);
+        var i;
+        for (i = 0; i < 256; i++) hist[i] = 0;
+        for (i = 0; i < gray.length; i++) hist[gray[i]]++;
+
         var total = gray.length;
-        var sumAll = 0;
-        for (var t = 0; t < 256; t++) sumAll += t * hist[t];
-        var sumBg = 0, wBg = 0, best = 0, bestT = 0;
-        for (var t = 0; t < 256; t++) {
-            wBg += hist[t]; if (wBg === 0) continue;
-            var wFg = total - wBg; if (wFg === 0) break;
-            sumBg += t * hist[t];
-            var between = wBg * wFg * Math.pow(sumBg / wBg - (sumAll - sumBg) / wFg, 2);
-            if (between > best) { best = between; bestT = t; }
+        var sum = 0;
+        for (i = 0; i < 256; i++) sum += i * hist[i];
+
+        var sumB = 0, wB = 0, wF = 0;
+        var maxVariance = 0, threshold = 128;
+
+        for (i = 0; i < 256; i++) {
+            wB += hist[i];
+            if (wB === 0) continue;
+            wF = total - wB;
+            if (wF === 0) break;
+            sumB += i * hist[i];
+            var mB = sumB / wB;
+            var mF = (sum - sumB) / wF;
+            var variance = wB * wF * (mB - mF) * (mB - mF);
+            if (variance > maxVariance) {
+                maxVariance = variance;
+                threshold = i;
+            }
         }
-        return bestT;
+        return threshold;
     },
 
     binarize: function(gray, threshold) {
-        var binary = new Uint8Array(gray.length);
-        for (var i = 0; i < gray.length; i++) binary[i] = gray[i] < threshold ? 1 : 0;
-        return binary;
+        var bin = new Uint8Array(gray.length);
+        for (var i = 0; i < gray.length; i++) {
+            bin[i] = gray[i] < threshold ? 1 : 0;
+        }
+        return bin;
     },
 
-    cleanNoise: function(binary, width, height) {
-        var cleaned = new Uint8Array(binary);
-        var eroded = new Uint8Array(binary.length);
-        for (var y = 1; y < height - 1; y++) {
-            for (var x = 1; x < width - 1; x++) {
-                var idx = y * width + x;
-                if (binary[idx] === 1 && binary[idx-1] === 1 && binary[idx+1] === 1 &&
-                    binary[idx-width] === 1 && binary[idx+width] === 1) {
-                    eroded[idx] = 1;
-                }
-            }
-        }
-        for (var y = 1; y < height - 1; y++) {
-            for (var x = 1; x < width - 1; x++) {
-                var idx = y * width + x;
-                if (eroded[idx] === 1) {
-                    cleaned[idx] = 1; cleaned[idx-1] = 1; cleaned[idx+1] = 1;
-                    cleaned[idx-width] = 1; cleaned[idx+width] = 1;
-                }
-            }
-        }
-        return cleaned;
-    }
-};
+    cleanNoise: function(bin, width, height, minSize) {
+        minSize = minSize || 4;
+        var visited = new Uint8Array(width * height);
+        var stack = [];
+        var component = [];
 
-// =====================================================
-// STAFF DETECTOR
-// =====================================================
-PianoModeOMR.StaffDetector = {
-
-    detect: function(binary, width, height) {
-        var projection = new Uint32Array(height);
         for (var y = 0; y < height; y++) {
-            var count = 0, offset = y * width;
-            for (var x = 0; x < width; x++) { if (binary[offset + x] === 1) count++; }
-            projection[y] = count;
-        }
-        var mean = 0;
-        for (var y = 0; y < height; y++) mean += projection[y];
-        mean /= height;
-        var lineThreshold = Math.max(mean * 2, width * 0.3);
-        var candidateRows = [];
-        for (var y = 0; y < height; y++) { if (projection[y] >= lineThreshold) candidateRows.push(y); }
-        var lines = [];
-        if (candidateRows.length === 0) return [];
-        var start = candidateRows[0], end = candidateRows[0];
-        for (var i = 1; i < candidateRows.length; i++) {
-            if (candidateRows[i] - end <= 2) { end = candidateRows[i]; }
-            else { lines.push(Math.round((start + end) / 2)); start = candidateRows[i]; end = candidateRows[i]; }
-        }
-        lines.push(Math.round((start + end) / 2));
-        return this._groupIntoStaves(lines);
-    },
-
-    _groupIntoStaves: function(lines) {
-        if (lines.length < 5) return [];
-        var staves = [], used = new Array(lines.length).fill(false);
-        for (var i = 0; i <= lines.length - 5; i++) {
-            if (used[i]) continue;
-            var spacing = [];
-            for (var j = 0; j < 4; j++) spacing.push(lines[i + j + 1] - lines[i + j]);
-            spacing.sort(function(a,b) { return a - b; });
-            var median = spacing[1];
-            var ok = true;
-            for (var j = 0; j < 4; j++) { if (Math.abs(spacing[j] - median) > median * 0.4) { ok = false; break; } }
-            if (ok && median > 3) {
-                var staffLines = [];
-                for (var j = 0; j < 5; j++) { staffLines.push(lines[i + j]); used[i + j] = true; }
-                var avgSpacing = (staffLines[4] - staffLines[0]) / 4;
-                staves.push({ lines: staffLines, top: staffLines[0], bottom: staffLines[4], spacing: avgSpacing, center: Math.round((staffLines[0] + staffLines[4]) / 2) });
-            }
-        }
-        return staves;
-    },
-
-    groupIntoSystems: function(staves) {
-        if (staves.length === 0) return staves;
-        var systems = [[0]];
-        for (var i = 1; i < staves.length; i++) {
-            var gap = staves[i].top - staves[i - 1].bottom;
-            if (gap > staves[i].spacing * 3) systems.push([i]);
-            else systems[systems.length - 1].push(i);
-        }
-        for (var sys = 0; sys < systems.length; sys++) {
-            for (var j = 0; j < systems[sys].length; j++) {
-                var si = systems[sys][j];
-                staves[si].systemIndex = sys;
-                staves[si].staffInSystem = j;
-                staves[si].systemStaffCount = systems[sys].length;
-            }
-        }
-        return staves;
-    },
-
-    removeStaffLines: function(binary, width, height, staves) {
-        var cleaned = new Uint8Array(binary);
-        for (var s = 0; s < staves.length; s++) {
-            var staff = staves[s];
-            var lt = Math.max(2, Math.round(staff.spacing * 0.15));
-            for (var l = 0; l < staff.lines.length; l++) {
-                var lineY = staff.lines[l];
-                for (var dy = -lt; dy <= lt; dy++) {
-                    var y = lineY + dy;
-                    if (y < 0 || y >= height) continue;
-                    for (var x = 0; x < width; x++) {
-                        var idx = y * width + x;
-                        if (cleaned[idx] === 1) {
-                            var aboveY = Math.max(0, y - lt - 1);
-                            var belowY = Math.min(height - 1, y + lt + 1);
-                            if (binary[aboveY * width + x] === 0 && binary[belowY * width + x] === 0) {
-                                cleaned[idx] = 0;
+            for (var x = 0; x < width; x++) {
+                var idx = y * width + x;
+                if (bin[idx] === 1 && visited[idx] === 0) {
+                    component.length = 0;
+                    stack.length = 0;
+                    stack.push(idx);
+                    visited[idx] = 1;
+                    while (stack.length > 0) {
+                        var cur = stack.pop();
+                        component.push(cur);
+                        var cx = cur % width;
+                        var cy = (cur - cx) / width;
+                        var neighbors = [
+                            cy > 0 ? cur - width : -1,
+                            cy < height - 1 ? cur + width : -1,
+                            cx > 0 ? cur - 1 : -1,
+                            cx < width - 1 ? cur + 1 : -1
+                        ];
+                        for (var n = 0; n < 4; n++) {
+                            var ni = neighbors[n];
+                            if (ni >= 0 && bin[ni] === 1 && visited[ni] === 0) {
+                                visited[ni] = 1;
+                                stack.push(ni);
                             }
+                        }
+                    }
+                    if (component.length < minSize) {
+                        for (var c = 0; c < component.length; c++) {
+                            bin[component[c]] = 0;
                         }
                     }
                 }
             }
         }
-        return cleaned;
-    },
-
-    detectClefs: function(binary, width, staves) {
-        for (var s = 0; s < staves.length; s++) {
-            var staff = staves[s];
-            if (staff.systemStaffCount >= 2) {
-                staff.clef = (staff.staffInSystem === 0) ? 'treble' : 'bass';
-            } else {
-                var leftRegion = Math.min(width, Math.round(staff.spacing * 6));
-                var upperInk = 0, lowerInk = 0, midY = staff.center;
-                for (var y = staff.top - staff.spacing; y < midY; y++) {
-                    if (y < 0) continue;
-                    for (var x = 0; x < leftRegion; x++) { if (binary[y * width + x] === 1) upperInk++; }
-                }
-                for (var y = midY; y <= staff.bottom + staff.spacing; y++) {
-                    for (var x = 0; x < leftRegion; x++) { if (binary[y * width + x] === 1) lowerInk++; }
-                }
-                staff.clef = (upperInk >= lowerInk) ? 'treble' : 'bass';
-            }
-        }
-        return staves;
+        return bin;
     }
 };
 
+
 /* =========================================================================
  *  MODULE 2: StaffDetector
- *  Uses horizontal projection to find staff lines, groups them into 5-line
- *  staves, and detects clef types.
  * ========================================================================= */
 OMR.StaffDetector = {
 
-    /**
-     * Main detection entry point.
-     * Returns { staves, staffSpacing, systems }
-     *   staves[i] = { lines: [y0..y4], top, bottom, left, right, spacing, clef, staffIndex }
-     *   systems[i] = { staves: [staff, staff], top, bottom }
-     */
     detect: function(bin, width, height) {
-        // Step 1: horizontal projection (count black pixels per row)
         var hProj = new Uint32Array(height);
-        var x, y, idx;
+        var x, y, idx, i;
         for (y = 0; y < height; y++) {
             var count = 0;
             idx = y * width;
@@ -277,8 +212,6 @@ OMR.StaffDetector = {
             hProj[y] = count;
         }
 
-        // Step 2: find staff line candidates
-        // A staff line row has many more black pixels than average
         var totalBlack = 0;
         for (y = 0; y < height; y++) totalBlack += hProj[y];
         var avgBlack = totalBlack / height;
@@ -286,17 +219,14 @@ OMR.StaffDetector = {
 
         var lineRows = [];
         for (y = 0; y < height; y++) {
-            if (hProj[y] >= lineThreshold) {
-                lineRows.push(y);
-            }
+            if (hProj[y] >= lineThreshold) lineRows.push(y);
         }
 
-        // Step 3: merge consecutive rows into line segments
         var lineSegments = [];
         if (lineRows.length > 0) {
             var segStart = lineRows[0];
             var segEnd = lineRows[0];
-            for (var i = 1; i < lineRows.length; i++) {
+            for (i = 1; i < lineRows.length; i++) {
                 if (lineRows[i] <= segEnd + 2) {
                     segEnd = lineRows[i];
                 } else {
@@ -308,27 +238,24 @@ OMR.StaffDetector = {
             lineSegments.push({ y: Math.round((segStart + segEnd) / 2), top: segStart, bottom: segEnd, thickness: segEnd - segStart + 1 });
         }
 
-        // Step 4: group line segments into 5-line staves
-        // Expect roughly equal spacing between consecutive lines in a staff
         var staves = [];
         var used = new Array(lineSegments.length);
         for (i = 0; i < used.length; i++) used[i] = false;
 
         for (i = 0; i <= lineSegments.length - 5; i++) {
             if (used[i]) continue;
-
-            // Try to form a 5-line group starting at segment i
             var group = [lineSegments[i]];
             var lastIdx = i;
             var valid = true;
+            var g, j, k;
 
-            for (var g = 1; g < 5; g++) {
+            for (g = 1; g < 5; g++) {
                 var expectedSpacing = (group.length > 1) ?
                     (group[group.length - 1].y - group[0].y) / (group.length - 1) : 0;
                 var bestJ = -1;
                 var bestDist = Infinity;
 
-                for (var j = lastIdx + 1; j < lineSegments.length && j <= lastIdx + 4; j++) {
+                for (j = lastIdx + 1; j < lineSegments.length && j <= lastIdx + 4; j++) {
                     if (used[j]) continue;
                     var gap = lineSegments[j].y - group[group.length - 1].y;
                     if (gap < 3) continue;
@@ -348,21 +275,15 @@ OMR.StaffDetector = {
                     }
                 }
 
-                if (bestJ === -1) {
-                    valid = false;
-                    break;
-                }
+                if (bestJ === -1) { valid = false; break; }
                 group.push(lineSegments[bestJ]);
                 lastIdx = bestJ;
             }
 
             if (!valid || group.length !== 5) continue;
 
-            // Validate spacing consistency
             var spacings = [];
-            for (g = 1; g < 5; g++) {
-                spacings.push(group[g].y - group[g - 1].y);
-            }
+            for (g = 1; g < 5; g++) spacings.push(group[g].y - group[g - 1].y);
             var avgSpacing = (spacings[0] + spacings[1] + spacings[2] + spacings[3]) / 4;
             var maxDev = 0;
             for (g = 0; g < 4; g++) {
@@ -371,17 +292,14 @@ OMR.StaffDetector = {
             }
             if (maxDev > avgSpacing * 0.35) continue;
 
-            // Valid staff found
             var lines = [];
             for (g = 0; g < 5; g++) {
                 lines.push(group[g].y);
-                // Mark used — find the index
-                for (var k = 0; k < lineSegments.length; k++) {
+                for (k = 0; k < lineSegments.length; k++) {
                     if (lineSegments[k] === group[g]) { used[k] = true; break; }
                 }
             }
 
-            // Find staff horizontal extent
             var staffTop = lines[0] - Math.round(avgSpacing);
             var staffBottom = lines[4] + Math.round(avgSpacing);
             if (staffTop < 0) staffTop = 0;
@@ -417,42 +335,24 @@ OMR.StaffDetector = {
             return { staves: [], staffSpacing: 12, systems: [] };
         }
 
-        // Global staff spacing
         var globalSpacing = 0;
         for (i = 0; i < staves.length; i++) globalSpacing += staves[i].spacing;
         globalSpacing = globalSpacing / staves.length;
 
-        // Group into systems
         var systems = this.groupIntoSystems(staves, globalSpacing);
-
-        // Detect clefs
         this.detectClefs(bin, width, height, staves);
-
-        // Re-index staves
-        for (i = 0; i < staves.length; i++) {
-            staves[i].staffIndex = i;
-        }
+        for (i = 0; i < staves.length; i++) staves[i].staffIndex = i;
 
         console.log('[StaffDetector] Found ' + staves.length + ' staves in ' + systems.length + ' systems, spacing=' + Math.round(globalSpacing));
-
-        return {
-            staves: staves,
-            staffSpacing: globalSpacing,
-            systems: systems
-        };
+        return { staves: staves, staffSpacing: globalSpacing, systems: systems };
     },
 
-    /**
-     * Group staves into systems (grand staff detection).
-     * Two staves close together (gap < 3x spacing) form a grand staff system.
-     */
     groupIntoSystems: function(staves, spacing) {
         var systems = [];
         var i = 0;
         while (i < staves.length) {
             if (i + 1 < staves.length) {
                 var gap = staves[i + 1].lines[0] - staves[i].lines[4];
-                // Grand staff: gap between bottom of top staff and top of bottom staff < 3x spacing
                 if (gap < spacing * 3.5 && gap > 0) {
                     systems.push({
                         staves: [staves[i], staves[i + 1]],
@@ -475,10 +375,6 @@ OMR.StaffDetector = {
         return systems;
     },
 
-    /**
-     * Remove staff lines from binary image to aid note detection.
-     * Only removes pixels that are part of thin horizontal runs.
-     */
     removeStaffLines: function(bin, width, height, staves) {
         var cleaned = new Uint8Array(bin);
         for (var s = 0; s < staves.length; s++) {
@@ -493,7 +389,6 @@ OMR.StaffDetector = {
                 if (searchBot >= height) searchBot = height - 1;
 
                 for (var x = staff.left; x <= staff.right; x++) {
-                    // Count vertical black run at this x through the line region
                     var runTop = -1, runBot = -1;
                     for (var y = searchTop; y <= searchBot; y++) {
                         if (bin[y * width + x] === 1) {
@@ -504,14 +399,9 @@ OMR.StaffDetector = {
                     if (runTop === -1) continue;
                     var runLen = runBot - runTop + 1;
 
-                    // Only erase if thin (staff line) — not if something thicker crosses
                     if (runLen <= maxThick) {
-                        // Check if there's foreground above or below (would indicate a note/stem crossing)
                         var hasAbove = (runTop > 0 && bin[(runTop - 1) * width + x] === 1);
                         var hasBelow = (runBot < height - 1 && bin[(runBot + 1) * width + x] === 1);
-
-                        // If the vertical run is only staff-line thickness AND
-                        // there is NOT foreground both above and below, erase it
                         if (!(hasAbove && hasBelow)) {
                             for (var ey = runTop; ey <= runBot; ey++) {
                                 cleaned[ey * width + x] = 0;
@@ -524,10 +414,6 @@ OMR.StaffDetector = {
         return cleaned;
     },
 
-    /**
-     * Detect clef type for each staff by analyzing the left region.
-     * Treble clef is taller, bass clef is shorter with dots.
-     */
     detectClefs: function(bin, width, height, staves) {
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
@@ -539,7 +425,6 @@ OMR.StaffDetector = {
             if (regionTop < 0) regionTop = 0;
             if (regionBottom >= height) regionBottom = height - 1;
 
-            // Count black pixels above and below staff center
             var centerY = Math.round((staff.lines[0] + staff.lines[4]) / 2);
             var aboveCount = 0, belowCount = 0;
             for (var y = regionTop; y <= regionBottom; y++) {
@@ -551,19 +436,11 @@ OMR.StaffDetector = {
                 }
             }
 
-            // Treble clef extends significantly above center, bass clef is more balanced/below-heavy
             var ratio = (aboveCount + 1) / (belowCount + 1);
-            // Also check extent above top line
             var extentAbove = 0;
             for (y = regionTop; y < staff.lines[0]; y++) {
                 for (x = regionLeft; x < regionRight; x++) {
                     if (bin[y * width + x] === 1) { extentAbove++; break; }
-                }
-            }
-            var extentBelow = 0;
-            for (y = staff.lines[4] + 1; y <= regionBottom; y++) {
-                for (x = regionLeft; x < regionRight; x++) {
-                    if (bin[y * width + x] === 1) { extentBelow++; break; }
                 }
             }
 
@@ -577,1331 +454,1447 @@ OMR.StaffDetector = {
 };
 
 
-// =====================================================
-// NOTE DETECTOR v5.0 — Audiveris-inspired algorithms
-// Chamfer distance + template matching + projection barlines
-// + measure-based organization + proper rhythm
-// =====================================================
-PianoModeOMR.NoteDetector = {
+/* =========================================================================
+ *  MODULE 3: NoteDetector
+ * ========================================================================= */
+OMR.NoteDetector = {
 
-    STEPS: ['C', 'D', 'E', 'F', 'G', 'A', 'B'],
+    computeDistanceTransform: function(bin, width, height) {
+        var dt = new Uint16Array(width * height);
+        var INF = 30000;
+        var x, y, idx;
 
-    TREBLE_PITCHES: [
-        {s:'E',o:4},{s:'F',o:4},{s:'G',o:4},{s:'A',o:4},{s:'B',o:4},
-        {s:'C',o:5},{s:'D',o:5},{s:'E',o:5},{s:'F',o:5},{s:'G',o:5},
-        {s:'A',o:5},{s:'B',o:5},{s:'C',o:6},{s:'D',o:6},{s:'E',o:6},
-        {s:'F',o:6},{s:'G',o:6}
-    ],
-    BASS_PITCHES: [
-        {s:'G',o:2},{s:'A',o:2},{s:'B',o:2},{s:'C',o:3},{s:'D',o:3},
-        {s:'E',o:3},{s:'F',o:3},{s:'G',o:3},{s:'A',o:3},{s:'B',o:3},
-        {s:'C',o:4},{s:'D',o:4},{s:'E',o:4},{s:'F',o:4},{s:'G',o:4},
-        {s:'A',o:4},{s:'B',o:4}
-    ],
+        for (idx = 0; idx < width * height; idx++) {
+            dt[idx] = bin[idx] === 1 ? INF : 0;
+        }
 
-    noteToMidi: function(step, octave, alter) {
-        var semi = {C:0,D:2,E:4,F:5,G:7,A:9,B:11};
-        return 12 * (octave + 1) + (semi[step] || 0) + (alter || 0);
-    },
-
-    // -------------------------------------------------------
-    // CHAMFER DISTANCE TRANSFORM (3x3 mask)
-    // -------------------------------------------------------
-    computeDistanceTransform: function(binary, width, height) {
-        var INF = 9999;
-        var dist = new Int32Array(width * height);
-        for (var i = 0; i < binary.length; i++) dist[i] = binary[i] === 1 ? 0 : INF;
-        for (var y = 1; y < height; y++) {
-            for (var x = 1; x < width - 1; x++) {
-                var idx = y * width + x;
-                var d = dist[idx];
-                d = Math.min(d, dist[idx - width - 1] + 4);
-                d = Math.min(d, dist[idx - width] + 3);
-                d = Math.min(d, dist[idx - width + 1] + 4);
-                d = Math.min(d, dist[idx - 1] + 3);
-                dist[idx] = d;
+        for (y = 1; y < height - 1; y++) {
+            for (x = 1; x < width - 1; x++) {
+                idx = y * width + x;
+                if (dt[idx] === 0) continue;
+                var v = dt[idx];
+                var a = dt[(y - 1) * width + (x - 1)] + 4;
+                var b = dt[(y - 1) * width + x] + 3;
+                var c = dt[(y - 1) * width + (x + 1)] + 4;
+                var d = dt[y * width + (x - 1)] + 3;
+                if (a < v) v = a;
+                if (b < v) v = b;
+                if (c < v) v = c;
+                if (d < v) v = d;
+                dt[idx] = v;
             }
         }
-        for (var y = height - 2; y >= 0; y--) {
-            for (var x = width - 2; x >= 1; x--) {
-                var idx = y * width + x;
-                var d = dist[idx];
-                d = Math.min(d, dist[idx + width + 1] + 4);
-                d = Math.min(d, dist[idx + width] + 3);
-                d = Math.min(d, dist[idx + width - 1] + 4);
-                d = Math.min(d, dist[idx + 1] + 3);
-                dist[idx] = d;
+
+        for (y = height - 2; y >= 1; y--) {
+            for (x = width - 2; x >= 1; x--) {
+                idx = y * width + x;
+                if (dt[idx] === 0) continue;
+                var v2 = dt[idx];
+                var e = dt[y * width + (x + 1)] + 3;
+                var f = dt[(y + 1) * width + (x - 1)] + 4;
+                var g = dt[(y + 1) * width + x] + 3;
+                var h = dt[(y + 1) * width + (x + 1)] + 4;
+                if (e < v2) v2 = e;
+                if (f < v2) v2 = f;
+                if (g < v2) v2 = g;
+                if (h < v2) v2 = h;
+                dt[idx] = v2;
             }
         }
-        for (var i = 0; i < dist.length; i++) dist[i] = Math.round(dist[i] / 3);
-        return dist;
+
+        return dt;
     },
 
-    // -------------------------------------------------------
-    // NOTEHEAD TEMPLATE (synthetic ellipse)
-    // -------------------------------------------------------
-    _createNoteheadTemplate: function(spacing, isFilled) {
-        var w = Math.round(spacing * 1.35);
-        var h = Math.round(spacing * 0.8);
-        var hw = Math.floor(w / 2);
-        var hh = Math.floor(h / 2);
-        var points = [];
-        var tiltAngle = 0.35; // ~20 degrees
+    _makeNoteTemplate: function(sp) {
+        var rx = Math.round(sp * 0.65);
+        var ry = Math.round(sp * 0.42);
+        var tw = rx * 2 + 1;
+        var th = ry * 2 + 1;
+        var tpl = new Uint8Array(tw * th);
+        var cx = rx, cy = ry;
+        var angle = -0.35;
+        var cosA = Math.cos(angle);
+        var sinA = Math.sin(angle);
 
-        for (var dy = -hh - 1; dy <= hh + 1; dy++) {
-            for (var dx = -hw - 1; dx <= hw + 1; dx++) {
-                var rx = dx * Math.cos(tiltAngle) + dy * Math.sin(tiltAngle);
-                var ry = -dx * Math.sin(tiltAngle) + dy * Math.cos(tiltAngle);
-                var ellipseVal = (rx * rx) / (hw * hw) + (ry * ry) / (hh * hh);
-
-                if (isFilled) {
-                    if (ellipseVal <= 1.0) points.push({x:dx, y:dy, expected:0});
-                    else if (ellipseVal <= 1.5) points.push({x:dx, y:dy, expected:1});
-                } else {
-                    if (ellipseVal <= 1.0 && ellipseVal >= 0.4) points.push({x:dx, y:dy, expected:0});
-                    else if (ellipseVal < 0.4) points.push({x:dx, y:dy, expected:-1});
-                    else if (ellipseVal <= 1.5) points.push({x:dx, y:dy, expected:1});
-                }
+        for (var ty = 0; ty < th; ty++) {
+            for (var tx = 0; tx < tw; tx++) {
+                var dx = tx - cx;
+                var dy = ty - cy;
+                var rdx = dx * cosA + dy * sinA;
+                var rdy = -dx * sinA + dy * cosA;
+                var val = (rdx * rdx) / (rx * rx) + (rdy * rdy) / (ry * ry);
+                tpl[ty * tw + tx] = val <= 1.0 ? 1 : 0;
             }
         }
-        return { points: points, width: w, height: h };
+        return { data: tpl, width: tw, height: th };
     },
 
-    // -------------------------------------------------------
-    // TEMPLATE EVALUATION (Audiveris-style weighted scoring)
-    // -------------------------------------------------------
-    _evaluateTemplate: function(template, cx, cy, distTransform, width, height) {
-        var foreWeight = 4.0, backWeight = 1.0, holeWeight = 0.5;
-        var totalWeight = 0, totalDist = 0;
-
-        for (var i = 0; i < template.points.length; i++) {
-            var p = template.points[i];
-            var nx = cx + p.x, ny = cy + p.y;
-            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-            var actualDist = distTransform[ny * width + nx];
-            var weight, dist;
-
-            if (p.expected === 0) { weight = foreWeight; dist = actualDist > 0 ? 1 : 0; }
-            else if (p.expected > 0) { weight = backWeight; dist = actualDist === 0 ? 1 : 0; }
-            else { weight = holeWeight; dist = actualDist === 0 ? 1 : 0; }
-
-            totalDist += weight * dist;
-            totalWeight += weight;
+    scanForNoteheads: function(bin, dt, width, height, staves, staffSpacing, preambleWidths) {
+        var sp = staffSpacing;
+        var tpl = this._makeNoteTemplate(sp);
+        var tw = tpl.width;
+        var th = tpl.height;
+        var tplData = tpl.data;
+        var tplPixCount = 0;
+        var ti;
+        for (ti = 0; ti < tplData.length; ti++) {
+            if (tplData[ti] === 1) tplPixCount++;
         }
-        return totalWeight > 0 ? totalDist / totalWeight : 1.0;
-    },
 
-    // -------------------------------------------------------
-    // BARLINE DETECTION — Audiveris StaffProjector approach
-    // Uses vertical projection + derivative threshold
-    // -------------------------------------------------------
-    detectBarLines: function(binary, width, height, staves) {
-        var allBarLines = [];
+        var noteheads = [];
+        var MATCH_THRESHOLD = 0.35;
 
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
-            var sp = staff.spacing;
-            var staffH = staff.bottom - staff.top;
-            var staffBarLines = [];
+            var preambleWidth = (preambleWidths && preambleWidths[s]) ? preambleWidths[s] : Math.round(sp * 5);
+            var scanLeft = staff.left + preambleWidth;
+            var scanRight = staff.right - Math.round(sp * 0.5);
+            var scanTop = staff.lines[0] - Math.round(sp * 4);
+            var scanBottom = staff.lines[4] + Math.round(sp * 4);
+            if (scanTop < 0) scanTop = 0;
+            if (scanBottom >= height) scanBottom = height - 1;
 
-            // Step 1: Compute vertical projection within staff bounds
-            var projection = new Uint16Array(width);
-            for (var x = 0; x < width; x++) {
-                var count = 0;
-                for (var y = staff.top - 2; y <= staff.bottom + 2; y++) {
-                    if (y >= 0 && y < height && binary[y * width + x] === 1) count++;
-                }
-                projection[x] = count;
-            }
+            for (var sy = scanTop; sy <= scanBottom - th; sy++) {
+                for (var sx = scanLeft; sx <= scanRight - tw; sx += 1) {
+                    var cenIdx = (sy + Math.floor(th / 2)) * width + (sx + Math.floor(tw / 2));
+                    if (bin[cenIdx] === 0) continue;
 
-            // Step 2: Compute derivatives
-            var derivatives = new Int16Array(width);
-            for (var x = 1; x < width; x++) {
-                derivatives[x] = projection[x] - projection[x - 1];
-            }
-
-            // Step 3: Adaptive threshold from top derivatives (Audiveris approach)
-            var sortedDer = [];
-            for (var x = 0; x < width; x++) sortedDer.push(Math.abs(derivatives[x]));
-            sortedDer.sort(function(a, b) { return b - a; });
-            var topN = Math.min(5, sortedDer.length);
-            var eliteDer = 0;
-            for (var i = 0; i < topN; i++) eliteDer += sortedDer[i];
-            eliteDer /= topN;
-            var derivThreshold = Math.round(eliteDer * 0.3);
-            var barThreshold = Math.round(staffH * 0.65); // min pixel count for barline
-
-            // Step 4: Find peaks using derivative crossings
-            var inPeak = false, peakStart = 0;
-            for (var x = Math.round(sp * 2); x < width; x++) {
-                if (!inPeak && derivatives[x] >= derivThreshold) {
-                    peakStart = x;
-                    inPeak = true;
-                } else if (inPeak && derivatives[x] <= -derivThreshold) {
-                    // Peak end found — validate
-                    var peakEnd = x;
-                    var peakWidth = peakEnd - peakStart;
-
-                    // Barline must be narrow
-                    if (peakWidth < sp * 1.5 && peakWidth > 0) {
-                        // Check pixel count within peak
-                        var maxCount = 0;
-                        for (var px = peakStart; px <= peakEnd; px++) {
-                            if (projection[px] > maxCount) maxCount = projection[px];
-                        }
-                        // Must span most of staff height
-                        if (maxCount >= barThreshold) {
-                            var barX = Math.round((peakStart + peakEnd) / 2);
-                            // Check it's not too close to previous barline
-                            var tooClose = false;
-                            for (var b = staffBarLines.length - 1; b >= 0; b--) {
-                                if (Math.abs(staffBarLines[b].x - barX) < sp * 1.5) { tooClose = true; break; }
-                            }
-                            if (!tooClose) {
-                                staffBarLines.push({ x: barX, staffIndex: s, projection: maxCount });
+                    var matchSum = 0;
+                    var totalWeight = 0;
+                    for (var ty = 0; ty < th; ty++) {
+                        for (var tx = 0; tx < tw; tx++) {
+                            if (tplData[ty * tw + tx] === 1) {
+                                var imgIdx = (sy + ty) * width + (sx + tx);
+                                var distVal = dt[imgIdx];
+                                var norm = distVal / 3.0;
+                                var simil = 1.0 / (1.0 + norm * norm * 0.5);
+                                matchSum += simil;
+                                totalWeight++;
                             }
                         }
                     }
-                    inPeak = false;
-                }
-            }
 
-            // Also detect barlines using simple high-count columns as fallback
-            for (var x = Math.round(sp * 2); x < width; x++) {
-                if (projection[x] >= barThreshold) {
-                    // Check narrowness
-                    var narrow = true;
-                    for (var dx = -4; dx <= 4; dx++) {
-                        if (dx === 0) continue;
-                        var nx = x + dx;
-                        if (nx >= 0 && nx < width && Math.abs(dx) > 2 && projection[nx] >= barThreshold * 0.85) {
-                            narrow = false; break;
-                        }
-                    }
-                    if (narrow) {
-                        var dup = false;
-                        for (var b = 0; b < staffBarLines.length; b++) {
-                            if (Math.abs(staffBarLines[b].x - x) < sp * 1.5) { dup = true; break; }
-                        }
-                        if (!dup) staffBarLines.push({ x: x, staffIndex: s, projection: projection[x] });
-                    }
-                }
-            }
+                    var score = totalWeight > 0 ? matchSum / totalWeight : 0;
+                    if (score < MATCH_THRESHOLD) continue;
 
-            // Sort barlines by x position
-            staffBarLines.sort(function(a, b) { return a.x - b.x; });
-            allBarLines = allBarLines.concat(staffBarLines);
-        }
+                    var headCx = sx + Math.floor(tw / 2);
+                    var headCy = sy + Math.floor(th / 2);
 
-        return allBarLines;
-    },
-
-    // -------------------------------------------------------
-    // PREAMBLE DETECTION — find where notes start (after clef/key/time)
-    // -------------------------------------------------------
-    _findNoteStartX: function(binary, width, staves) {
-        var results = [];
-        for (var s = 0; s < staves.length; s++) {
-            var staff = staves[s];
-            var sp = staff.spacing;
-            var minSkip = Math.round(sp * 2.5);
-            var maxSearch = Math.min(width, Math.round(sp * 8));
-            var bestGap = minSkip;
-
-            // Find the first significant gap in ink (end of preamble)
-            var gapStart = -1, gapLen = 0;
-            for (var x = minSkip; x < maxSearch; x++) {
-                var ink = 0;
-                for (var y = staff.top; y <= staff.bottom; y++) {
-                    if (binary[y * width + x] === 1) ink++;
-                }
-                var staffH = staff.bottom - staff.top;
-                if (ink < staffH * 0.1) {
-                    if (gapStart === -1) gapStart = x;
-                    gapLen++;
-                    if (gapLen >= sp * 0.3) bestGap = gapStart + gapLen;
-                } else {
-                    gapStart = -1;
-                    gapLen = 0;
-                }
-            }
-            results.push(bestGap);
-        }
-        return results;
-    },
-
-    // -------------------------------------------------------
-    // KEY SIGNATURE DETECTION — Audiveris KeyBuilder approach
-    // -------------------------------------------------------
-    detectKeySignature: function(binary, width, staves) {
-        if (staves.length === 0) return { fifths: 0, accidentals: {} };
-        var staff = staves[0];
-        var sp = staff.spacing;
-        var startX = Math.round(sp * 2.5);
-        var endX = Math.round(sp * 6);
-        var top = staff.top - Math.round(sp);
-        var bot = staff.bottom + Math.round(sp);
-        var imgH = Math.floor(binary.length / width);
-
-        // X-axis projection in key signature region
-        var cols = [];
-        for (var x = startX; x < Math.min(width, endX); x++) {
-            var ink = 0;
-            for (var y = Math.max(0, top); y <= Math.min(bot, imgH - 1); y++) {
-                if (binary[y * width + x] === 1) ink++;
-            }
-            cols.push(ink);
-        }
-
-        // Find ink clusters
-        var inCl = false, clS = 0, clusters = [];
-        var clThreshold = sp * 0.25;
-        for (var i = 0; i < cols.length; i++) {
-            if (cols[i] > clThreshold && !inCl) { inCl = true; clS = i; }
-            else if (cols[i] <= clThreshold && inCl) {
-                inCl = false;
-                var w = i - clS;
-                if (w > sp * 0.15 && w < sp * 2.0) {
-                    clusters.push({ start: clS + startX, width: w, end: i + startX });
-                }
-            }
-        }
-
-        if (clusters.length === 0) return { fifths: 0, accidentals: {} };
-
-        // Differentiate sharps vs flats by cluster width pattern
-        // Sharps: ~2 narrow stems per accidental (wider overall)
-        // Flats: ~1 stem per accidental (narrower)
-        var avgClWidth = 0;
-        for (var i = 0; i < clusters.length; i++) avgClWidth += clusters[i].width;
-        avgClWidth /= clusters.length;
-
-        // Count distinct accidental symbols
-        // Sharp clusters are wider (~sp*0.8-1.4), flat clusters narrower (~sp*0.3-0.7)
-        var isSharp = avgClWidth > sp * 0.6;
-        var count = clusters.length;
-
-        // For sharps, adjacent narrow clusters may be parts of same sharp
-        if (isSharp && count > 1) {
-            var mergedCount = 0;
-            var i = 0;
-            while (i < clusters.length) {
-                mergedCount++;
-                // Check if next cluster is very close (part of same sharp)
-                if (i + 1 < clusters.length && clusters[i + 1].start - clusters[i].end < sp * 0.4) {
-                    i += 2; // Skip paired cluster
-                } else {
-                    i++;
-                }
-            }
-            count = mergedCount;
-        }
-
-        count = Math.min(count, 7);
-        var fifths = isSharp ? count : -count;
-
-        var acc = {};
-        var so = ['F','C','G','D','A','E','B'], fo = ['B','E','A','D','G','C','F'];
-        if (fifths > 0) { for (var i = 0; i < fifths; i++) acc[so[i]] = 1; }
-        else if (fifths < 0) { for (var i = 0; i < -fifths; i++) acc[fo[i]] = -1; }
-
-        return { fifths: fifths, accidentals: acc };
-    },
-
-    // -------------------------------------------------------
-    // TIME SIGNATURE DETECTION
-    // -------------------------------------------------------
-    detectTimeSignature: function(binary, width, staves) {
-        if (staves.length === 0) return { beats: 4, beatType: 4 };
-        var staff = staves[0];
-        var sp = staff.spacing;
-        var startX = Math.round(sp * 4.5);
-        var endX = Math.round(sp * 7.5);
-        var midY = staff.center;
-
-        // Check for ink in the time signature region
-        var topInk = 0, botInk = 0;
-        for (var x = startX; x < Math.min(width, endX); x++) {
-            for (var y = staff.top; y < midY; y++) { if (binary[y * width + x] === 1) topInk++; }
-            for (var y = midY; y <= staff.bottom; y++) { if (binary[y * width + x] === 1) botInk++; }
-        }
-
-        if (topInk < sp * 2 && botInk < sp * 2) return { beats: 4, beatType: 4 };
-
-        // Horizontal crossing analysis at 25% and 75% of staff
-        var crossY1 = Math.round(staff.top + (staff.bottom - staff.top) * 0.25);
-        var crossY2 = Math.round(staff.top + (staff.bottom - staff.top) * 0.75);
-
-        function countCrossings(yy) {
-            var crossings = 0, prev = 0;
-            for (var x = startX; x < Math.min(width, endX); x++) {
-                var cur = binary[yy * width + x];
-                if (cur === 1 && prev === 0) crossings++;
-                prev = cur;
-            }
-            return crossings;
-        }
-
-        var topCross = countCrossings(crossY1);
-        var botCross = countCrossings(crossY2);
-
-        // Map crossings to number
-        var topNum = topCross >= 4 ? 6 : (topCross >= 3 ? 4 : (topCross >= 2 ? 3 : 2));
-        var botNum = botCross >= 3 ? 8 : 4;
-
-        // Common time signatures
-        if (topNum === 6 && botNum === 8) return { beats: 6, beatType: 8 };
-        if (topNum === 3 && botNum === 8) return { beats: 3, beatType: 8 };
-        if (topNum === 3 && botNum === 4) return { beats: 3, beatType: 4 };
-        if (topNum === 2 && botNum === 4) return { beats: 2, beatType: 4 };
-        if (topNum === 2 && botNum === 2) return { beats: 2, beatType: 2 };
-
-        return { beats: topNum, beatType: botNum };
-    },
-
-    // -------------------------------------------------------
-    // POSITION-BASED NOTEHEAD SCANNING
-    // -------------------------------------------------------
-    scanForNoteheads: function(binary, distTransform, width, height, staves, noteStartX) {
-        var noteHeads = [];
-        var filledTemplate = null, voidTemplate = null;
-
-        for (var s = 0; s < staves.length; s++) {
-            var staff = staves[s];
-            var sp = staff.spacing;
-            var halfSp = sp / 2;
-            var startX = noteStartX ? noteStartX[s] : Math.round(sp * 3);
-
-            if (!filledTemplate || Math.abs(filledTemplate.height - sp * 0.8) > 2) {
-                filledTemplate = this._createNoteheadTemplate(sp, true);
-                voidTemplate = this._createNoteheadTemplate(sp, false);
-            }
-
-            // Scan positions: -6 to +14 (covers ledger lines)
-            for (var pos = -6; pos <= 14; pos++) {
-                var pitchY = Math.round(staff.bottom - pos * halfSp);
-                var step = Math.max(2, Math.round(sp * 0.25));
-
-                for (var x = startX; x < width - Math.round(sp); x += step) {
-                    // Quick ink check
-                    var hasInk = false;
-                    for (var dy = -Math.round(halfSp * 0.8); dy <= Math.round(halfSp * 0.8); dy++) {
-                        var py = pitchY + dy;
-                        if (py >= 0 && py < height && binary[py * width + x] === 1) { hasInk = true; break; }
-                    }
-                    if (!hasInk) continue;
-
-                    var filledScore = this._evaluateTemplate(filledTemplate, x, pitchY, distTransform, width, height);
-                    var voidScore = this._evaluateTemplate(voidTemplate, x, pitchY, distTransform, width, height);
-                    var bestScore = Math.min(filledScore, voidScore);
-                    var isFilled = filledScore <= voidScore;
-
-                    if (bestScore < 0.35) {
-                        // Duplicate check
-                        var isDup = false;
-                        for (var n = noteHeads.length - 1; n >= Math.max(0, noteHeads.length - 30); n--) {
-                            var prev = noteHeads[n];
-                            if (prev.staffIndex === s &&
-                                Math.abs(prev.centerX - x) < sp * 0.5 &&
-                                Math.abs(prev.centerY - pitchY) < halfSp * 0.7) {
-                                if (bestScore < prev.matchScore) noteHeads.splice(n, 1);
-                                else { isDup = true; }
-                                break;
+                    var innerFilled = 0, innerTotal = 0;
+                    var innerRx = Math.round(sp * 0.35);
+                    var innerRy = Math.round(sp * 0.22);
+                    for (var iy = -innerRy; iy <= innerRy; iy++) {
+                        for (var ix = -innerRx; ix <= innerRx; ix++) {
+                            var er = (ix * ix) / (innerRx * innerRx) + (iy * iy) / (innerRy * innerRy);
+                            if (er <= 0.7) {
+                                innerTotal++;
+                                var pi = (headCy + iy) * width + (headCx + ix);
+                                if (pi >= 0 && pi < width * height && bin[pi] === 1) {
+                                    innerFilled++;
+                                }
                             }
                         }
-                        if (isDup) continue;
-
-                        noteHeads.push({
-                            centerX: x, centerY: pitchY,
-                            minX: x - Math.round(sp * 0.7), maxX: x + Math.round(sp * 0.7),
-                            minY: pitchY - Math.round(sp * 0.42), maxY: pitchY + Math.round(sp * 0.42),
-                            width: Math.round(sp * 1.35), height: Math.round(sp * 0.8),
-                            isFilled: isFilled, staffIndex: s, posIndex: pos,
-                            matchScore: bestScore, pixels: Math.round(sp * sp * 0.5)
-                        });
                     }
+                    var fillRatio = innerTotal > 0 ? innerFilled / innerTotal : 0;
+                    var isFilled = fillRatio > 0.55;
+
+                    noteheads.push({
+                        centerX: headCx,
+                        centerY: headCy,
+                        minX: sx,
+                        maxX: sx + tw - 1,
+                        minY: sy,
+                        maxY: sy + th - 1,
+                        width: tw,
+                        height: th,
+                        isFilled: isFilled,
+                        fillRatio: fillRatio,
+                        staffIndex: s,
+                        matchScore: score
+                    });
+
+                    sx += Math.round(tw * 0.6);
                 }
             }
         }
 
-        // Global dedup: sort by score, keep best at each grid position
-        noteHeads.sort(function(a, b) { return a.matchScore - b.matchScore; });
-        var filtered = [], used = {};
-        for (var i = 0; i < noteHeads.length; i++) {
-            var nh = noteHeads[i];
-            var key = nh.staffIndex + '_' + Math.round(nh.centerX / (staves[nh.staffIndex].spacing * 0.4)) + '_' + nh.posIndex;
-            if (!used[key]) { used[key] = true; filtered.push(nh); }
+        noteheads.sort(function(a, b) { return b.matchScore - a.matchScore; });
+        var keep = [];
+        var suppressed = new Array(noteheads.length);
+        for (var ni = 0; ni < suppressed.length; ni++) suppressed[ni] = false;
+
+        var minDistSq = Math.round(sp * 0.6);
+        minDistSq = minDistSq * minDistSq;
+
+        for (var pi2 = 0; pi2 < noteheads.length; pi2++) {
+            if (suppressed[pi2]) continue;
+            keep.push(noteheads[pi2]);
+            for (var qi = pi2 + 1; qi < noteheads.length; qi++) {
+                if (suppressed[qi]) continue;
+                var dxx = noteheads[pi2].centerX - noteheads[qi].centerX;
+                var dyy = noteheads[pi2].centerY - noteheads[qi].centerY;
+                if (dxx * dxx + dyy * dyy < minDistSq) {
+                    suppressed[qi] = true;
+                }
+            }
         }
-        return filtered;
+
+        return keep;
     },
 
-    // -------------------------------------------------------
-    // STEM DETECTION — improved vertical line search
-    // -------------------------------------------------------
-    detectStems: function(noteHeads, binary, width, height, staves) {
-        for (var i = 0; i < noteHeads.length; i++) {
-            var nh = noteHeads[i];
-            var staff = staves[nh.staffIndex];
-            var sp = staff.spacing;
-            var stemLen = sp * 3;
-            var minStemLen = sp * 1.8;
-            var bestStemUp = 0, bestStemDown = 0;
-            var stemX = -1;
+    detectStems: function(bin, width, height, noteheads, staffSpacing) {
+        var sp = staffSpacing;
+        var minStemLen = Math.round(sp * 2.0);
 
-            // Check both sides of notehead for stem
-            var sides = [nh.maxX, nh.minX, nh.centerX + Math.round(sp * 0.5), nh.centerX - Math.round(sp * 0.5)];
+        for (var n = 0; n < noteheads.length; n++) {
+            var head = noteheads[n];
+            head.hasStem = false;
+            head.stemDir = 0;
+            head.stemEndY = head.centerY;
+
+            var sides = [
+                { xStart: head.minX - 2, xEnd: head.minX + 2 },
+                { xStart: head.maxX - 2, xEnd: head.maxX + 2 }
+            ];
+
+            var bestStemLen = 0;
+            var bestDir = 0;
+            var bestEndY = head.centerY;
+
             for (var si = 0; si < sides.length; si++) {
-                var cx = sides[si];
-                if (cx < 0 || cx >= width) continue;
+                var side = sides[si];
+                for (var sx = side.xStart; sx <= side.xEnd; sx++) {
+                    if (sx < 0 || sx >= width) continue;
 
-                // Check upward
-                var upCount = 0;
-                for (var y = nh.minY - 1; y >= Math.max(0, nh.minY - stemLen); y--) {
-                    var found = false;
-                    for (var dx = -1; dx <= 1; dx++) {
-                        var xx = cx + dx;
-                        if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { found = true; break; }
+                    var upLen = 0;
+                    for (var uy = head.minY - 1; uy >= Math.max(0, head.minY - Math.round(sp * 4)); uy--) {
+                        var colBlack = 0;
+                        for (var cx = Math.max(0, sx - 1); cx <= Math.min(width - 1, sx + 1); cx++) {
+                            if (bin[uy * width + cx] === 1) colBlack++;
+                        }
+                        if (colBlack >= 1) upLen++;
+                        else break;
                     }
-                    if (found) upCount++;
-                    else if (upCount > 0) break; // stop at first gap
-                }
-                if (upCount > bestStemUp) { bestStemUp = upCount; }
 
-                // Check downward
-                var downCount = 0;
-                for (var y = nh.maxY + 1; y <= Math.min(height - 1, nh.maxY + stemLen); y++) {
-                    var found = false;
-                    for (var dx = -1; dx <= 1; dx++) {
-                        var xx = cx + dx;
-                        if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { found = true; break; }
+                    var downLen = 0;
+                    for (var dy = head.maxY + 1; dy <= Math.min(height - 1, head.maxY + Math.round(sp * 4)); dy++) {
+                        var colBlack2 = 0;
+                        for (var cx2 = Math.max(0, sx - 1); cx2 <= Math.min(width - 1, sx + 1); cx2++) {
+                            if (bin[dy * width + cx2] === 1) colBlack2++;
+                        }
+                        if (colBlack2 >= 1) downLen++;
+                        else break;
                     }
-                    if (found) downCount++;
-                    else if (downCount > 0) break;
+
+                    if (upLen >= minStemLen && upLen > bestStemLen) {
+                        bestStemLen = upLen;
+                        bestDir = 1;
+                        bestEndY = head.minY - upLen;
+                    }
+                    if (downLen >= minStemLen && downLen > bestStemLen) {
+                        bestStemLen = downLen;
+                        bestDir = -1;
+                        bestEndY = head.maxY + downLen;
+                    }
                 }
-                if (downCount > bestStemDown) { bestStemDown = downCount; }
             }
 
-            nh.hasStem = bestStemUp >= minStemLen || bestStemDown >= minStemLen;
-            if (bestStemUp >= minStemLen && bestStemDown >= minStemLen) {
-                nh.stemDirection = bestStemUp > bestStemDown ? 'up' : 'down';
-            } else {
-                nh.stemDirection = bestStemUp >= minStemLen ? 'up' : (bestStemDown >= minStemLen ? 'down' : 'none');
+            if (bestStemLen >= minStemLen) {
+                head.hasStem = true;
+                head.stemDir = bestDir;
+                head.stemEndY = bestEndY;
+                head.stemLength = bestStemLen;
             }
-            nh.stemLength = Math.max(bestStemUp, bestStemDown);
         }
-        return noteHeads;
     },
 
-    // -------------------------------------------------------
-    // FLAG DETECTION — improved region analysis
-    // -------------------------------------------------------
-    detectFlags: function(noteHeads, binary, width, height, staves) {
-        for (var i = 0; i < noteHeads.length; i++) {
-            var nh = noteHeads[i];
-            if (!nh.hasStem) { nh.flagCount = 0; continue; }
-            var staff = staves[nh.staffIndex];
-            var sp = staff.spacing;
+    detectFlags: function(bin, width, height, noteheads, staffSpacing) {
+        var sp = staffSpacing;
+        var flagSearchW = Math.round(sp * 1.5);
 
-            // Flag region is at the end of the stem, on the right side
-            var stemEndY = nh.stemDirection === 'up'
-                ? nh.minY - Math.round(nh.stemLength * 0.8)
-                : nh.maxY + Math.round(nh.stemLength * 0.8);
+        for (var n = 0; n < noteheads.length; n++) {
+            var head = noteheads[n];
+            head.flagCount = 0;
+            if (!head.hasStem) continue;
 
-            var flagRegionH = Math.round(sp * 1.5);
-            var flagRegionW = Math.round(sp * 1.2);
+            var flagTop, flagBot, flagLeft, flagRight;
+            if (head.stemDir === 1) {
+                flagTop = head.stemEndY - Math.round(sp * 0.3);
+                flagBot = head.stemEndY + Math.round(sp * 1.5);
+                flagLeft = head.maxX - 2;
+                flagRight = head.maxX + flagSearchW;
+            } else {
+                flagTop = head.stemEndY - Math.round(sp * 1.5);
+                flagBot = head.stemEndY + Math.round(sp * 0.3);
+                flagLeft = head.maxX - 2;
+                flagRight = head.maxX + flagSearchW;
+            }
 
-            var fx = nh.centerX; // flags extend to the right from stem
-            var yStart = Math.max(0, Math.min(stemEndY, stemEndY - flagRegionH));
-            var yEnd = Math.min(height - 1, Math.max(stemEndY, stemEndY + flagRegionH));
+            if (flagTop < 0) flagTop = 0;
+            if (flagBot >= height) flagBot = height - 1;
+            if (flagLeft < 0) flagLeft = 0;
+            if (flagRight >= width) flagRight = width - 1;
 
-            var flagPixels = 0, totalPixels = 0;
-            for (var y = yStart; y <= yEnd; y++) {
-                for (var x = fx; x < Math.min(width, fx + flagRegionW); x++) {
-                    totalPixels++;
-                    if (binary[y * width + x] === 1) flagPixels++;
+            var blackCount = 0;
+            var regionSize = 0;
+
+            for (var fy = flagTop; fy <= flagBot; fy++) {
+                for (var fx = flagLeft + 3; fx <= flagRight; fx++) {
+                    regionSize++;
+                    if (bin[fy * width + fx] === 1) blackCount++;
                 }
             }
 
-            var density = totalPixels > 0 ? flagPixels / totalPixels : 0;
+            var density = regionSize > 0 ? blackCount / regionSize : 0;
 
-            // Check for multiple flag bands (16th, 32nd notes)
-            if (density > 0.25) {
-                // Count distinct horizontal bands of ink
-                var bands = 0, inBand = false;
-                for (var y = yStart; y <= yEnd; y++) {
-                    var rowInk = 0;
-                    for (var x = fx; x < Math.min(width, fx + flagRegionW); x++) {
-                        if (binary[y * width + x] === 1) rowInk++;
+            if (density > 0.08) {
+                var bandCount = 0;
+                var inBand = false;
+                for (var fy2 = flagTop; fy2 <= flagBot; fy2++) {
+                    var rowBlack = 0;
+                    for (var fx2 = flagLeft + 3; fx2 <= flagRight; fx2++) {
+                        if (bin[fy2 * width + fx2] === 1) rowBlack++;
                     }
-                    if (rowInk > flagRegionW * 0.3) {
-                        if (!inBand) { bands++; inBand = true; }
+                    var rowDensity = rowBlack / Math.max(1, flagRight - flagLeft - 3);
+                    if (rowDensity > 0.15) {
+                        if (!inBand) { bandCount++; inBand = true; }
                     } else {
                         inBand = false;
                     }
                 }
-                nh.flagCount = Math.min(bands, 4); // cap at 4 (64th note)
-                if (nh.flagCount === 0 && density > 0.15) nh.flagCount = 1;
+                head.flagCount = Math.min(3, Math.max(0, bandCount));
+            }
+        }
+    },
+
+    detectBeams: function(bin, width, height, noteheads, staffSpacing) {
+        var sp = staffSpacing;
+        var beamHeight = Math.max(3, Math.round(sp * 0.45));
+
+        var staffGroups = {};
+        var n, head;
+        for (n = 0; n < noteheads.length; n++) {
+            head = noteheads[n];
+            head.beamCount = head.beamCount || 0;
+            if (!head.hasStem) continue;
+            var key = head.staffIndex;
+            if (!staffGroups[key]) staffGroups[key] = [];
+            staffGroups[key].push(head);
+        }
+
+        for (var sKey in staffGroups) {
+            if (!staffGroups.hasOwnProperty(sKey)) continue;
+            var group = staffGroups[sKey];
+            group.sort(function(a, b) { return a.centerX - b.centerX; });
+
+            for (var i = 0; i < group.length - 1; i++) {
+                var left = group[i];
+                var right = group[i + 1];
+                if (!left.hasStem || !right.hasStem) continue;
+                if (left.stemDir !== right.stemDir) continue;
+
+                var xDist = right.centerX - left.centerX;
+                if (xDist < sp * 0.5 || xDist > sp * 3.5) continue;
+
+                var stemY1 = left.stemEndY;
+                var stemY2 = right.stemEndY;
+                var beamLeft2 = left.centerX;
+                var beamRight2 = right.centerX;
+
+                var nBeams = 0;
+                var scanTop = Math.min(stemY1, stemY2) - Math.round(sp * 0.8);
+                var scanBot = Math.max(stemY1, stemY2) + Math.round(sp * 0.8);
+                if (scanTop < 0) scanTop = 0;
+                if (scanBot >= height) scanBot = height - 1;
+
+                var inBeamBand = false;
+                var bandThickness = 0;
+
+                for (var by = scanTop; by <= scanBot; by++) {
+                    var samplePoints = 5;
+                    var blackSamples = 0;
+                    for (var si2 = 0; si2 <= samplePoints; si2++) {
+                        var sampleX = Math.round(beamLeft2 + (beamRight2 - beamLeft2) * si2 / samplePoints);
+                        if (sampleX >= 0 && sampleX < width && bin[by * width + sampleX] === 1) {
+                            blackSamples++;
+                        }
+                    }
+                    var coverage = blackSamples / (samplePoints + 1);
+                    if (coverage >= 0.6) {
+                        if (!inBeamBand) { inBeamBand = true; bandThickness = 0; }
+                        bandThickness++;
+                    } else {
+                        if (inBeamBand && bandThickness >= 2 && bandThickness <= beamHeight * 2) {
+                            nBeams++;
+                        }
+                        inBeamBand = false;
+                        bandThickness = 0;
+                    }
+                }
+                if (inBeamBand && bandThickness >= 2 && bandThickness <= beamHeight * 2) {
+                    nBeams++;
+                }
+
+                nBeams = Math.min(3, nBeams);
+                if (nBeams > 0) {
+                    if (nBeams > left.beamCount) left.beamCount = nBeams;
+                    if (nBeams > right.beamCount) right.beamCount = nBeams;
+                }
+            }
+        }
+    },
+
+    classifyDuration: function(noteheads) {
+        for (var n = 0; n < noteheads.length; n++) {
+            var head = noteheads[n];
+            var beats = 4;
+            var durationType = 'whole';
+
+            if (!head.hasStem && !head.isFilled) {
+                beats = 4; durationType = 'whole';
+            } else if (head.hasStem && !head.isFilled) {
+                beats = 2; durationType = 'half';
+            } else if (head.hasStem && head.isFilled) {
+                var divisions = 0;
+                if (head.beamCount > 0) divisions = head.beamCount;
+                else if (head.flagCount > 0) divisions = head.flagCount;
+
+                if (divisions === 0) { beats = 1; durationType = 'quarter'; }
+                else if (divisions === 1) { beats = 0.5; durationType = 'eighth'; }
+                else if (divisions === 2) { beats = 0.25; durationType = '16th'; }
+                else { beats = 0.125; durationType = '32nd'; }
             } else {
-                nh.flagCount = 0;
+                beats = 1; durationType = 'quarter';
             }
+
+            head.beats = beats;
+            head.durationType = durationType;
         }
-        return noteHeads;
     },
 
-    // -------------------------------------------------------
-    // BEAM DETECTION — connect beamed notes
-    // -------------------------------------------------------
-    detectBeams: function(noteHeads, binary, width, height, staves) {
-        for (var i = 0; i < noteHeads.length; i++) { noteHeads[i].beamCount = 0; noteHeads[i].beamGroup = -1; }
+    assignPitch: function(noteheads, staves) {
+        var trebleDiatonic = [77, 76, 74, 72, 71, 69, 67, 65, 64, 62, 60, 59, 57, 55, 53, 52, 50, 48, 47, 45];
+        var bassDiatonic = [57, 55, 53, 52, 50, 48, 47, 45, 43, 41, 40, 38, 36, 35, 33, 31, 29, 28, 26, 24];
 
-        var groupId = 0;
+        var trebleSteps = [
+            {step:'F',oct:5},{step:'E',oct:5},{step:'D',oct:5},{step:'C',oct:5},
+            {step:'B',oct:4},{step:'A',oct:4},{step:'G',oct:4},{step:'F',oct:4},
+            {step:'E',oct:4},{step:'D',oct:4},{step:'C',oct:4},{step:'B',oct:3},
+            {step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3},{step:'E',oct:3},
+            {step:'D',oct:3},{step:'C',oct:3},{step:'B',oct:2},{step:'A',oct:2}
+        ];
+        var bassSteps = [
+            {step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3},{step:'E',oct:3},
+            {step:'D',oct:3},{step:'C',oct:3},{step:'B',oct:2},{step:'A',oct:2},
+            {step:'G',oct:2},{step:'F',oct:2},{step:'E',oct:2},{step:'D',oct:2},
+            {step:'C',oct:2},{step:'B',oct:1},{step:'A',oct:1},{step:'G',oct:1},
+            {step:'F',oct:1},{step:'E',oct:1},{step:'D',oct:1},{step:'C',oct:1}
+        ];
 
-        for (var i = 0; i < noteHeads.length - 1; i++) {
-            var a = noteHeads[i], b = noteHeads[i + 1];
-            if (!a.hasStem || !b.hasStem || a.staffIndex !== b.staffIndex) continue;
-            var staff = staves[a.staffIndex];
-            var sp = staff.spacing;
-            if (Math.abs(b.centerX - a.centerX) > sp * 5) continue;
+        for (var n = 0; n < noteheads.length; n++) {
+            var head = noteheads[n];
+            var staff = staves[head.staffIndex];
+            if (!staff) continue;
 
-            // Get stem endpoints
-            var aEndY = a.stemDirection === 'up' ? a.minY - Math.round(a.stemLength * 0.7) : a.maxY + Math.round(a.stemLength * 0.7);
-            var bEndY = b.stemDirection === 'up' ? b.minY - Math.round(b.stemLength * 0.7) : b.maxY + Math.round(b.stemLength * 0.7);
+            var halfSpacing = staff.spacing / 2;
+            var posFromTop = (head.centerY - staff.lines[0]) / halfSpacing;
+            var posIndex = Math.round(posFromTop);
 
-            var sx = Math.min(a.centerX, b.centerX);
-            var ex = Math.max(a.centerX, b.centerX);
-            if (ex - sx < sp * 0.3) continue;
+            if (posIndex < -6) posIndex = -6;
+            if (posIndex > 14) posIndex = 14;
+            head.posIndex = posIndex;
 
-            // Check for beam lines between stem endpoints
-            var beamCount = 0;
-            var searchH = Math.round(sp * 2);
-            var midY = Math.round((aEndY + bEndY) / 2);
-            var yFrom = Math.max(0, midY - searchH);
-            var yTo = Math.min(height - 1, midY + searchH);
+            var diatonicArr = staff.clef === 'bass' ? bassDiatonic : trebleDiatonic;
+            var stepsArr = staff.clef === 'bass' ? bassSteps : trebleSteps;
 
-            // Scan for horizontal bands of high ink density
-            var inBeam = false;
-            for (var y = yFrom; y <= yTo; y++) {
-                var ink = 0, total = ex - sx + 1;
-                for (var x = sx; x <= ex; x++) {
-                    if (x >= 0 && x < width && binary[y * width + x] === 1) ink++;
-                }
-                if (ink / total > 0.45) {
-                    if (!inBeam) { beamCount++; inBeam = true; }
-                } else {
-                    inBeam = false;
-                }
-            }
+            var lookupIdx = posIndex + 2;
+            if (lookupIdx < 0) lookupIdx = 0;
+            if (lookupIdx >= diatonicArr.length) lookupIdx = diatonicArr.length - 1;
 
-            if (beamCount > 0) {
-                beamCount = Math.min(beamCount, 4);
-                a.beamCount = Math.max(a.beamCount, beamCount);
-                b.beamCount = Math.max(b.beamCount, beamCount);
-
-                // Assign beam group
-                if (a.beamGroup >= 0) {
-                    b.beamGroup = a.beamGroup;
-                } else if (b.beamGroup >= 0) {
-                    a.beamGroup = b.beamGroup;
-                } else {
-                    a.beamGroup = groupId;
-                    b.beamGroup = groupId;
-                    groupId++;
-                }
-            }
+            head.midiNote = diatonicArr[lookupIdx];
+            var stepInfo = stepsArr[lookupIdx] || {step: 'C', oct: 4};
+            head.pitchName = stepInfo.step + stepInfo.oct;
+            head.pitch = { step: stepInfo.step, octave: stepInfo.oct, alter: 0 };
         }
-        return noteHeads;
     },
 
-    // -------------------------------------------------------
-    // REST DETECTION — improved shape analysis
-    // -------------------------------------------------------
-    detectRests: function(binary, width, height, staves, noteStartX, barLines) {
+    detectRests: function(bin, width, height, staves, staffSpacing, barlines) {
+        var sp = staffSpacing;
         var rests = [];
-        if (staves.length === 0) return rests;
 
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
-            var sp = staff.spacing;
-            var sx = noteStartX ? noteStartX[s] : Math.round(sp * 3);
-            var staffRests = [];
+            var staffBarlines = [];
+            for (var b = 0; b < barlines.length; b++) {
+                if (barlines[b].staffIndex === s) staffBarlines.push(barlines[b]);
+            }
+            staffBarlines.sort(function(a, b2) { return a.x - b2.x; });
 
-            // Scan x positions looking for rest-shaped blobs
-            var step = Math.round(sp * 0.4);
-            for (var x = sx; x < width - sp; x += step) {
-                // Count ink in a vertical column at staff center
-                var centerInk = 0;
-                for (var y = staff.top; y <= staff.bottom; y++) {
-                    if (binary[y * width + x] === 1) centerInk++;
-                }
+            var measureBounds = [staff.left];
+            for (b = 0; b < staffBarlines.length; b++) measureBounds.push(staffBarlines[b].x);
+            measureBounds.push(staff.right);
 
-                // Rest-like regions have moderate ink (not full barline, not empty)
-                var staffH = staff.bottom - staff.top;
-                if (centerInk < staffH * 0.15 || centerInk > staffH * 0.75) continue;
+            for (var m = 0; m < measureBounds.length - 1; m++) {
+                var mLeft = measureBounds[m];
+                var mRight = measureBounds[m + 1];
 
-                // Analyze the shape more carefully
-                var blobTop = -1, blobBot = -1;
-                for (var y = staff.top - sp; y <= staff.bottom + sp; y++) {
-                    if (y >= 0 && y < height && binary[y * width + x] === 1) {
-                        if (blobTop === -1) blobTop = y;
-                        blobBot = y;
-                    }
-                }
-                if (blobTop === -1) continue;
+                var wholeRestY = staff.lines[3];
+                var halfRestY = staff.lines[2];
+                var blockW = Math.round(sp * 1.0);
+                var blockH = Math.round(sp * 0.5);
 
-                var blobH = blobBot - blobTop + 1;
-                var blobCenterY = (blobTop + blobBot) / 2;
-
-                // Measure horizontal extent
-                var blobLeft = x, blobRight = x;
-                for (var dx = 1; dx < sp * 2; dx++) {
-                    if (x + dx < width) {
-                        var col = 0;
-                        for (var y = blobTop; y <= blobBot; y++) {
-                            if (binary[y * width + x + dx] === 1) col++;
+                for (var rx = mLeft + Math.round(sp); rx < mRight - Math.round(sp * 0.5); rx++) {
+                    var wholeBlack = 0, wholeRegion = 0;
+                    for (var ry = wholeRestY; ry < wholeRestY + blockH && ry < height; ry++) {
+                        for (var rdx = 0; rdx < blockW && rx + rdx < width; rdx++) {
+                            wholeRegion++;
+                            if (bin[ry * width + (rx + rdx)] === 1) wholeBlack++;
                         }
-                        if (col > blobH * 0.15) blobRight = x + dx; else break;
                     }
-                }
-                for (var dx = 1; dx < sp * 2; dx++) {
-                    if (x - dx >= 0) {
-                        var col = 0;
-                        for (var y = blobTop; y <= blobBot; y++) {
-                            if (binary[y * width + x - dx] === 1) col++;
+                    if (wholeRegion > 0 && wholeBlack / wholeRegion > 0.7 && wholeRegion > sp * sp * 0.3) {
+                        rests.push({ type: 'whole', beats: 4, x: rx + Math.round(blockW / 2), y: wholeRestY + Math.round(blockH / 2), staffIndex: s, measureIndex: m, durationType: 'whole' });
+                        rx += blockW + Math.round(sp);
+                        continue;
+                    }
+
+                    var halfBlack = 0, halfRegion = 0;
+                    for (var ry2 = halfRestY - blockH; ry2 <= halfRestY && ry2 >= 0; ry2++) {
+                        for (var rdx2 = 0; rdx2 < blockW && rx + rdx2 < width; rdx2++) {
+                            halfRegion++;
+                            if (bin[ry2 * width + (rx + rdx2)] === 1) halfBlack++;
                         }
-                        if (col > blobH * 0.15) blobLeft = x - dx; else break;
+                    }
+                    if (halfRegion > 0 && halfBlack / halfRegion > 0.7 && halfRegion > sp * sp * 0.3) {
+                        rests.push({ type: 'half', beats: 2, x: rx + Math.round(blockW / 2), y: halfRestY - Math.round(blockH / 2), staffIndex: s, measureIndex: m, durationType: 'half' });
+                        rx += blockW + Math.round(sp);
+                        continue;
                     }
                 }
 
-                var blobW = blobRight - blobLeft + 1;
-                var blobArea = 0;
-                for (var by = blobTop; by <= blobBot; by++) {
-                    for (var bx = blobLeft; bx <= blobRight; bx++) {
-                        if (binary[by * width + bx] === 1) blobArea++;
+                var quarterSearchLeft = mLeft + Math.round(sp * 1.5);
+                var quarterSearchRight = mRight - Math.round(sp * 0.5);
+                var staffH = staff.lines[4] - staff.lines[0];
+
+                for (var qx = quarterSearchLeft; qx < quarterSearchRight; qx += Math.round(sp * 0.3)) {
+                    var colTop = -1, colBot = -1, colBlack = 0;
+                    for (var qy = staff.lines[0]; qy <= staff.lines[4]; qy++) {
+                        var nearBlack = 0;
+                        for (var qdx = -2; qdx <= 2; qdx++) {
+                            if (qx + qdx >= 0 && qx + qdx < width && bin[qy * width + (qx + qdx)] === 1) nearBlack++;
+                        }
+                        if (nearBlack >= 2) {
+                            if (colTop === -1) colTop = qy;
+                            colBot = qy;
+                            colBlack++;
+                        }
                     }
-                }
-                var fillRatio = blobArea / (blobW * blobH);
-                var aspectRatio = blobW / blobH;
+                    if (colTop === -1) continue;
+                    var colHeight = colBot - colTop;
 
-                var restType = null, durValue = 0, mxlType = null;
-
-                // Whole rest: wide rectangle hanging from line 3 (4th line from bottom)
-                if (blobW > sp * 0.4 && blobW < sp * 2.0 && blobH > sp * 0.2 && blobH < sp * 0.7 &&
-                    fillRatio > 0.65 && aspectRatio > 1.0 && blobCenterY < staff.center) {
-                    restType = 'whole'; durValue = 4; mxlType = 'whole';
-                }
-                // Half rest: similar but sitting on line 2 (3rd line from bottom)
-                else if (blobW > sp * 0.4 && blobW < sp * 2.0 && blobH > sp * 0.2 && blobH < sp * 0.7 &&
-                    fillRatio > 0.65 && aspectRatio > 1.0 && blobCenterY >= staff.center) {
-                    restType = 'half'; durValue = 2; mxlType = 'half';
-                }
-                // Quarter rest: tall zigzag, narrow
-                else if (blobH > sp * 1.5 && blobH < sp * 4.0 && blobW < sp * 1.2 &&
-                    fillRatio > 0.2 && fillRatio < 0.6 && aspectRatio < 0.7) {
-                    restType = 'quarter'; durValue = 1; mxlType = 'quarter';
-                }
-                // Eighth rest: curved, shorter
-                else if (blobH > sp * 0.7 && blobH < sp * 2.0 && blobW < sp * 1.0 &&
-                    fillRatio > 0.15 && fillRatio < 0.55 && aspectRatio < 0.9) {
-                    restType = 'eighth'; durValue = 0.5; mxlType = 'eighth';
-                }
-
-                if (restType) {
-                    // Check not duplicate
-                    var dup = false;
-                    for (var r = 0; r < staffRests.length; r++) {
-                        if (Math.abs(staffRests[r].centerX - x) < sp * 1.0) { dup = true; break; }
-                    }
-                    if (!dup) {
-                        staffRests.push({
-                            type: restType, durationValue: durValue, mxlType: mxlType,
-                            centerX: Math.round((blobLeft + blobRight) / 2),
-                            centerY: Math.round(blobCenterY),
-                            staffIndex: s, isRest: true
-                        });
-                        x = blobRight + Math.round(sp * 0.5); // skip past this rest
+                    if (colHeight > staffH * 0.55 && colHeight < staffH * 1.1) {
+                        var restWidth = 0;
+                        var midRow = Math.round((colTop + colBot) / 2);
+                        for (var wdx = -Math.round(sp); wdx <= Math.round(sp); wdx++) {
+                            if (qx + wdx >= 0 && qx + wdx < width && bin[midRow * width + (qx + wdx)] === 1) restWidth++;
+                        }
+                        if (restWidth < sp * 1.0 && restWidth > 2) {
+                            rests.push({ type: 'quarter', beats: 1, x: qx, y: Math.round((colTop + colBot) / 2), staffIndex: s, measureIndex: m, durationType: 'quarter' });
+                            qx += Math.round(sp * 1.5);
+                        }
+                    } else if (colHeight > staffH * 0.25 && colHeight <= staffH * 0.55) {
+                        rests.push({ type: 'eighth', beats: 0.5, x: qx, y: Math.round((colTop + colBot) / 2), staffIndex: s, measureIndex: m, durationType: 'eighth' });
+                        qx += Math.round(sp * 1.5);
                     }
                 }
             }
-            rests = rests.concat(staffRests);
         }
         return rests;
     },
 
-    // -------------------------------------------------------
-    // DURATION CLASSIFICATION
-    // -------------------------------------------------------
-    classifyDuration: function(noteHeads) {
-        for (var i = 0; i < noteHeads.length; i++) {
-            var nh = noteHeads[i];
-            var flags = Math.max(nh.flagCount || 0, nh.beamCount || 0);
+    detectBarLines: function(bin, width, height, staves, staffSpacing) {
+        var sp = staffSpacing;
+        var barlines = [];
 
-            if (!nh.isFilled && !nh.hasStem) {
-                nh.duration = 'whole'; nh.durationValue = 4; nh.mxlType = 'whole';
-            } else if (!nh.isFilled && nh.hasStem) {
-                nh.duration = 'half'; nh.durationValue = 2; nh.mxlType = 'half';
-            } else if (nh.isFilled && nh.hasStem) {
-                if (flags >= 3) { nh.duration = '32nd'; nh.durationValue = 0.125; nh.mxlType = '32nd'; }
-                else if (flags >= 2) { nh.duration = '16th'; nh.durationValue = 0.25; nh.mxlType = '16th'; }
-                else if (flags >= 1) { nh.duration = 'eighth'; nh.durationValue = 0.5; nh.mxlType = 'eighth'; }
-                else { nh.duration = 'quarter'; nh.durationValue = 1; nh.mxlType = 'quarter'; }
-            } else {
-                nh.duration = 'quarter'; nh.durationValue = 1; nh.mxlType = 'quarter';
-            }
-        }
-        return noteHeads;
-    },
-
-    // -------------------------------------------------------
-    // PITCH ASSIGNMENT
-    // -------------------------------------------------------
-    assignPitch: function(noteHeads, staves, keySig) {
-        var acc = (keySig && keySig.accidentals) ? keySig.accidentals : {};
-        for (var i = 0; i < noteHeads.length; i++) {
-            var nh = noteHeads[i];
-            var staff = staves[nh.staffIndex];
-            var pitches = (staff.clef === 'bass') ? this.BASS_PITCHES : this.TREBLE_PITCHES;
-            var posIndex = nh.posIndex;
-            var pitch;
-
-            if (posIndex >= 0 && posIndex < pitches.length) {
-                pitch = { step: pitches[posIndex].s, octave: pitches[posIndex].o };
-            } else {
-                var steps = this.STEPS;
-                var ref = posIndex >= pitches.length ? pitches[pitches.length - 1] : pitches[0];
-                var count = posIndex >= pitches.length ? posIndex - pitches.length + 1 : Math.abs(posIndex);
-                var dir = posIndex >= 0 ? 1 : -1;
-                var si = steps.indexOf(ref.s);
-                var oct = ref.o;
-                for (var e = 0; e < count; e++) {
-                    si += dir;
-                    if (si >= 7) { si = 0; oct++; }
-                    if (si < 0) { si = 6; oct--; }
-                }
-                pitch = { step: steps[si], octave: oct };
-            }
-            pitch.alter = acc[pitch.step] || 0;
-            nh.pitch = pitch;
-            nh.midiNote = this.noteToMidi(pitch.step, pitch.octave, pitch.alter);
-            nh.pitchName = pitch.step + (pitch.alter === 1 ? '#' : (pitch.alter === -1 ? 'b' : '')) + pitch.octave;
-        }
-        return noteHeads;
-    },
-
-    // -------------------------------------------------------
-    // ORGANIZE NOTES INTO MEASURES (using barlines!)
-    // -------------------------------------------------------
-    organizeNotes: function(noteHeads, staves, barLines, rests, timeSig) {
-        var beats = timeSig ? timeSig.beats : 4;
-        var beatType = timeSig ? timeSig.beatType : 4;
-        var measureDuration = beats * (4 / beatType); // in quarter note units
-
-        // Get barline positions per staff
-        var staffBarPositions = {};
-        for (var s = 0; s < staves.length; s++) staffBarPositions[s] = [0]; // start at 0
-        for (var b = 0; b < barLines.length; b++) {
-            var bl = barLines[b];
-            staffBarPositions[bl.staffIndex].push(bl.x);
-        }
-        // Add end-of-page position
         for (var s = 0; s < staves.length; s++) {
-            staffBarPositions[s].push(99999);
-            staffBarPositions[s].sort(function(a, b) { return a - b; });
-        }
+            var staff = staves[s];
+            var projTop = staff.lines[0] - 1;
+            var projBot = staff.lines[4] + 1;
+            if (projTop < 0) projTop = 0;
+            if (projBot >= height) projBot = height - 1;
+            var projH = projBot - projTop + 1;
 
-        // Combine all events (notes + rests) and sort by system then x
-        var allEvents = [];
-
-        // Group noteheads into chords first
-        var sortedHeads = noteHeads.slice().sort(function(a, b) {
-            var sA = staves[a.staffIndex].systemIndex || 0;
-            var sB = staves[b.staffIndex].systemIndex || 0;
-            if (sA !== sB) return sA - sB;
-            return a.centerX - b.centerX;
-        });
-
-        var i = 0;
-        while (i < sortedHeads.length) {
-            var chord = [sortedHeads[i]];
-            var j = i + 1;
-            var sp = staves[sortedHeads[i].staffIndex].spacing;
-            while (j < sortedHeads.length &&
-                   (staves[sortedHeads[j].staffIndex].systemIndex || 0) === (staves[sortedHeads[i].staffIndex].systemIndex || 0) &&
-                   Math.abs(sortedHeads[j].centerX - sortedHeads[i].centerX) < sp * 1.2) {
-                chord.push(sortedHeads[j]);
-                j++;
-            }
-            var minDur = 4;
-            for (var c = 0; c < chord.length; c++) {
-                if (chord[c].durationValue < minDur) minDur = chord[c].durationValue;
-            }
-            allEvents.push({
-                notes: chord, isRest: false, x: chord[0].centerX,
-                staffIndex: chord[0].staffIndex,
-                systemIndex: staves[chord[0].staffIndex].systemIndex || 0,
-                durationValue: minDur, duration: chord[0].duration, mxlType: chord[0].mxlType
-            });
-            i = j;
-        }
-
-        // Add rests
-        for (var r = 0; r < rests.length; r++) {
-            allEvents.push({
-                notes: [], isRest: true, restType: rests[r].type, x: rests[r].centerX,
-                staffIndex: rests[r].staffIndex,
-                systemIndex: staves[rests[r].staffIndex].systemIndex || 0,
-                durationValue: rests[r].durationValue, duration: rests[r].type, mxlType: rests[r].mxlType
-            });
-        }
-
-        // Sort all events by system, then by x position
-        allEvents.sort(function(a, b) {
-            if (a.systemIndex !== b.systemIndex) return a.systemIndex - b.systemIndex;
-            return a.x - b.x;
-        });
-
-        // Assign events to measures based on barline positions
-        for (var e = 0; e < allEvents.length; e++) {
-            var evt = allEvents[e];
-            var bars = staffBarPositions[evt.staffIndex] || [0, 99999];
-
-            // Find which measure this event falls in
-            var measureNum = 0;
-            for (var m = 0; m < bars.length - 1; m++) {
-                if (evt.x >= bars[m] && evt.x < bars[m + 1]) {
-                    measureNum = m;
-                    break;
+            var vProj = new Uint32Array(width);
+            for (var x = staff.left; x <= staff.right; x++) {
+                var cnt = 0;
+                for (var y = projTop; y <= projBot; y++) {
+                    if (bin[y * width + x] === 1) cnt++;
                 }
+                vProj[x] = cnt;
             }
 
-            // Calculate global measure number (across systems)
-            var sysOffset = 0;
-            if (evt.systemIndex > 0) {
-                // Count measures in previous systems
-                for (var prevSys = 0; prevSys < evt.systemIndex; prevSys++) {
-                    // Find a staff in this system
-                    for (var ss = 0; ss < staves.length; ss++) {
-                        if ((staves[ss].systemIndex || 0) === prevSys) {
-                            sysOffset += Math.max(1, (staffBarPositions[ss] || [0, 99999]).length - 2);
-                            break;
-                        }
+            var deriv = new Float32Array(width);
+            for (x = staff.left + 1; x <= staff.right; x++) {
+                deriv[x] = vProj[x] - vProj[x - 1];
+            }
+
+            var topDerivs = [];
+            for (x = staff.left; x <= staff.right; x++) {
+                var absD = Math.abs(deriv[x]);
+                if (absD > 0) {
+                    if (topDerivs.length < 20) {
+                        topDerivs.push(absD);
+                        topDerivs.sort(function(a, b2) { return b2 - a; });
+                    } else if (absD > topDerivs[topDerivs.length - 1]) {
+                        topDerivs[topDerivs.length - 1] = absD;
+                        topDerivs.sort(function(a, b2) { return b2 - a; });
                     }
                 }
             }
 
-            evt.measureIndex = sysOffset + measureNum;
-            evt.measureLocalX = bars[measureNum] || 0;
-            evt.measureWidth = (bars[measureNum + 1] || 99999) - (bars[measureNum] || 0);
+            var top5Sum = 0;
+            var top5Count = Math.min(5, topDerivs.length);
+            for (var ti = 0; ti < top5Count; ti++) top5Sum += topDerivs[ti];
+            var derivThreshold = top5Count > 0 ? (top5Sum / top5Count) * 0.3 : projH * 0.2;
+
+            var peaks = [];
+            var peakStart = -1;
+            var minProjHeight = projH * 0.65;
+
+            for (x = staff.left + Math.round(sp * 3); x <= staff.right - Math.round(sp * 0.5); x++) {
+                if (deriv[x] > derivThreshold && peakStart === -1) {
+                    peakStart = x;
+                }
+                if (peakStart !== -1 && (deriv[x] < -derivThreshold || x === staff.right - 1)) {
+                    var peakEnd = x;
+                    var peakWidth = peakEnd - peakStart;
+
+                    if (peakWidth < sp * 1.5 && peakWidth > 0) {
+                        var maxProj = 0, maxX = peakStart;
+                        for (var px = peakStart; px <= Math.min(peakEnd, staff.right); px++) {
+                            if (vProj[px] > maxProj) { maxProj = vProj[px]; maxX = px; }
+                        }
+
+                        if (maxProj >= minProjHeight) {
+                            var vertTop = -1, vertBot = -1;
+                            for (y = projTop; y <= projBot; y++) {
+                                if (bin[y * width + maxX] === 1) {
+                                    if (vertTop === -1) vertTop = y;
+                                    vertBot = y;
+                                }
+                            }
+                            var vertSpan = (vertTop !== -1) ? vertBot - vertTop : 0;
+                            var staffHeight = staff.lines[4] - staff.lines[0];
+
+                            if (vertSpan >= staffHeight * 0.75) {
+                                var tooClose = false;
+                                for (var bi = peaks.length - 1; bi >= 0 && bi >= peaks.length - 2; bi--) {
+                                    if (Math.abs(maxX - peaks[bi].x) < sp * 1.5) { tooClose = true; break; }
+                                }
+                                if (!tooClose) {
+                                    peaks.push({ x: maxX, projection: maxProj, width: peakWidth, vertSpan: vertSpan });
+                                }
+                            }
+                        }
+                    }
+                    peakStart = -1;
+                }
+                if (deriv[x] <= 0) peakStart = -1;
+            }
+
+            for (var pi = 0; pi < peaks.length; pi++) {
+                barlines.push({ x: peaks[pi].x, staffIndex: s, top: projTop, bottom: projBot, type: 'single' });
+            }
         }
 
-        return allEvents;
+        barlines.sort(function(a, b2) { return a.x - b2.x; });
+        return barlines;
     },
 
-    // -------------------------------------------------------
-    // MAIN PIPELINE v5.0
-    // -------------------------------------------------------
-    detect: function(cleanedBinary, originalBinary, width, height, staves) {
-        var distTransform = this.computeDistanceTransform(originalBinary, width, height);
-        var keySig = this.detectKeySignature(originalBinary, width, staves);
-        var timeSig = this.detectTimeSignature(originalBinary, width, staves);
-        var noteStartX = this._findNoteStartX(originalBinary, width, staves);
-        var noteHeads = this.scanForNoteheads(originalBinary, distTransform, width, height, staves, noteStartX);
+    _detectKeySignature: function(bin, width, height, staff, staffSpacing) {
+        var sp = staffSpacing;
+        var regionLeft = staff.left + Math.round(sp * 2.5);
+        var regionRight = staff.left + Math.round(sp * 5.5);
+        if (regionRight > staff.right) regionRight = staff.right;
+        var regionTop = staff.lines[0] - Math.round(sp * 0.5);
+        var regionBot = staff.lines[4] + Math.round(sp * 0.5);
+        if (regionTop < 0) regionTop = 0;
+        if (regionBot >= height) regionBot = height - 1;
 
-        noteHeads = this.detectStems(noteHeads, originalBinary, width, height, staves);
-        noteHeads = this.detectFlags(noteHeads, originalBinary, width, height, staves);
-        noteHeads = this.detectBeams(noteHeads, originalBinary, width, height, staves);
-        noteHeads = this.classifyDuration(noteHeads);
-        noteHeads = this.assignPitch(noteHeads, staves, keySig);
+        var xProj = [];
+        for (var x = regionLeft; x <= regionRight; x++) {
+            var cnt = 0;
+            for (var y = regionTop; y <= regionBot; y++) {
+                if (bin[y * width + x] === 1) cnt++;
+            }
+            xProj.push({ x: x, count: cnt });
+        }
 
-        var barLines = this.detectBarLines(originalBinary, width, height, staves);
-        var rests = this.detectRests(cleanedBinary, width, height, staves, noteStartX, barLines);
-        var events = this.organizeNotes(noteHeads, staves, barLines, rests, timeSig);
+        var threshold = sp * 0.5;
+        var clusters = [];
+        var inCluster = false;
+        var clusterStart = 0;
+        var clusterPixels = 0;
 
-        return { noteHeads: noteHeads, events: events, rests: rests, barLines: barLines, keySignature: keySig, timeSignature: timeSig };
+        for (var i = 0; i < xProj.length; i++) {
+            if (xProj[i].count > threshold) {
+                if (!inCluster) { inCluster = true; clusterStart = i; clusterPixels = 0; }
+                clusterPixels += xProj[i].count;
+            } else {
+                if (inCluster) {
+                    var clusterWidth = i - clusterStart;
+                    if (clusterWidth >= 2 && clusterWidth <= sp * 1.5) {
+                        clusters.push({ start: clusterStart + regionLeft, end: i - 1 + regionLeft, width: clusterWidth, pixels: clusterPixels });
+                    }
+                    inCluster = false;
+                }
+            }
+        }
+        if (inCluster) {
+            var cw = xProj.length - clusterStart;
+            if (cw >= 2 && cw <= sp * 1.5) {
+                clusters.push({ start: clusterStart + regionLeft, end: xProj.length - 1 + regionLeft, width: cw, pixels: clusterPixels });
+            }
+        }
+
+        if (clusters.length === 0) {
+            return { fifths: 0, mode: 'major', accidentalCount: 0, type: 'none', preambleEnd: regionLeft };
+        }
+
+        var avgClusterWidth = 0;
+        for (i = 0; i < clusters.length; i++) avgClusterWidth += clusters[i].width;
+        avgClusterWidth = avgClusterWidth / clusters.length;
+
+        var isSharp = avgClusterWidth > sp * 0.6;
+        var accidentalCount = Math.min(7, clusters.length);
+        var fifths = isSharp ? accidentalCount : -accidentalCount;
+        var preambleEnd = clusters[clusters.length - 1].end + Math.round(sp * 0.5);
+
+        return { fifths: fifths, mode: 'major', accidentalCount: accidentalCount, type: isSharp ? 'sharp' : 'flat', preambleEnd: preambleEnd };
+    },
+
+    _detectTimeSignature: function(bin, width, height, staff, staffSpacing, keySigEnd) {
+        var sp = staffSpacing;
+        var regionLeft = keySigEnd + Math.round(sp * 0.3);
+        var regionRight = keySigEnd + Math.round(sp * 3.0);
+        if (regionRight > staff.right) regionRight = Math.min(staff.right, keySigEnd + Math.round(sp * 2.0));
+        var regionTop = staff.lines[0];
+        var regionBot = staff.lines[4];
+
+        var totalInk = 0, regionArea = 0;
+        for (var y = regionTop; y <= regionBot; y++) {
+            for (var x = regionLeft; x <= regionRight; x++) {
+                regionArea++;
+                if (x >= 0 && x < width && bin[y * width + x] === 1) totalInk++;
+            }
+        }
+
+        var density = regionArea > 0 ? totalInk / regionArea : 0;
+        if (density < 0.08) {
+            return { beats: 4, beatType: 4, preambleEnd: regionLeft };
+        }
+
+        var midLine = staff.lines[2];
+        var quarterY = staff.lines[0] + Math.round(sp * 1.0);
+        var threeQuarterY = staff.lines[2] + Math.round(sp * 1.0);
+
+        var topCrossings = this._countHCrossings(bin, width, quarterY, regionLeft, regionRight);
+        var botCrossings = this._countHCrossings(bin, width, threeQuarterY, regionLeft, regionRight);
+
+        var topInk = 0, botInk = 0, topArea = 0, botArea = 0;
+        for (y = regionTop; y < midLine; y++) {
+            for (x = regionLeft; x <= regionRight; x++) {
+                topArea++;
+                if (x >= 0 && x < width && bin[y * width + x] === 1) topInk++;
+            }
+        }
+        for (y = midLine; y <= regionBot; y++) {
+            for (x = regionLeft; x <= regionRight; x++) {
+                botArea++;
+                if (x >= 0 && x < width && bin[y * width + x] === 1) botInk++;
+            }
+        }
+
+        var topDensity = topArea > 0 ? topInk / topArea : 0;
+        var botDensity = botArea > 0 ? botInk / botArea : 0;
+
+        var beats = 4, beatType = 4;
+        if (topCrossings <= 2 && topDensity < 0.2) beats = 2;
+        else if (topCrossings >= 4 || topDensity > 0.35) beats = 6;
+        else if (topCrossings >= 3) beats = 4;
+        else beats = 3;
+
+        if (botCrossings >= 4 || botDensity > 0.35) beatType = 8;
+        else beatType = 4;
+
+        var lastInkX = regionLeft;
+        for (x = regionRight; x >= regionLeft; x--) {
+            var hasInk = false;
+            for (y = regionTop; y <= regionBot; y++) {
+                if (bin[y * width + x] === 1) { hasInk = true; break; }
+            }
+            if (hasInk) { lastInkX = x; break; }
+        }
+
+        return { beats: beats, beatType: beatType, preambleEnd: lastInkX + Math.round(sp * 0.5) };
+    },
+
+    _countHCrossings: function(bin, width, y, left, right) {
+        if (y < 0 || y >= bin.length / width) return 0;
+        var crossings = 0, wasBlack = false;
+        for (var x = left; x <= right; x++) {
+            if (x < 0 || x >= width) continue;
+            var isBlack = bin[y * width + x] === 1;
+            if (isBlack && !wasBlack) crossings++;
+            wasBlack = isBlack;
+        }
+        return crossings;
+    },
+
+    organizeNotes: function(noteheads, rests, barlines, staves, timeSig) {
+        var measures = [];
+        var beatsPerMeasure = timeSig ? timeSig.beats : 4;
+        var beatType = timeSig ? timeSig.beatType : 4;
+
+        for (var s = 0; s < staves.length; s++) {
+            var staff = staves[s];
+            var sp = staff.spacing;
+
+            var staffBarlines = [];
+            for (var b = 0; b < barlines.length; b++) {
+                if (barlines[b].staffIndex === s) staffBarlines.push(barlines[b]);
+            }
+            staffBarlines.sort(function(a, b2) { return a.x - b2.x; });
+
+            var boundaries = [staff.left];
+            for (b = 0; b < staffBarlines.length; b++) boundaries.push(staffBarlines[b].x);
+            boundaries.push(staff.right);
+
+            var staffNotes = [];
+            for (var n = 0; n < noteheads.length; n++) {
+                if (noteheads[n].staffIndex === s) staffNotes.push(noteheads[n]);
+            }
+
+            var staffRests = [];
+            for (var r = 0; r < rests.length; r++) {
+                if (rests[r].staffIndex === s) staffRests.push(rests[r]);
+            }
+
+            for (var m = 0; m < boundaries.length - 1; m++) {
+                var mLeft = boundaries[m];
+                var mRight = boundaries[m + 1];
+                var events = [];
+
+                for (n = 0; n < staffNotes.length; n++) {
+                    var note = staffNotes[n];
+                    if (note.centerX >= mLeft && note.centerX < mRight) {
+                        events.push({
+                            type: 'note', x: note.centerX, y: note.centerY,
+                            beats: note.beats || 1, durationType: note.durationType || 'quarter',
+                            midiNote: note.midiNote, pitch: note.pitch, pitchName: note.pitchName,
+                            staffIndex: s, isFilled: note.isFilled, hasStem: note.hasStem,
+                            posIndex: note.posIndex, head: note
+                        });
+                    }
+                }
+
+                for (r = 0; r < staffRests.length; r++) {
+                    var rest = staffRests[r];
+                    if (rest.x >= mLeft && rest.x < mRight) {
+                        events.push({
+                            type: 'rest', x: rest.x, y: rest.y,
+                            beats: rest.beats || 1, durationType: rest.durationType || 'quarter',
+                            staffIndex: s
+                        });
+                    }
+                }
+
+                events.sort(function(a, b2) { return a.x - b2.x; });
+
+                var chordGroups = [];
+                var ci = 0;
+                while (ci < events.length) {
+                    var chord = [events[ci]];
+                    var cj = ci + 1;
+                    while (cj < events.length && events[cj].type === 'note' && events[ci].type === 'note' &&
+                           Math.abs(events[cj].x - events[ci].x) < sp * 0.6) {
+                        chord.push(events[cj]);
+                        cj++;
+                    }
+                    chordGroups.push(chord);
+                    ci = cj;
+                }
+
+                var totalBeats = 0;
+                for (var cg = 0; cg < chordGroups.length; cg++) {
+                    totalBeats += chordGroups[cg][0].beats;
+                }
+
+                var timeOffset = 0;
+                for (cg = 0; cg < chordGroups.length; cg++) {
+                    var chordBeats = chordGroups[cg][0].beats;
+                    if (totalBeats > 0 && Math.abs(totalBeats - beatsPerMeasure) > 0.5) {
+                        chordBeats = chordBeats * (beatsPerMeasure / totalBeats);
+                    }
+                    for (var ce = 0; ce < chordGroups[cg].length; ce++) {
+                        chordGroups[cg][ce].timeOffset = timeOffset;
+                        chordGroups[cg][ce].adjustedBeats = chordBeats;
+                    }
+                    timeOffset += chordBeats;
+                }
+
+                measures.push({
+                    staffIndex: s, measureNumber: m + 1,
+                    left: mLeft, right: mRight,
+                    events: events, chordGroups: chordGroups,
+                    beatsPerMeasure: beatsPerMeasure, beatType: beatType
+                });
+            }
+        }
+        return measures;
+    },
+
+    detect: function(bin, cleanBin, dt, width, height, staves, staffSpacing) {
+        if (!staves || staves.length === 0) {
+            return { noteHeads: [], events: [], rests: [], barLines: [], keySignature: { fifths: 0, mode: 'major' }, timeSignature: { beats: 4, beatType: 4 }, measures: [] };
+        }
+
+        var keySigs = [];
+        var preambleWidths = [];
+        for (var s = 0; s < staves.length; s++) {
+            var keySig = this._detectKeySignature(bin, width, height, staves[s], staffSpacing);
+            keySigs.push(keySig);
+            var timeSig = this._detectTimeSignature(bin, width, height, staves[s], staffSpacing, keySig.preambleEnd);
+            staves[s]._timeSig = timeSig;
+            staves[s]._keySig = keySig;
+            preambleWidths.push(timeSig.preambleEnd - staves[s].left);
+        }
+
+        var globalKeySig = keySigs.length > 0 ? keySigs[0] : { fifths: 0, mode: 'major' };
+        var globalTimeSig = staves[0]._timeSig || { beats: 4, beatType: 4 };
+
+        var barlines = this.detectBarLines(bin, width, height, staves, staffSpacing);
+        var noteheads = this.scanForNoteheads(cleanBin, dt, width, height, staves, staffSpacing, preambleWidths);
+        this.detectStems(bin, width, height, noteheads, staffSpacing);
+        this.detectFlags(bin, width, height, noteheads, staffSpacing);
+        this.detectBeams(bin, width, height, noteheads, staffSpacing);
+        this.classifyDuration(noteheads);
+        this.assignPitch(noteheads, staves);
+        var rests = this.detectRests(cleanBin, width, height, staves, staffSpacing, barlines);
+        var measures = this.organizeNotes(noteheads, rests, barlines, staves, globalTimeSig);
+
+        var events = [];
+        for (var mi = 0; mi < measures.length; mi++) {
+            for (var ei = 0; ei < measures[mi].events.length; ei++) {
+                events.push(measures[mi].events[ei]);
+            }
+        }
+
+        console.log('[NoteDetector] Detected ' + noteheads.length + ' noteheads, ' + rests.length + ' rests, ' + barlines.length + ' barlines, ' + measures.length + ' measures');
+
+        return { noteHeads: noteheads, events: events, rests: rests, barLines: barlines, keySignature: globalKeySig, timeSignature: globalTimeSig, measures: measures };
     }
 };
 
-// =====================================================
-// MUSICXML WRITER v5.0 — Proper timing, voices, measures
-// =====================================================
-PianoModeOMR.MusicXMLWriter = {
 
-    generate: function(events, staves, options) {
-        options = options || {};
-        var title = options.title || 'Scanned Score';
-        var keySig = options.keySignature || { fifths: 0 };
-        var timeSig = options.timeSignature || { beats: 4, beatType: 4 };
-        var beats = timeSig.beats;
-        var beatType = timeSig.beatType;
-        var tempo = options.tempo || 120;
-        var divisions = 16; // Fine granularity: supports up to 64th notes
+/* =========================================================================
+ *  MODULE 4: MusicXMLWriter
+ * ========================================================================= */
+OMR.MusicXMLWriter = {
 
-        // Determine staves per system for grand staff
-        var stavesPerSystem = 1;
-        for (var i = 0; i < staves.length; i++) {
-            if (staves[i].systemStaffCount > stavesPerSystem) stavesPerSystem = staves[i].systemStaffCount;
-        }
+    generate: function(result, systems, title) {
+        var measures = result.measures || [];
+        var keySig = result.keySignature || { fifths: 0, mode: 'major' };
+        var timeSig = result.timeSignature || { beats: 4, beatType: 4 };
+        var DIVISIONS = 16;
+        var isGrandStaff = systems && systems.length > 0 && systems[0].isGrandStaff;
+        var numStaves = isGrandStaff ? 2 : 1;
+        title = title || 'Untitled Score';
 
-        var xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
-        xml += '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n';
-        xml += '<score-partwise version="4.0">\n';
-        xml += '  <work><work-title>' + this._escapeXml(title) + '</work-title></work>\n';
-        xml += '  <identification><creator type="composer">PianoMode OCR</creator>';
-        xml += '<encoding><software>PianoMode OMR v5.0</software>';
-        xml += '<encoding-date>' + new Date().toISOString().slice(0, 10) + '</encoding-date></encoding></identification>\n';
-
+        var xml = '';
+        xml += '<?xml version="1.0" encoding="UTF-8"?>\n';
+        xml += '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n';
+        xml += '<score-partwise version="3.1">\n';
+        xml += '  <work>\n';
+        xml += '    <work-title>' + this._escapeXml(title) + '</work-title>\n';
+        xml += '  </work>\n';
+        xml += '  <identification>\n';
+        xml += '    <creator type="software">PianoMode OMR Engine ' + VERSION + '</creator>\n';
+        xml += '    <encoding>\n';
+        xml += '      <software>PianoMode OMR</software>\n';
+        xml += '      <encoding-date>' + new Date().toISOString().substring(0, 10) + '</encoding-date>\n';
+        xml += '    </encoding>\n';
+        xml += '  </identification>\n';
         xml += '  <part-list>\n';
-        xml += '    <score-part id="P1"><part-name>Piano</part-name>';
-        xml += '<midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>';
-        xml += '</score-part>\n';
+        xml += '    <score-part id="P1">\n';
+        xml += '      <part-name>Piano</part-name>\n';
+        xml += '    </score-part>\n';
         xml += '  </part-list>\n';
         xml += '  <part id="P1">\n';
 
-        // Group events by measure
-        var measureGroups = {};
-        for (var i = 0; i < events.length; i++) {
-            var mi = events[i].measureIndex || 0;
-            if (!measureGroups[mi]) measureGroups[mi] = [];
-            measureGroups[mi].push(events[i]);
+        var measuresByNumber = {};
+        for (var mi = 0; mi < measures.length; mi++) {
+            var mNum = measures[mi].measureNumber;
+            if (!measuresByNumber[mNum]) measuresByNumber[mNum] = [];
+            measuresByNumber[mNum].push(measures[mi]);
         }
 
-        var measureKeys = Object.keys(measureGroups).map(Number).sort(function(a, b) { return a - b; });
-        if (measureKeys.length === 0) measureKeys = [0];
+        var measureNumbers = [];
+        for (var key in measuresByNumber) {
+            if (measuresByNumber.hasOwnProperty(key)) measureNumbers.push(parseInt(key, 10));
+        }
+        measureNumbers.sort(function(a, b) { return a - b; });
+        if (measureNumbers.length === 0) {
+            measureNumbers = [1];
+            measuresByNumber[1] = [];
+        }
 
-        var divsPerMeasure = divisions * beats * (4 / beatType) / 4 * 4;
-        // Simplify: divisions=16, quarter note=16 divs
-        // divsPerMeasure = beats * (4/beatType) * divisions
-        divsPerMeasure = Math.round(beats * (4 / beatType) * divisions);
+        for (var mni = 0; mni < measureNumbers.length; mni++) {
+            var measNum = measureNumbers[mni];
+            var measGroup = measuresByNumber[measNum] || [];
 
-        for (var mi = 0; mi < measureKeys.length; mi++) {
-            var measureNum = mi + 1;
-            var measureEvents = measureGroups[measureKeys[mi]] || [];
+            xml += '    <measure number="' + measNum + '">\n';
 
-            xml += '    <measure number="' + measureNum + '">\n';
-
-            if (mi === 0) {
+            if (mni === 0) {
                 xml += '      <attributes>\n';
-                xml += '        <divisions>' + divisions + '</divisions>\n';
-                xml += '        <key><fifths>' + keySig.fifths + '</fifths></key>\n';
-                xml += '        <time><beats>' + beats + '</beats><beat-type>' + beatType + '</beat-type></time>\n';
-                if (stavesPerSystem >= 2) {
-                    xml += '        <staves>2</staves>\n';
-                    xml += '        <clef number="1"><sign>G</sign><line>2</line></clef>\n';
-                    xml += '        <clef number="2"><sign>F</sign><line>4</line></clef>\n';
-                } else {
-                    xml += '        <clef><sign>G</sign><line>2</line></clef>\n';
+                xml += '        <divisions>' + DIVISIONS + '</divisions>\n';
+                xml += '        <key>\n';
+                xml += '          <fifths>' + keySig.fifths + '</fifths>\n';
+                xml += '          <mode>' + (keySig.mode || 'major') + '</mode>\n';
+                xml += '        </key>\n';
+                xml += '        <time>\n';
+                xml += '          <beats>' + timeSig.beats + '</beats>\n';
+                xml += '          <beat-type>' + timeSig.beatType + '</beat-type>\n';
+                xml += '        </time>\n';
+                if (numStaves > 1) xml += '        <staves>' + numStaves + '</staves>\n';
+                xml += '        <clef' + (numStaves > 1 ? ' number="1"' : '') + '>\n';
+                xml += '          <sign>G</sign>\n';
+                xml += '          <line>2</line>\n';
+                xml += '        </clef>\n';
+                if (numStaves > 1) {
+                    xml += '        <clef number="2">\n';
+                    xml += '          <sign>F</sign>\n';
+                    xml += '          <line>4</line>\n';
+                    xml += '        </clef>\n';
                 }
                 xml += '      </attributes>\n';
-                xml += '      <direction placement="above"><direction-type><metronome>';
-                xml += '<beat-unit>quarter</beat-unit><per-minute>' + tempo + '</per-minute>';
-                xml += '</metronome></direction-type><sound tempo="' + tempo + '"/></direction>\n';
             }
 
-            if (measureEvents.length === 0) {
-                xml += '      <note><rest/><duration>' + divsPerMeasure + '</duration><type>whole</type>';
-                if (stavesPerSystem >= 2) xml += '<staff>1</staff>';
-                xml += '</note>\n';
-            } else {
-                // Separate events by staff for voice assignment
-                var staff1Events = [];
-                var staff2Events = [];
-
-                for (var e = 0; e < measureEvents.length; e++) {
-                    var evt = measureEvents[e];
-                    var staffNum = (staves[evt.staffIndex] && staves[evt.staffIndex].staffInSystem === 1) ? 2 : 1;
-                    if (staffNum === 2) staff2Events.push(evt);
-                    else staff1Events.push(evt);
+            var staff1Events = [];
+            var staff2Events = [];
+            for (var mg = 0; mg < measGroup.length; mg++) {
+                var meas = measGroup[mg];
+                for (var ev = 0; ev < meas.chordGroups.length; ev++) {
+                    if (meas.staffIndex % 2 === 0) staff1Events.push(meas.chordGroups[ev]);
+                    else staff2Events.push(meas.chordGroups[ev]);
                 }
+            }
 
-                // Write voice 1 (staff 1)
-                xml += this._writeVoiceEvents(staff1Events, 1, 1, divisions, divsPerMeasure, stavesPerSystem);
+            xml += this._writeVoiceEvents(staff1Events, 1, 1, DIVISIONS, timeSig);
 
-                // Write voice 2 (staff 2) with backup
-                if (stavesPerSystem >= 2 && staff2Events.length > 0) {
-                    xml += '      <backup><duration>' + divsPerMeasure + '</duration></backup>\n';
-                    xml += this._writeVoiceEvents(staff2Events, 2, 2, divisions, divsPerMeasure, stavesPerSystem);
-                }
+            if (numStaves > 1 && staff2Events.length > 0) {
+                var measureDuration = this._getMeasureDuration(timeSig, DIVISIONS);
+                xml += '      <backup>\n';
+                xml += '        <duration>' + measureDuration + '</duration>\n';
+                xml += '      </backup>\n';
+                xml += this._writeVoiceEvents(staff2Events, 2, 2, DIVISIONS, timeSig);
+            }
+
+            if (mni === measureNumbers.length - 1) {
+                xml += '      <barline location="right">\n';
+                xml += '        <bar-style>light-heavy</bar-style>\n';
+                xml += '      </barline>\n';
             }
 
             xml += '    </measure>\n';
         }
 
-        xml += '  </part>\n</score-partwise>\n';
+        xml += '  </part>\n';
+        xml += '</score-partwise>\n';
         return xml;
     },
 
-    _writeVoiceEvents: function(events, voice, staffNum, divisions, divsPerMeasure, stavesPerSystem) {
+    _writeVoiceEvents: function(chordGroups, staffNum, voiceNum, divisions, timeSig) {
         var xml = '';
         var currentTime = 0;
+        var measureDuration = this._getMeasureDuration(timeSig, divisions);
 
-        // Sort events by x position
-        events.sort(function(a, b) { return a.x - b.x; });
-
-        // Calculate proportional time positions within measure
-        if (events.length > 0) {
-            var minX = events[0].measureLocalX || events[0].x;
-            var measureW = events[0].measureWidth || 1;
-
-            for (var e = 0; e < events.length; e++) {
-                var evt = events[e];
-                var dur = this._durationToDivisions(evt.durationValue, divisions);
-
-                // Ensure we don't exceed measure
-                if (currentTime + dur > divsPerMeasure) {
-                    dur = divsPerMeasure - currentTime;
-                    if (dur <= 0) break;
-                }
-
-                if (evt.isRest) {
-                    xml += '      <note><rest/><duration>' + dur + '</duration>';
-                    xml += '<voice>' + voice + '</voice>';
-                    xml += '<type>' + (evt.mxlType || 'quarter') + '</type>';
-                    if (stavesPerSystem >= 2) xml += '<staff>' + staffNum + '</staff>';
-                    xml += '</note>\n';
-                } else {
-                    for (var n = 0; n < evt.notes.length; n++) {
-                        var note = evt.notes[n];
-                        xml += '      <note>';
-                        if (n > 0) xml += '<chord/>';
-                        xml += '<pitch><step>' + note.pitch.step + '</step>';
-                        if (note.pitch.alter) xml += '<alter>' + note.pitch.alter + '</alter>';
-                        xml += '<octave>' + note.pitch.octave + '</octave></pitch>';
-                        xml += '<duration>' + dur + '</duration>';
-                        xml += '<voice>' + voice + '</voice>';
-                        xml += '<type>' + (evt.mxlType || 'quarter') + '</type>';
-                        if (stavesPerSystem >= 2) xml += '<staff>' + staffNum + '</staff>';
-                        xml += '</note>\n';
-                    }
-                }
-                currentTime += dur;
-            }
+        if (chordGroups.length === 0) {
+            xml += '      <note>\n';
+            xml += '        <rest measure="yes"/>\n';
+            xml += '        <duration>' + measureDuration + '</duration>\n';
+            xml += '        <voice>' + voiceNum + '</voice>\n';
+            xml += '        <type>whole</type>\n';
+            if (staffNum > 0) xml += '        <staff>' + staffNum + '</staff>\n';
+            xml += '      </note>\n';
+            return xml;
         }
 
-        // Fill remaining time with rest
-        if (currentTime < divsPerMeasure) {
-            var remaining = divsPerMeasure - currentTime;
-            xml += '      <note><rest/><duration>' + remaining + '</duration>';
-            xml += '<voice>' + voice + '</voice>';
-            xml += '<type>' + this._divisionsToType(remaining, divisions) + '</type>';
-            if (stavesPerSystem >= 2) xml += '<staff>' + staffNum + '</staff>';
-            xml += '</note>\n';
+        for (var cg = 0; cg < chordGroups.length; cg++) {
+            var chord = chordGroups[cg];
+            var eventBeats = chord[0].adjustedBeats || chord[0].beats || 1;
+            var eventDuration = this._beatsToDuration(eventBeats, divisions);
+            var durType = chord[0].durationType || 'quarter';
+
+            var eventTime = chord[0].timeOffset || currentTime;
+            if (eventTime > currentTime + 0.01) {
+                var forwardDur = this._beatsToDuration(eventTime - currentTime, divisions);
+                if (forwardDur > 0) {
+                    xml += '      <forward>\n';
+                    xml += '        <duration>' + forwardDur + '</duration>\n';
+                    xml += '      </forward>\n';
+                }
+            }
+
+            for (var ci = 0; ci < chord.length; ci++) {
+                var evt = chord[ci];
+                xml += '      <note>\n';
+                if (ci > 0 && evt.type === 'note') xml += '        <chord/>\n';
+
+                if (evt.type === 'rest') {
+                    xml += '        <rest/>\n';
+                } else if (evt.type === 'note' && evt.pitch) {
+                    xml += '        <pitch>\n';
+                    xml += '          <step>' + evt.pitch.step + '</step>\n';
+                    if (evt.pitch.alter && evt.pitch.alter !== 0) xml += '          <alter>' + evt.pitch.alter + '</alter>\n';
+                    xml += '          <octave>' + evt.pitch.octave + '</octave>\n';
+                    xml += '        </pitch>\n';
+                } else {
+                    xml += '        <rest/>\n';
+                }
+
+                xml += '        <duration>' + eventDuration + '</duration>\n';
+                xml += '        <voice>' + voiceNum + '</voice>\n';
+                xml += '        <type>' + durType + '</type>\n';
+                if (staffNum > 0) xml += '        <staff>' + staffNum + '</staff>\n';
+                xml += '      </note>\n';
+            }
+            currentTime = eventTime + eventBeats;
+        }
+
+        if (currentTime < timeSig.beats - 0.01) {
+            var remainingBeats = timeSig.beats - currentTime;
+            var remainDur = this._beatsToDuration(remainingBeats, divisions);
+            var remainType = this._beatsToType(remainingBeats);
+            if (remainDur > 0) {
+                xml += '      <note>\n';
+                xml += '        <rest/>\n';
+                xml += '        <duration>' + remainDur + '</duration>\n';
+                xml += '        <voice>' + voiceNum + '</voice>\n';
+                xml += '        <type>' + remainType + '</type>\n';
+                if (staffNum > 0) xml += '        <staff>' + staffNum + '</staff>\n';
+                xml += '      </note>\n';
+            }
         }
 
         return xml;
     },
 
-    _escapeXml: function(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); },
-
-    _durationToDivisions: function(dv, div) {
-        // dv is in quarter-note units: 4=whole, 2=half, 1=quarter, 0.5=eighth, etc.
-        return Math.max(1, Math.round(dv * div));
+    _getMeasureDuration: function(timeSig, divisions) {
+        return Math.round(timeSig.beats * divisions * (4 / timeSig.beatType));
     },
 
-    _divisionsToType: function(divs, divisions) {
-        var ratio = divs / divisions;
-        if (ratio >= 4) return 'whole';
-        if (ratio >= 2) return 'half';
-        if (ratio >= 1) return 'quarter';
-        if (ratio >= 0.5) return 'eighth';
-        if (ratio >= 0.25) return '16th';
+    _beatsToDuration: function(beats, divisions) {
+        return Math.max(1, Math.round(beats * divisions));
+    },
+
+    _beatsToType: function(beats) {
+        if (beats >= 3.5) return 'whole';
+        if (beats >= 1.5) return 'half';
+        if (beats >= 0.75) return 'quarter';
+        if (beats >= 0.375) return 'eighth';
+        if (beats >= 0.1875) return '16th';
         return '32nd';
+    },
+
+    _escapeXml: function(str) {
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
     }
 };
 
 
-// =====================================================
-// MIDI WRITER v5.0 — Fixed delta times and rest handling
-// =====================================================
-PianoModeOMR.MIDIWriter = {
+/* =========================================================================
+ *  MODULE 5: MIDIWriter
+ * ========================================================================= */
+OMR.MIDIWriter = {
 
-    generate: function(events, options) {
-        options = options || {};
-        var tempo = options.tempo || 120;
-        var channel = options.channel || 0;
-        var ppq = 480;
-        var velocity = 80;
-        var trackData = [];
+    generate: function(result) {
+        var measures = result.measures || [];
+        var timeSig = result.timeSignature || { beats: 4, beatType: 4 };
+        var TICKS_PER_BEAT = 480;
 
-        // Tempo meta event
-        var usPerBeat = Math.round(60000000 / tempo);
-        trackData.push(0x00, 0xFF, 0x51, 0x03);
-        trackData.push((usPerBeat >> 16) & 0xFF, (usPerBeat >> 8) & 0xFF, usPerBeat & 0xFF);
-
-        // Program change: piano
-        trackData.push(0x00, 0xC0 | channel, 0x00);
-
-        // Track name
-        var name = 'Piano';
-        trackData.push(0x00, 0xFF, 0x03);
-        this._pushVLQ(trackData, name.length);
-        for (var c = 0; c < name.length; c++) trackData.push(name.charCodeAt(c));
-
-        // Build a timeline of note-on and note-off events
-        var timeline = [];
-        var currentTick = 0;
-
-        for (var i = 0; i < events.length; i++) {
-            var evt = events[i];
-            var durationTicks = Math.max(1, Math.round(evt.durationValue * ppq));
-
-            if (evt.isRest || !evt.notes || evt.notes.length === 0) {
-                // Rest: advance time without playing
-                currentTick += durationTicks;
-                continue;
-            }
-
-            // Note on events at currentTick
-            for (var n = 0; n < evt.notes.length; n++) {
-                var midi = evt.notes[n].midiNote;
-                if (midi < 0 || midi > 127) continue;
-                timeline.push({ tick: currentTick, type: 'on', midi: midi, velocity: velocity });
-                timeline.push({ tick: currentTick + durationTicks, type: 'off', midi: midi, velocity: 0 });
-            }
-
-            currentTick += durationTicks;
-        }
-
-        // Sort timeline: note-off before note-on at same tick
-        timeline.sort(function(a, b) {
-            if (a.tick !== b.tick) return a.tick - b.tick;
-            if (a.type !== b.type) return a.type === 'off' ? -1 : 1;
-            return a.midi - b.midi;
+        var midiEvents = [];
+        var sortedMeasures = measures.slice().sort(function(a, b) {
+            if (a.measureNumber !== b.measureNumber) return a.measureNumber - b.measureNumber;
+            return a.staffIndex - b.staffIndex;
         });
 
-        // Convert timeline to MIDI events with delta times
-        var prevTick = 0;
-        for (var t = 0; t < timeline.length; t++) {
-            var te = timeline[t];
-            var delta = te.tick - prevTick;
-            this._pushVLQ(trackData, delta);
+        var lastMeasureNum = 0;
+        for (var mi = 0; mi < sortedMeasures.length; mi++) {
+            var meas = sortedMeasures[mi];
+            if (meas.measureNumber !== lastMeasureNum) lastMeasureNum = meas.measureNumber;
+            var measureStartTick = (meas.measureNumber - 1) * timeSig.beats * TICKS_PER_BEAT;
 
-            if (te.type === 'on') {
-                trackData.push(0x90 | channel, te.midi & 0x7F, te.velocity & 0x7F);
-            } else {
-                trackData.push(0x80 | channel, te.midi & 0x7F, 0x00);
+            for (var cg = 0; cg < meas.chordGroups.length; cg++) {
+                var chord = meas.chordGroups[cg];
+                var eventBeats = chord[0].adjustedBeats || chord[0].beats || 1;
+                var eventOffset = chord[0].timeOffset || 0;
+                var startTick = measureStartTick + Math.round(eventOffset * TICKS_PER_BEAT);
+                var durationTicks = Math.round(eventBeats * TICKS_PER_BEAT);
+
+                for (var ci = 0; ci < chord.length; ci++) {
+                    var evt = chord[ci];
+                    if (evt.type !== 'note' || !evt.midiNote) continue;
+                    var noteNum = evt.midiNote;
+                    if (noteNum < 0) noteNum = 0;
+                    if (noteNum > 127) noteNum = 127;
+
+                    midiEvents.push({ tick: startTick, type: 'noteOn', channel: 0, note: noteNum, velocity: 80 });
+                    midiEvents.push({ tick: startTick + durationTicks - 1, type: 'noteOff', channel: 0, note: noteNum, velocity: 0 });
+                }
             }
-            prevTick = te.tick;
         }
 
-        // End of track
-        trackData.push(0x00, 0xFF, 0x2F, 0x00);
+        midiEvents.sort(function(a, b) {
+            if (a.tick !== b.tick) return a.tick - b.tick;
+            if (a.type === 'noteOff' && b.type === 'noteOn') return -1;
+            if (a.type === 'noteOn' && b.type === 'noteOff') return 1;
+            return a.note - b.note;
+        });
 
-        // Build MIDI file
-        var midi = [];
-        midi.push(0x4D, 0x54, 0x68, 0x64); // MThd
-        midi.push(0x00, 0x00, 0x00, 0x06);
-        midi.push(0x00, 0x00); // format 0
-        midi.push(0x00, 0x01); // 1 track
-        midi.push((ppq >> 8) & 0xFF, ppq & 0xFF);
-        midi.push(0x4D, 0x54, 0x72, 0x6B); // MTrk
-        var tl = trackData.length;
-        midi.push((tl >> 24) & 0xFF, (tl >> 16) & 0xFF, (tl >> 8) & 0xFF, tl & 0xFF);
-        for (var t = 0; t < trackData.length; t++) midi.push(trackData[t]);
-        return new Uint8Array(midi);
+        var bytes = [];
+        this._writeStr(bytes, 'MThd');
+        this._writeU32(bytes, 6);
+        this._writeU16(bytes, 0);
+        this._writeU16(bytes, 1);
+        this._writeU16(bytes, TICKS_PER_BEAT);
+
+        var trackBytes = [];
+
+        this._writeVLQ(trackBytes, 0);
+        trackBytes.push(0xFF, 0x51, 0x03);
+        var tempo = 500000;
+        trackBytes.push((tempo >> 16) & 0xFF);
+        trackBytes.push((tempo >> 8) & 0xFF);
+        trackBytes.push(tempo & 0xFF);
+
+        this._writeVLQ(trackBytes, 0);
+        trackBytes.push(0xFF, 0x58, 0x04);
+        trackBytes.push(timeSig.beats & 0xFF);
+        var denomLog = 0, denom = timeSig.beatType;
+        while (denom > 1) { denom = denom >> 1; denomLog++; }
+        trackBytes.push(denomLog);
+        trackBytes.push(24);
+        trackBytes.push(8);
+
+        this._writeVLQ(trackBytes, 0);
+        trackBytes.push(0xC0, 0x00);
+
+        var lastTick = 0;
+        for (var ei = 0; ei < midiEvents.length; ei++) {
+            var mEvt = midiEvents[ei];
+            var delta = mEvt.tick - lastTick;
+            if (delta < 0) delta = 0;
+            this._writeVLQ(trackBytes, delta);
+
+            if (mEvt.type === 'noteOn') {
+                trackBytes.push(0x90 | (mEvt.channel & 0x0F));
+                trackBytes.push(mEvt.note & 0x7F);
+                trackBytes.push(mEvt.velocity & 0x7F);
+            } else {
+                trackBytes.push(0x80 | (mEvt.channel & 0x0F));
+                trackBytes.push(mEvt.note & 0x7F);
+                trackBytes.push(0);
+            }
+            lastTick = mEvt.tick;
+        }
+
+        this._writeVLQ(trackBytes, 0);
+        trackBytes.push(0xFF, 0x2F, 0x00);
+
+        this._writeStr(bytes, 'MTrk');
+        this._writeU32(bytes, trackBytes.length);
+        for (var tb = 0; tb < trackBytes.length; tb++) bytes.push(trackBytes[tb]);
+
+        return new Uint8Array(bytes);
     },
 
-    _pushVLQ: function(arr, v) {
-        if (v < 0) v = 0;
-        var bytes = [v & 0x7F]; v >>= 7;
-        while (v > 0) { bytes.push((v & 0x7F) | 0x80); v >>= 7; }
-        for (var i = bytes.length - 1; i >= 0; i--) arr.push(bytes[i]);
+    _writeStr: function(arr, str) {
+        for (var i = 0; i < str.length; i++) arr.push(str.charCodeAt(i));
     },
 
-    toBlob: function(d) { return new Blob([d], { type: 'audio/midi' }); },
-    toBlobURL: function(d) { return URL.createObjectURL(this.toBlob(d)); }
+    _writeU32: function(arr, val) {
+        arr.push((val >> 24) & 0xFF);
+        arr.push((val >> 16) & 0xFF);
+        arr.push((val >> 8) & 0xFF);
+        arr.push(val & 0xFF);
+    },
+
+    _writeU16: function(arr, val) {
+        arr.push((val >> 8) & 0xFF);
+        arr.push(val & 0xFF);
+    },
+
+    _writeVLQ: function(arr, val) {
+        if (val < 0) val = 0;
+        var vlqBytes = [];
+        vlqBytes.push(val & 0x7F);
+        val = val >> 7;
+        while (val > 0) {
+            vlqBytes.push((val & 0x7F) | 0x80);
+            val = val >> 7;
+        }
+        for (var i = vlqBytes.length - 1; i >= 0; i--) arr.push(vlqBytes[i]);
+    },
+
+    toBlob: function(midiData) {
+        return new Blob([midiData], { type: 'audio/midi' });
+    },
+
+    toBlobURL: function(midiData) {
+        return URL.createObjectURL(this.toBlob(midiData));
+    }
 };
 
 
-// =====================================================
-// MAIN ENGINE ORCHESTRATOR (async steps)
-// =====================================================
-PianoModeOMR.Engine = {
-    _yield: function() { return new Promise(function(r) { setTimeout(r, 20); }); },
+/* =========================================================================
+ *  MODULE 6: Engine
+ * ========================================================================= */
+OMR.Engine = {
 
     process: function(file, onProgress) {
-        onProgress = onProgress || function() {};
         var self = this;
-        var isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-        onProgress(1, 'Loading file...', 5);
+        var report = onProgress || function() {};
 
-        var loadPromise = isPDF
-            ? PianoModeOMR.ImageProcessor.loadPDF(file)
-            : PianoModeOMR.ImageProcessor.loadImage(file);
+        return new Promise(function(resolve, reject) {
+            var fileName = file.name || 'Untitled';
+            var title = fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
 
-        return loadPromise.then(function(loaded) {
-            onProgress(1, 'Image loaded (' + loaded.width + 'x' + loaded.height + ')', 15);
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(2, 'Converting to grayscale...', 20);
-            loaded._gray = PianoModeOMR.ImageProcessor.toGrayscale(loaded.imageData);
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(2, 'Binarizing image...', 28);
-            var t = PianoModeOMR.ImageProcessor.otsuThreshold(loaded._gray);
-            loaded._binary = PianoModeOMR.ImageProcessor.binarize(loaded._gray, t);
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(2, 'Detecting staff lines...', 35);
-            var staves = PianoModeOMR.StaffDetector.detect(loaded._binary, loaded.width, loaded.height);
-            if (staves.length === 0) throw new Error('No staff lines detected. Use a clear, high-resolution image.');
-            staves = PianoModeOMR.StaffDetector.groupIntoSystems(staves);
-            staves = PianoModeOMR.StaffDetector.detectClefs(loaded._binary, loaded.width, staves);
-            var systemCount = 0;
-            for (var i = 0; i < staves.length; i++) { if ((staves[i].systemIndex || 0) > systemCount) systemCount = staves[i].systemIndex; }
-            onProgress(2, staves.length + ' staves in ' + (systemCount + 1) + ' system(s)', 42);
-            loaded._staves = staves;
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(2, 'Removing staff lines...', 48);
-            loaded._cleaned = PianoModeOMR.StaffDetector.removeStaffLines(loaded._binary, loaded.width, loaded.height, loaded._staves);
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(2, 'Computing distance transform...', 52);
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(3, 'Detecting notes & barlines...', 58);
-            return self._yield().then(function() {
-                loaded._result = PianoModeOMR.NoteDetector.detect(loaded._cleaned, loaded._binary, loaded.width, loaded.height, loaded._staves);
-                return loaded;
-            });
-        }).then(function(loaded) {
-            var result = loaded._result;
-            onProgress(3, 'Analyzing results...', 75);
-            if (result.events.length === 0) throw new Error('No notes detected. The image may be too low quality.');
-            var nc = 0, rc = 0;
-            for (var e = 0; e < result.events.length; e++) {
-                if (result.events[e].isRest) rc++; else nc += result.events[e].notes.length;
+            report(0, 'Loading file...');
+
+            var loadPromise;
+            if (file.type === 'application/pdf' || (fileName && fileName.toLowerCase().indexOf('.pdf') !== -1)) {
+                loadPromise = OMR.ImageProcessor.loadPDF(file);
+            } else {
+                loadPromise = OMR.ImageProcessor.loadImage(file);
             }
-            onProgress(3, nc + ' notes, ' + rc + ' rests, ' + result.barLines.length + ' barlines', 80);
-            loaded._noteCount = nc;
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(3, 'Generating MusicXML...', 85);
-            var title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ');
-            var musicxml = PianoModeOMR.MusicXMLWriter.generate(loaded._result.events, loaded._staves, {
-                title: title,
-                keySignature: loaded._result.keySignature,
-                timeSignature: loaded._result.timeSignature
+
+            loadPromise.then(function(imgResult) {
+                report(10, 'Processing image...');
+                return self._yieldThen(function() {
+                    var gray = OMR.ImageProcessor.toGrayscale(imgResult.imageData);
+                    report(15, 'Binarizing...');
+                    return { gray: gray, w: imgResult.width, h: imgResult.height };
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var threshold = OMR.ImageProcessor.otsuThreshold(ctx.gray);
+                    var bin = OMR.ImageProcessor.binarize(ctx.gray, threshold);
+                    report(20, 'Cleaning noise...');
+                    return { bin: bin, w: ctx.w, h: ctx.h };
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    OMR.ImageProcessor.cleanNoise(ctx.bin, ctx.w, ctx.h, 6);
+                    report(25, 'Detecting staves...');
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
+                    report(35, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...');
+                    ctx.staves = staffResult.staves;
+                    ctx.staffSpacing = staffResult.staffSpacing;
+                    ctx.systems = staffResult.systems;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var cleanBin = OMR.StaffDetector.removeStaffLines(ctx.bin, ctx.w, ctx.h, ctx.staves);
+                    report(45, 'Computing distance transform...');
+                    ctx.cleanBin = cleanBin;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var dt = OMR.NoteDetector.computeDistanceTransform(ctx.cleanBin, ctx.w, ctx.h);
+                    report(55, 'Detecting notes and symbols...');
+                    ctx.dt = dt;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var detection = OMR.NoteDetector.detect(ctx.bin, ctx.cleanBin, ctx.dt, ctx.w, ctx.h, ctx.staves, ctx.staffSpacing);
+                    report(75, 'Generating MusicXML...');
+                    ctx.detection = detection;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    ctx.detection._staves = ctx.staves;
+                    var musicxml = OMR.MusicXMLWriter.generate(ctx.detection, ctx.systems, title);
+                    var musicxmlBlob = new Blob([musicxml], { type: 'application/xml' });
+                    var musicxmlUrl = URL.createObjectURL(musicxmlBlob);
+                    report(85, 'Generating MIDI...');
+                    ctx.musicxml = musicxml;
+                    ctx.musicxmlBlob = musicxmlBlob;
+                    ctx.musicxmlUrl = musicxmlUrl;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    var midiData = OMR.MIDIWriter.generate(ctx.detection);
+                    var midiBlob = OMR.MIDIWriter.toBlob(midiData);
+                    var midiUrl = OMR.MIDIWriter.toBlobURL(midiData);
+                    report(95, 'Finalizing...');
+                    ctx.midiData = midiData;
+                    ctx.midiBlob = midiBlob;
+                    ctx.midiUrl = midiUrl;
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                report(100, 'Complete!');
+                var noteCount = ctx.detection.noteHeads ? ctx.detection.noteHeads.length : 0;
+
+                resolve({
+                    musicxml: ctx.musicxml,
+                    musicxmlBlob: ctx.musicxmlBlob,
+                    musicxmlUrl: ctx.musicxmlUrl,
+                    midiData: ctx.midiData,
+                    midiBlob: ctx.midiBlob,
+                    midiUrl: ctx.midiUrl,
+                    events: ctx.detection.events,
+                    noteHeads: ctx.detection.noteHeads,
+                    staves: ctx.staves,
+                    noteCount: noteCount,
+                    title: title,
+                    barLines: ctx.detection.barLines,
+                    rests: ctx.detection.rests,
+                    keySignature: ctx.detection.keySignature,
+                    timeSignature: ctx.detection.timeSignature,
+                    measures: ctx.detection.measures,
+                    systems: ctx.systems,
+                    version: VERSION
+                });
+            }).catch(function(err) {
+                console.error('[PianoModeOMR] Processing error:', err);
+                reject(err);
             });
-            loaded._musicxml = musicxml;
-            loaded._title = title;
-            return self._yield().then(function() { return loaded; });
-        }).then(function(loaded) {
-            onProgress(3, 'Generating MIDI...', 92);
-            var midiData = PianoModeOMR.MIDIWriter.generate(loaded._result.events, {});
-            var midiBlob = PianoModeOMR.MIDIWriter.toBlob(midiData);
-            var midiUrl = URL.createObjectURL(midiBlob);
-            var xmlBlob = new Blob([loaded._musicxml], { type: 'application/xml' });
-            var xmlUrl = URL.createObjectURL(xmlBlob);
-            onProgress(4, 'Done! ' + loaded._noteCount + ' notes in ' + loaded._staves.length + ' staves', 100);
-            return {
-                musicxml: loaded._musicxml, musicxmlBlob: xmlBlob, musicxmlUrl: xmlUrl,
-                midiData: midiData, midiBlob: midiBlob, midiUrl: midiUrl,
-                events: loaded._result.events, noteHeads: loaded._result.noteHeads,
-                staves: loaded._staves, noteCount: loaded._noteCount, title: loaded._title
-            };
+        });
+    },
+
+    _yieldThen: function(fn) {
+        return new Promise(function(resolve, reject) {
+            setTimeout(function() {
+                try {
+                    resolve(fn());
+                } catch (e) {
+                    reject(e);
+                }
+            }, 4);
         });
     }
 };
 
-console.log('[PianoModeOMR] Engine v5.0 loaded — all modules ready');
+console.log('[PianoModeOMR] Engine ' + VERSION + ' loaded \u2014 all modules ready');
+
 })();
