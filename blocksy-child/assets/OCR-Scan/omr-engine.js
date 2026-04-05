@@ -402,315 +402,296 @@ PianoModeOMR.StaffDetector = {
 
 
 // =====================================================
-// NOTE DETECTOR v3.1 — Fixed multi-system + better detection
+// NOTE DETECTOR v4.0 — Audiveris-inspired algorithms
+// Uses chamfer distance transform + template matching
 // =====================================================
 PianoModeOMR.NoteDetector = {
 
     STEPS: ['C', 'D', 'E', 'F', 'G', 'A', 'B'],
 
+    // Treble: bottom line = E4 (posIndex 0), each +1 = next diatonic step up
     TREBLE_PITCHES: [
-        { step: 'E', octave: 4 }, { step: 'F', octave: 4 },
-        { step: 'G', octave: 4 }, { step: 'A', octave: 4 },
-        { step: 'B', octave: 4 }, { step: 'C', octave: 5 },
-        { step: 'D', octave: 5 }, { step: 'E', octave: 5 },
-        { step: 'F', octave: 5 }, { step: 'G', octave: 5 },
-        { step: 'A', octave: 5 }, { step: 'B', octave: 5 },
-        { step: 'C', octave: 6 }
+        {s:'E',o:4},{s:'F',o:4},{s:'G',o:4},{s:'A',o:4},{s:'B',o:4},
+        {s:'C',o:5},{s:'D',o:5},{s:'E',o:5},{s:'F',o:5},{s:'G',o:5},
+        {s:'A',o:5},{s:'B',o:5},{s:'C',o:6}
     ],
-
     BASS_PITCHES: [
-        { step: 'G', octave: 2 }, { step: 'A', octave: 2 },
-        { step: 'B', octave: 2 }, { step: 'C', octave: 3 },
-        { step: 'D', octave: 3 }, { step: 'E', octave: 3 },
-        { step: 'F', octave: 3 }, { step: 'G', octave: 3 },
-        { step: 'A', octave: 3 }, { step: 'B', octave: 3 },
-        { step: 'C', octave: 4 }, { step: 'D', octave: 4 },
-        { step: 'E', octave: 4 }
+        {s:'G',o:2},{s:'A',o:2},{s:'B',o:2},{s:'C',o:3},{s:'D',o:3},
+        {s:'E',o:3},{s:'F',o:3},{s:'G',o:3},{s:'A',o:3},{s:'B',o:3},
+        {s:'C',o:4},{s:'D',o:4},{s:'E',o:4}
     ],
 
     noteToMidi: function(step, octave, alter) {
-        var semitones = { 'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11 };
-        return 12 * (octave + 1) + (semitones[step] || 0) + (alter || 0);
+        var semi = {C:0,D:2,E:4,F:5,G:7,A:9,B:11};
+        return 12 * (octave + 1) + (semi[step] || 0) + (alter || 0);
     },
 
-    /**
-     * Find where notes start on each staff (skip clef/keysig/timesig).
-     * LESS aggressive than v3 — uses sp*4 minimum instead of sp*8.
-     */
-    _findNoteStartX: function(binary, width, staves) {
-        var results = [];
+    // -------------------------------------------------------
+    // CHAMFER DISTANCE TRANSFORM (3x3 mask, Audiveris-style)
+    // Computes distance from each pixel to nearest foreground
+    // -------------------------------------------------------
+    computeDistanceTransform: function(binary, width, height) {
+        var INF = 9999;
+        var dist = new Int32Array(width * height);
+        // Initialize: foreground=0, background=INF
+        for (var i = 0; i < binary.length; i++) {
+            dist[i] = binary[i] === 1 ? 0 : INF;
+        }
+        // Forward pass (top-left to bottom-right)
+        for (var y = 1; y < height; y++) {
+            for (var x = 1; x < width - 1; x++) {
+                var idx = y * width + x;
+                var d = dist[idx];
+                d = Math.min(d, dist[idx - width - 1] + 4); // diagonal
+                d = Math.min(d, dist[idx - width] + 3);     // above
+                d = Math.min(d, dist[idx - width + 1] + 4); // diagonal
+                d = Math.min(d, dist[idx - 1] + 3);         // left
+                dist[idx] = d;
+            }
+        }
+        // Backward pass (bottom-right to top-left)
+        for (var y = height - 2; y >= 0; y--) {
+            for (var x = width - 2; x >= 1; x--) {
+                var idx = y * width + x;
+                var d = dist[idx];
+                d = Math.min(d, dist[idx + width + 1] + 4);
+                d = Math.min(d, dist[idx + width] + 3);
+                d = Math.min(d, dist[idx + width - 1] + 4);
+                d = Math.min(d, dist[idx + 1] + 3);
+                dist[idx] = d;
+            }
+        }
+        // Normalize by 3 (the chamfer3 normalizer)
+        for (var i = 0; i < dist.length; i++) {
+            dist[i] = Math.round(dist[i] / 3);
+        }
+        return dist;
+    },
+
+    // -------------------------------------------------------
+    // SYNTHETIC NOTEHEAD TEMPLATE
+    // Creates an elliptical template matching a notehead shape
+    // Returns array of {x, y, expected} relative to center
+    // expected: 0=foreground, 1=background, -1=hole (for void)
+    // -------------------------------------------------------
+    _createNoteheadTemplate: function(spacing, isFilled) {
+        // Notehead dimensions relative to staff spacing
+        var w = Math.round(spacing * 1.4); // width
+        var h = Math.round(spacing * 0.85); // height
+        var hw = Math.floor(w / 2);
+        var hh = Math.floor(h / 2);
+        var points = [];
+
+        for (var dy = -hh - 1; dy <= hh + 1; dy++) {
+            for (var dx = -hw - 1; dx <= hw + 1; dx++) {
+                // Slightly tilted ellipse (noteheads tilt ~20 degrees)
+                var rx = dx * Math.cos(0.35) + dy * Math.sin(0.35);
+                var ry = -dx * Math.sin(0.35) + dy * Math.cos(0.35);
+                var ellipseVal = (rx * rx) / (hw * hw) + (ry * ry) / (hh * hh);
+
+                if (isFilled) {
+                    if (ellipseVal <= 1.0) {
+                        points.push({x: dx, y: dy, expected: 0}); // foreground
+                    } else if (ellipseVal <= 1.6) {
+                        points.push({x: dx, y: dy, expected: 1}); // near background
+                    }
+                } else {
+                    // Void (hollow) notehead
+                    if (ellipseVal <= 1.0 && ellipseVal >= 0.45) {
+                        points.push({x: dx, y: dy, expected: 0}); // ring foreground
+                    } else if (ellipseVal < 0.45) {
+                        points.push({x: dx, y: dy, expected: -1}); // hole
+                    } else if (ellipseVal <= 1.6) {
+                        points.push({x: dx, y: dy, expected: 1}); // background
+                    }
+                }
+            }
+        }
+        return { points: points, width: w, height: h };
+    },
+
+    // -------------------------------------------------------
+    // TEMPLATE MATCHING — Evaluate template at position
+    // Returns score 0 (perfect match) to 1 (no match)
+    // Inspired by Audiveris Template.evaluate()
+    // -------------------------------------------------------
+    _evaluateTemplate: function(template, cx, cy, distTransform, width, height) {
+        var foreWeight = 4.0;
+        var backWeight = 1.0;
+        var holeWeight = 0.5;
+        var totalWeight = 0;
+        var totalDist = 0;
+
+        for (var i = 0; i < template.points.length; i++) {
+            var p = template.points[i];
+            var nx = cx + p.x;
+            var ny = cy + p.y;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+            var actualDist = distTransform[ny * width + nx];
+            var weight, dist;
+
+            if (p.expected === 0) {
+                // Expected foreground: good if actualDist is 0 (on foreground)
+                weight = foreWeight;
+                dist = actualDist > 0 ? 1 : 0;
+            } else if (p.expected > 0) {
+                // Expected background: good if actualDist > 0
+                weight = backWeight;
+                dist = actualDist === 0 ? 1 : 0;
+            } else {
+                // Expected hole: good if actualDist > 0 (white inside)
+                weight = holeWeight;
+                dist = actualDist === 0 ? 1 : 0;
+            }
+
+            totalDist += weight * dist;
+            totalWeight += weight;
+        }
+
+        return totalWeight > 0 ? totalDist / totalWeight : 1.0;
+    },
+
+    // -------------------------------------------------------
+    // POSITION-BASED SCANNING (Audiveris NoteHeadsBuilder style)
+    // Scans each pitch position on each staff for noteheads
+    // -------------------------------------------------------
+    scanForNoteheads: function(binary, distTransform, width, height, staves, noteStartX) {
+        var noteHeads = [];
+        var filledTemplate = null;
+        var voidTemplate = null;
+
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
             var sp = staff.spacing;
-            // Minimum skip: clef region only (~3 spaces)
-            var minSkip = Math.round(sp * 3);
-            // Scan for a gap column after the preamble symbols
-            var bestGap = minSkip;
-            var maxScan = Math.round(sp * 7); // don't scan too far
+            var halfSp = sp / 2;
+            var startX = noteStartX ? noteStartX[s] : Math.round(sp * 3);
 
-            for (var x = minSkip; x < Math.min(width, maxScan); x++) {
-                var ink = 0;
-                for (var y = staff.top; y <= staff.bottom; y++) {
-                    if (binary[y * width + x] === 1) ink++;
-                }
-                if (ink < (staff.bottom - staff.top) * 0.12) {
-                    bestGap = x;
-                }
+            // Create templates sized for this staff
+            if (!filledTemplate || Math.abs(filledTemplate.height - sp * 0.85) > 2) {
+                filledTemplate = this._createNoteheadTemplate(sp, true);
+                voidTemplate = this._createNoteheadTemplate(sp, false);
             }
-            results.push(bestGap);
-        }
-        return results;
-    },
 
-    /**
-     * Detect key signature
-     */
-    detectKeySignature: function(binary, width, staves) {
-        if (staves.length === 0) return { fifths: 0, accidentals: {} };
-        var staff = staves[0];
-        var sp = staff.spacing;
-        var startX = Math.round(sp * 3);
-        var endX = Math.round(sp * 6.5);
-        var top = staff.top - Math.round(sp);
-        var bot = staff.bottom + Math.round(sp);
+            // Scan pitch positions: from 4 below bottom line to 4 above top line
+            // Position 0 = bottom line, +1 = next space up, etc.
+            // Range: -4 to +12 (covers ledger lines above and below)
+            for (var pos = -4; pos <= 12; pos++) {
+                var pitchY = Math.round(staff.bottom - pos * halfSp);
 
-        var columns = [];
-        for (var x = startX; x < Math.min(width, endX); x++) {
-            var ink = 0;
-            for (var y = Math.max(0, top); y <= Math.min(bot, Math.floor(binary.length / width) - 1); y++) {
-                if (binary[y * width + x] === 1) ink++;
-            }
-            columns.push(ink);
-        }
+                // Scan x positions across the staff
+                var step = Math.max(2, Math.round(sp * 0.3));
+                for (var x = startX; x < width - Math.round(sp); x += step) {
+                    // Quick pre-check: is there ink nearby?
+                    var hasInk = false;
+                    for (var dy = -Math.round(halfSp); dy <= Math.round(halfSp); dy++) {
+                        var py = pitchY + dy;
+                        if (py >= 0 && py < height && binary[py * width + x] === 1) {
+                            hasInk = true; break;
+                        }
+                    }
+                    if (!hasInk) continue;
 
-        // Find ink clusters
-        var inCluster = false, clStart = 0, clusters = [];
-        for (var i = 0; i < columns.length; i++) {
-            if (columns[i] > sp * 0.3 && !inCluster) { inCluster = true; clStart = i; }
-            else if (columns[i] <= sp * 0.3 && inCluster) {
-                inCluster = false;
-                var w = i - clStart;
-                if (w > sp * 0.2 && w < sp * 1.8) clusters.push({ start: clStart + startX, width: w });
-            }
-        }
+                    // Evaluate filled template
+                    var filledScore = this._evaluateTemplate(filledTemplate, x, pitchY, distTransform, width, height);
+                    // Evaluate void template
+                    var voidScore = this._evaluateTemplate(voidTemplate, x, pitchY, distTransform, width, height);
 
-        // Count accidentals based on cluster height
-        var sharpCount = 0, flatCount = 0;
-        for (var c = 0; c < clusters.length; c++) {
-            var cl = clusters[c];
-            var maxH = 0;
-            for (var y = Math.max(0, top); y <= bot; y++) {
-                for (var x = cl.start; x < cl.start + cl.width; x++) {
-                    if (x < width && binary[y * width + x] === 1) { var h = y - top; if (h > maxH) maxH = h; }
-                }
-            }
-            if (maxH > sp * 2) sharpCount++; else if (maxH > sp * 0.5) flatCount++;
-        }
+                    var bestScore = Math.min(filledScore, voidScore);
+                    var isFilled = filledScore <= voidScore;
 
-        var fifths = 0;
-        if (sharpCount > flatCount && sharpCount <= 7) fifths = sharpCount;
-        else if (flatCount > sharpCount && flatCount <= 7) fifths = -flatCount;
+                    // Accept if score is good enough (lower = better match)
+                    if (bestScore < 0.38) {
+                        // Check for duplicate at similar position
+                        var isDup = false;
+                        for (var n = noteHeads.length - 1; n >= Math.max(0, noteHeads.length - 20); n--) {
+                            var prev = noteHeads[n];
+                            if (prev.staffIndex === s &&
+                                Math.abs(prev.centerX - x) < sp * 0.6 &&
+                                Math.abs(prev.centerY - pitchY) < halfSp * 0.8) {
+                                // Keep the better match
+                                if (bestScore < prev.matchScore) {
+                                    noteHeads.splice(n, 1);
+                                } else {
+                                    isDup = true;
+                                }
+                                break;
+                            }
+                        }
+                        if (isDup) continue;
 
-        var accidentals = {};
-        var sharpOrder = ['F', 'C', 'G', 'D', 'A', 'E', 'B'];
-        var flatOrder = ['B', 'E', 'A', 'D', 'G', 'C', 'F'];
-        if (fifths > 0) { for (var i = 0; i < fifths; i++) accidentals[sharpOrder[i]] = 1; }
-        else if (fifths < 0) { for (var i = 0; i < -fifths; i++) accidentals[flatOrder[i]] = -1; }
-
-        return { fifths: fifths, accidentals: accidentals };
-    },
-
-    /**
-     * Detect time signature by analyzing ink patterns after key signature
-     */
-    detectTimeSignature: function(binary, width, staves) {
-        if (staves.length === 0) return { beats: 4, beatType: 4 };
-        var staff = staves[0];
-        var sp = staff.spacing;
-        // Time sig is typically between x=5*sp and x=7*sp
-        var startX = Math.round(sp * 5);
-        var endX = Math.round(sp * 7.5);
-        var midY = staff.center;
-
-        // Look for a digit-like blob in top half and bottom half of staff
-        var topInk = 0, botInk = 0;
-        var topPixels = [], botPixels = [];
-        for (var x = startX; x < Math.min(width, endX); x++) {
-            var tInk = 0, bInk = 0;
-            for (var y = staff.top; y < midY; y++) {
-                if (binary[y * width + x] === 1) tInk++;
-            }
-            for (var y = midY; y <= staff.bottom; y++) {
-                if (binary[y * width + x] === 1) bInk++;
-            }
-            topInk += tInk;
-            botInk += bInk;
-            if (tInk > sp * 0.2) topPixels.push(x);
-            if (bInk > sp * 0.2) botPixels.push(x);
-        }
-
-        // If we found time sig symbols, try to identify the numbers
-        // For now, use the pixel density patterns
-        // Common signatures: 2/4, 3/4, 4/4, 6/8, 3/8
-        if (topPixels.length < 3 && botPixels.length < 3) {
-            return { beats: 4, beatType: 4 }; // default
-        }
-
-        // Simple heuristic: analyze the shape of the top number
-        // 2 has a distinctive curve, 3 has two bumps, 4 has straight lines, 6 is round
-        var topWidth = topPixels.length > 0 ? topPixels[topPixels.length - 1] - topPixels[0] : 0;
-        var topDensity = topInk / Math.max(1, (midY - staff.top) * (endX - startX));
-
-        // Count the number of horizontal crossings in the middle of the top half
-        var crossY = Math.round((staff.top + midY) / 2);
-        var crossings = 0;
-        var prev = 0;
-        for (var x = startX; x < endX; x++) {
-            var cur = binary[crossY * width + x];
-            if (cur === 1 && prev === 0) crossings++;
-            prev = cur;
-        }
-
-        var beats = 4, beatType = 4;
-        // 3 has 2 crossings typically, 2 has 1-2, 4 has 2-3, 6 has 1
-        if (topDensity > 0.05) {
-            if (crossings <= 1 && topWidth > sp * 0.8) beats = 6;
-            else if (crossings >= 3) beats = 4;
-            else beats = crossings <= 1 ? 2 : 3;
-        }
-
-        // Bottom number: 4 vs 8
-        var botCrossY = Math.round((midY + staff.bottom) / 2);
-        var botCrossings = 0;
-        prev = 0;
-        for (var x = startX; x < endX; x++) {
-            var cur = binary[botCrossY * width + x];
-            if (cur === 1 && prev === 0) botCrossings++;
-            prev = cur;
-        }
-        beatType = botCrossings >= 2 ? 8 : 4;
-
-        return { beats: beats, beatType: beatType };
-    },
-
-    /**
-     * Find connected components (blobs) — same as v3
-     */
-    findBlobs: function(binary, width, height) {
-        var labels = new Int32Array(binary.length);
-        var nextLabel = 1;
-        var eq = {};
-        function find(x) { while (eq[x] && eq[x] !== x) x = eq[x]; return x; }
-        function union(a, b) { a = find(a); b = find(b); if (a !== b) eq[Math.max(a, b)] = Math.min(a, b); }
-
-        for (var y = 0; y < height; y++) {
-            for (var x = 0; x < width; x++) {
-                var idx = y * width + x;
-                if (binary[idx] === 0) continue;
-                var nb = [];
-                if (x > 0 && labels[idx - 1] > 0) nb.push(labels[idx - 1]);
-                if (y > 0 && labels[idx - width] > 0) nb.push(labels[idx - width]);
-                if (x > 0 && y > 0 && labels[idx - width - 1] > 0) nb.push(labels[idx - width - 1]);
-                if (x < width - 1 && y > 0 && labels[idx - width + 1] > 0) nb.push(labels[idx - width + 1]);
-                if (nb.length === 0) { labels[idx] = nextLabel; eq[nextLabel] = nextLabel; nextLabel++; }
-                else { var m = Math.min.apply(null, nb); labels[idx] = m; for (var n = 0; n < nb.length; n++) union(m, nb[n]); }
-            }
-        }
-        var blobs = {};
-        for (var y = 0; y < height; y++) {
-            for (var x = 0; x < width; x++) {
-                var idx = y * width + x;
-                if (labels[idx] === 0) continue;
-                var r = find(labels[idx]);
-                if (!blobs[r]) blobs[r] = { id: r, minX: x, maxX: x, minY: y, maxY: y, pixels: 0 };
-                var b = blobs[r];
-                if (x < b.minX) b.minX = x; if (x > b.maxX) b.maxX = x;
-                if (y < b.minY) b.minY = y; if (y > b.maxY) b.maxY = y;
-                b.pixels++;
-            }
-        }
-        var result = [];
-        var keys = Object.keys(blobs);
-        for (var i = 0; i < keys.length; i++) {
-            var b = blobs[keys[i]];
-            b.width = b.maxX - b.minX + 1; b.height = b.maxY - b.minY + 1;
-            b.centerX = Math.round((b.minX + b.maxX) / 2);
-            b.centerY = Math.round((b.minY + b.maxY) / 2);
-            b.area = b.width * b.height; b.fillRatio = b.pixels / b.area;
-            b.aspectRatio = b.width / b.height;
-            result.push(b);
-        }
-        return result;
-    },
-
-    /**
-     * Filter blobs to noteheads — balanced filtering (not too strict, not too loose)
-     */
-    filterNoteHeads: function(blobs, staves, noteStartX) {
-        if (staves.length === 0) return [];
-        var avgSp = 0;
-        for (var i = 0; i < staves.length; i++) avgSp += staves[i].spacing;
-        avgSp /= staves.length;
-
-        var noteHeads = [];
-        for (var i = 0; i < blobs.length; i++) {
-            var b = blobs[i];
-            // Size: roughly 0.5-2.0 spaces
-            if (b.width < avgSp * 0.4 || b.width > avgSp * 2.2) continue;
-            if (b.height < avgSp * 0.3 || b.height > avgSp * 1.6) continue;
-            // Aspect ratio: noteheads are 0.5 to 2.5
-            if (b.aspectRatio < 0.5 || b.aspectRatio > 2.8) continue;
-            // Min pixels
-            if (b.pixels < avgSp * avgSp * 0.1) continue;
-
-            // Must be near a staff
-            var staffIdx = -1;
-            for (var s = 0; s < staves.length; s++) {
-                var staff = staves[s];
-                var margin = staff.spacing * 3;
-                if (b.centerY >= staff.top - margin && b.centerY <= staff.bottom + margin) {
-                    staffIdx = s; break;
+                        noteHeads.push({
+                            centerX: x,
+                            centerY: pitchY,
+                            minX: x - Math.round(sp * 0.7),
+                            maxX: x + Math.round(sp * 0.7),
+                            minY: pitchY - Math.round(sp * 0.45),
+                            maxY: pitchY + Math.round(sp * 0.45),
+                            width: Math.round(sp * 1.4),
+                            height: Math.round(sp * 0.85),
+                            isFilled: isFilled,
+                            staffIndex: s,
+                            posIndex: pos,
+                            matchScore: bestScore,
+                            pixels: Math.round(sp * sp * 0.5) // approximate
+                        });
+                    }
                 }
             }
-            if (staffIdx === -1) continue;
-
-            // Skip preamble
-            var startX = noteStartX ? noteStartX[staffIdx] : 0;
-            if (b.centerX < startX) continue;
-
-            // Classify fill
-            b.isFilled = b.fillRatio > 0.48;
-            if (b.fillRatio < 0.20) continue; // too sparse
-
-            b.staffIndex = staffIdx;
-            noteHeads.push(b);
         }
-        return noteHeads;
+
+        // Sort by match quality and remove weaker overlapping detections
+        noteHeads.sort(function(a, b) { return a.matchScore - b.matchScore; });
+        var filtered = [];
+        var used = {};
+        for (var i = 0; i < noteHeads.length; i++) {
+            var nh = noteHeads[i];
+            var key = nh.staffIndex + '_' + Math.round(nh.centerX / (staves[nh.staffIndex].spacing * 0.5)) +
+                      '_' + nh.posIndex;
+            if (!used[key]) {
+                used[key] = true;
+                filtered.push(nh);
+            }
+        }
+
+        return filtered;
     },
 
+    // -------------------------------------------------------
+    // STEM DETECTION — Find vertical lines attached to noteheads
+    // -------------------------------------------------------
     detectStems: function(noteHeads, binary, width, height, staves) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var staff = staves[nh.staffIndex];
             var stemLen = staff.spacing * 3;
             var hasStemUp = false, hasStemDown = false;
+
             var sides = [nh.maxX, nh.minX];
             for (var si = 0; si < sides.length; si++) {
                 var cx = sides[si];
-                var up = 0;
+                // Check upward
+                var upCount = 0;
                 for (var y = nh.minY - 1; y >= Math.max(0, nh.minY - stemLen); y--) {
-                    var f = false;
-                    for (var dx = -1; dx <= 1; dx++) { var xx = cx + dx; if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { f = true; break; } }
-                    if (f) up++;
+                    var found = false;
+                    for (var dx = -1; dx <= 1; dx++) {
+                        var xx = cx + dx;
+                        if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { found = true; break; }
+                    }
+                    if (found) upCount++;
                 }
-                if (up > stemLen * 0.4) { hasStemUp = true; break; }
-                var dn = 0;
+                if (upCount > stemLen * 0.4) { hasStemUp = true; break; }
+                // Check downward
+                var downCount = 0;
                 for (var y = nh.maxY + 1; y <= Math.min(height - 1, nh.maxY + stemLen); y++) {
-                    var f = false;
-                    for (var dx = -1; dx <= 1; dx++) { var xx = cx + dx; if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { f = true; break; } }
-                    if (f) dn++;
+                    var found = false;
+                    for (var dx = -1; dx <= 1; dx++) {
+                        var xx = cx + dx;
+                        if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { found = true; break; }
+                    }
+                    if (found) downCount++;
                 }
-                if (dn > stemLen * 0.4) { hasStemDown = true; break; }
+                if (downCount > stemLen * 0.4) { hasStemDown = true; break; }
             }
             nh.hasStem = hasStemUp || hasStemDown;
             nh.stemDirection = hasStemUp ? 'up' : (hasStemDown ? 'down' : 'none');
@@ -718,19 +699,27 @@ PianoModeOMR.NoteDetector = {
         return noteHeads;
     },
 
+    // -------------------------------------------------------
+    // FLAG & BEAM DETECTION
+    // -------------------------------------------------------
     detectFlags: function(noteHeads, binary, width, height, staves) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             if (!nh.hasStem) { nh.flagCount = 0; continue; }
-            var staff = staves[nh.staffIndex]; var fz = Math.round(staff.spacing * 1.2);
-            var sey = nh.stemDirection === 'up' ? nh.minY - Math.round(staff.spacing * 2.5) : nh.maxY + Math.round(staff.spacing * 2.5);
-            var sx = nh.maxX;
+            var staff = staves[nh.staffIndex];
+            var fz = Math.round(staff.spacing * 1.2);
+            var sey = nh.stemDirection === 'up'
+                ? nh.minY - Math.round(staff.spacing * 2.5)
+                : nh.maxY + Math.round(staff.spacing * 2.5);
+            var sx = nh.stemDirection === 'up' ? nh.maxX : nh.maxX;
             var fp = 0, tp = 0;
             var yS = Math.max(0, Math.min(sey, sey + fz) - 2);
             var yE = Math.min(height - 1, Math.max(sey, sey + fz) + 2);
-            for (var y = yS; y <= yE; y++) { for (var x = sx; x < Math.min(width, sx + fz); x++) { tp++; if (binary[y * width + x] === 1) fp++; } }
+            for (var y = yS; y <= yE; y++) {
+                for (var x = sx; x < Math.min(width, sx + fz); x++) { tp++; if (binary[y * width + x] === 1) fp++; }
+            }
             var d = tp > 0 ? fp / tp : 0;
-            nh.flagCount = d > 0.3 ? 2 : (d > 0.15 ? 1 : 0);
+            nh.flagCount = d > 0.3 ? 2 : (d > 0.12 ? 1 : 0);
         }
         return noteHeads;
     },
@@ -741,19 +730,121 @@ PianoModeOMR.NoteDetector = {
             var a = noteHeads[i], b = noteHeads[i + 1];
             if (!a.hasStem || !b.hasStem || a.staffIndex !== b.staffIndex) continue;
             var staff = staves[a.staffIndex];
-            if (Math.abs(b.centerX - a.centerX) > staff.spacing * 5) continue;
+            if (Math.abs(b.centerX - a.centerX) > staff.spacing * 6) continue;
             var ae = a.stemDirection === 'up' ? a.minY - Math.round(staff.spacing * 2) : a.maxY + Math.round(staff.spacing * 2);
             var be = b.stemDirection === 'up' ? b.minY - Math.round(staff.spacing * 2) : b.maxY + Math.round(staff.spacing * 2);
             var by = Math.round((ae + be) / 2);
             var sx = Math.min(a.centerX, b.centerX), ex = Math.max(a.centerX, b.centerX);
             var bp = 0, ts = 0;
-            for (var dy = -2; dy <= 2; dy++) { var y = by + dy; if (y < 0 || y >= height) continue; for (var x = sx; x <= ex; x++) { ts++; if (binary[y * width + x] === 1) bp++; } }
-            if (ts > 0 && bp / ts > 0.4) { a.beamCount = Math.max(a.beamCount, 1); b.beamCount = Math.max(b.beamCount, 1); }
+            for (var dy = -2; dy <= 2; dy++) {
+                var y = by + dy; if (y < 0 || y >= height) continue;
+                for (var x = sx; x <= ex; x++) { ts++; if (binary[y * width + x] === 1) bp++; }
+            }
+            if (ts > 0 && bp / ts > 0.35) {
+                a.beamCount = Math.max(a.beamCount, 1); b.beamCount = Math.max(b.beamCount, 1);
+            }
         }
         return noteHeads;
     },
 
-    detectRests: function(blobs, staves, width, noteStartX) {
+    // -------------------------------------------------------
+    // KEY SIGNATURE, TIME SIGNATURE, PREAMBLE DETECTION
+    // -------------------------------------------------------
+    _findNoteStartX: function(binary, width, staves) {
+        var results = [];
+        for (var s = 0; s < staves.length; s++) {
+            var staff = staves[s]; var sp = staff.spacing;
+            var minSkip = Math.round(sp * 3);
+            var bestGap = minSkip;
+            for (var x = minSkip; x < Math.min(width, Math.round(sp * 7)); x++) {
+                var ink = 0;
+                for (var y = staff.top; y <= staff.bottom; y++) {
+                    if (binary[y * width + x] === 1) ink++;
+                }
+                if (ink < (staff.bottom - staff.top) * 0.12) bestGap = x;
+            }
+            results.push(bestGap);
+        }
+        return results;
+    },
+
+    detectKeySignature: function(binary, width, staves) {
+        if (staves.length === 0) return { fifths: 0, accidentals: {} };
+        var staff = staves[0]; var sp = staff.spacing;
+        var startX = Math.round(sp * 3); var endX = Math.round(sp * 6.5);
+        var top = staff.top - Math.round(sp); var bot = staff.bottom + Math.round(sp);
+        var imgH = Math.floor(binary.length / width);
+
+        var cols = [];
+        for (var x = startX; x < Math.min(width, endX); x++) {
+            var ink = 0;
+            for (var y = Math.max(0, top); y <= Math.min(bot, imgH - 1); y++) {
+                if (binary[y * width + x] === 1) ink++;
+            }
+            cols.push(ink);
+        }
+        var inCl = false, clS = 0, clusters = [];
+        for (var i = 0; i < cols.length; i++) {
+            if (cols[i] > sp * 0.3 && !inCl) { inCl = true; clS = i; }
+            else if (cols[i] <= sp * 0.3 && inCl) {
+                inCl = false; var w = i - clS;
+                if (w > sp * 0.2 && w < sp * 1.8) clusters.push({ start: clS + startX, width: w });
+            }
+        }
+        var sc = 0, fc = 0;
+        for (var c = 0; c < clusters.length; c++) {
+            var cl = clusters[c]; var maxH = 0;
+            for (var y = Math.max(0, top); y <= bot; y++) {
+                for (var x = cl.start; x < cl.start + cl.width; x++) {
+                    if (x < width && binary[y * width + x] === 1) { var h = y - top; if (h > maxH) maxH = h; }
+                }
+            }
+            if (maxH > sp * 2) sc++; else if (maxH > sp * 0.5) fc++;
+        }
+        var fifths = sc > fc ? Math.min(sc, 7) : (fc > sc ? -Math.min(fc, 7) : 0);
+        var acc = {};
+        var so = ['F','C','G','D','A','E','B'], fo = ['B','E','A','D','G','C','F'];
+        if (fifths > 0) for (var i = 0; i < fifths; i++) acc[so[i]] = 1;
+        else if (fifths < 0) for (var i = 0; i < -fifths; i++) acc[fo[i]] = -1;
+        return { fifths: fifths, accidentals: acc };
+    },
+
+    detectTimeSignature: function(binary, width, staves) {
+        if (staves.length === 0) return { beats: 4, beatType: 4 };
+        var staff = staves[0]; var sp = staff.spacing;
+        var startX = Math.round(sp * 5); var endX = Math.round(sp * 7.5);
+        var midY = staff.center;
+        var topInk = 0, botInk = 0;
+        for (var x = startX; x < Math.min(width, endX); x++) {
+            for (var y = staff.top; y < midY; y++) { if (binary[y * width + x] === 1) topInk++; }
+            for (var y = midY; y <= staff.bottom; y++) { if (binary[y * width + x] === 1) botInk++; }
+        }
+        if (topInk < sp * 2 && botInk < sp * 2) return { beats: 4, beatType: 4 };
+        // Heuristic for common time sigs
+        var crossY = Math.round((staff.top + midY) / 2);
+        var crossings = 0; var prev = 0;
+        for (var x = startX; x < endX; x++) {
+            var cur = (x < width) ? binary[crossY * width + x] : 0;
+            if (cur === 1 && prev === 0) crossings++;
+            prev = cur;
+        }
+        var beats = crossings >= 3 ? 4 : (crossings <= 1 ? 2 : 3);
+        var botCrossY = Math.round((midY + staff.bottom) / 2);
+        var botCrossings = 0; prev = 0;
+        for (var x = startX; x < endX; x++) {
+            var cur = (x < width) ? binary[botCrossY * width + x] : 0;
+            if (cur === 1 && prev === 0) botCrossings++;
+            prev = cur;
+        }
+        return { beats: beats, beatType: botCrossings >= 2 ? 8 : 4 };
+    },
+
+    // -------------------------------------------------------
+    // REST & BARLINE DETECTION
+    // -------------------------------------------------------
+    detectRests: function(binary, width, height, staves, noteStartX) {
+        // Use blob detection for rests (they have distinctive shapes)
+        var blobs = this._findBlobs(binary, width, height);
         var rests = [];
         if (staves.length === 0) return rests;
         var avgSp = 0;
@@ -771,20 +862,68 @@ PianoModeOMR.NoteDetector = {
             if (b.centerX < sx) continue;
             var staff = staves[ns];
 
+            // Whole/half rest
             if (b.width > avgSp * 0.5 && b.width < avgSp * 2 && b.height > avgSp * 0.2 && b.height < avgSp * 0.8 && b.fillRatio > 0.7 && b.aspectRatio > 1.2) {
                 var rt = b.centerY < staff.center ? 'half' : 'whole';
-                rests.push({ type: rt, durationValue: rt === 'half' ? 2 : 4, mxlType: rt, centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
+                rests.push({type:rt, durationValue: rt==='half'?2:4, mxlType:rt, centerX:b.centerX, centerY:b.centerY, staffIndex:ns, isRest:true});
                 continue;
             }
+            // Quarter rest
             if (b.height > avgSp * 1.5 && b.height < avgSp * 4 && b.width < avgSp * 1.2 && b.aspectRatio < 0.6 && b.fillRatio > 0.25 && b.fillRatio < 0.65) {
-                rests.push({ type: 'quarter', durationValue: 1, mxlType: 'quarter', centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
+                rests.push({type:'quarter', durationValue:1, mxlType:'quarter', centerX:b.centerX, centerY:b.centerY, staffIndex:ns, isRest:true});
                 continue;
             }
+            // Eighth rest
             if (b.height > avgSp * 0.8 && b.height < avgSp * 2 && b.width < avgSp * 1.0 && b.fillRatio > 0.2 && b.fillRatio < 0.55 && b.aspectRatio < 0.8) {
-                rests.push({ type: 'eighth', durationValue: 0.5, mxlType: 'eighth', centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
+                rests.push({type:'eighth', durationValue:0.5, mxlType:'eighth', centerX:b.centerX, centerY:b.centerY, staffIndex:ns, isRest:true});
             }
         }
         return rests;
+    },
+
+    // Simple blob finder for rests
+    _findBlobs: function(binary, width, height) {
+        var labels = new Int32Array(binary.length);
+        var next = 1; var eq = {};
+        function find(x) { while (eq[x] && eq[x] !== x) x = eq[x]; return x; }
+        function union(a, b) { a = find(a); b = find(b); if (a !== b) eq[Math.max(a,b)] = Math.min(a,b); }
+        for (var y = 0; y < height; y++) {
+            for (var x = 0; x < width; x++) {
+                var idx = y * width + x;
+                if (binary[idx] === 0) continue;
+                var nb = [];
+                if (x > 0 && labels[idx-1] > 0) nb.push(labels[idx-1]);
+                if (y > 0 && labels[idx-width] > 0) nb.push(labels[idx-width]);
+                if (x > 0 && y > 0 && labels[idx-width-1] > 0) nb.push(labels[idx-width-1]);
+                if (x < width-1 && y > 0 && labels[idx-width+1] > 0) nb.push(labels[idx-width+1]);
+                if (nb.length === 0) { labels[idx] = next; eq[next] = next; next++; }
+                else { var m = Math.min.apply(null, nb); labels[idx] = m; for (var n = 0; n < nb.length; n++) union(m, nb[n]); }
+            }
+        }
+        var blobs = {};
+        for (var y = 0; y < height; y++) {
+            for (var x = 0; x < width; x++) {
+                var idx = y * width + x; if (labels[idx] === 0) continue;
+                var r = find(labels[idx]);
+                if (!blobs[r]) blobs[r] = {minX:x,maxX:x,minY:y,maxY:y,pixels:0};
+                var b = blobs[r];
+                if (x < b.minX) b.minX = x; if (x > b.maxX) b.maxX = x;
+                if (y < b.minY) b.minY = y; if (y > b.maxY) b.maxY = y;
+                b.pixels++;
+            }
+        }
+        var result = [];
+        var keys = Object.keys(blobs);
+        for (var i = 0; i < keys.length; i++) {
+            var b = blobs[keys[i]];
+            b.width = b.maxX - b.minX + 1; b.height = b.maxY - b.minY + 1;
+            b.centerX = Math.round((b.minX + b.maxX) / 2);
+            b.centerY = Math.round((b.minY + b.maxY) / 2);
+            b.fillRatio = b.pixels / (b.width * b.height);
+            b.aspectRatio = b.width / b.height;
+            result.push(b);
+        }
+        return result;
     },
 
     detectBarLines: function(binary, width, height, staves) {
@@ -797,44 +936,47 @@ PianoModeOMR.NoteDetector = {
                 if (br > sh * 0.8) {
                     var narrow = true;
                     for (var dx = -3; dx <= 3; dx++) { if (dx === 0) continue; var nx = x + dx; if (nx < 0 || nx >= width) continue; var nr = 0; for (var y = st; y <= sb; y++) { if (binary[y * width + nx] === 1) nr++; } if (Math.abs(dx) > 2 && nr > sh * 0.7) { narrow = false; break; } }
-                    if (narrow) { var dup = false; for (var b = 0; b < barLines.length; b++) { if (barLines[b].staffIndex === s && Math.abs(barLines[b].x - x) < 8) { dup = true; break; } } if (!dup) barLines.push({ x: x, staffIndex: s }); }
+                    if (narrow) { var dup = false; for (var b = 0; b < barLines.length; b++) { if (barLines[b].staffIndex === s && Math.abs(barLines[b].x - x) < 8) { dup = true; break; } } if (!dup) barLines.push({x:x, staffIndex:s}); }
                 }
             }
         }
         return barLines;
     },
 
+    // -------------------------------------------------------
+    // DURATION, PITCH, ORGANIZE
+    // -------------------------------------------------------
     classifyDuration: function(noteHeads) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var flags = Math.max(nh.flagCount || 0, nh.beamCount || 0);
-            if (!nh.isFilled && !nh.hasStem) { nh.duration = 'whole'; nh.durationValue = 4; nh.mxlType = 'whole'; }
-            else if (!nh.isFilled && nh.hasStem) { nh.duration = 'half'; nh.durationValue = 2; nh.mxlType = 'half'; }
-            else if (nh.isFilled && nh.hasStem && flags >= 2) { nh.duration = '16th'; nh.durationValue = 0.25; nh.mxlType = '16th'; }
-            else if (nh.isFilled && nh.hasStem && flags >= 1) { nh.duration = 'eighth'; nh.durationValue = 0.5; nh.mxlType = 'eighth'; }
-            else { nh.duration = 'quarter'; nh.durationValue = 1; nh.mxlType = 'quarter'; }
+            if (!nh.isFilled && !nh.hasStem) { nh.duration='whole'; nh.durationValue=4; nh.mxlType='whole'; }
+            else if (!nh.isFilled && nh.hasStem) { nh.duration='half'; nh.durationValue=2; nh.mxlType='half'; }
+            else if (nh.isFilled && nh.hasStem && flags >= 2) { nh.duration='16th'; nh.durationValue=0.25; nh.mxlType='16th'; }
+            else if (nh.isFilled && nh.hasStem && flags >= 1) { nh.duration='eighth'; nh.durationValue=0.5; nh.mxlType='eighth'; }
+            else { nh.duration='quarter'; nh.durationValue=1; nh.mxlType='quarter'; }
         }
         return noteHeads;
     },
 
-    assignPitch: function(noteHeads, staves, keySignature) {
-        var acc = (keySignature && keySignature.accidentals) ? keySignature.accidentals : {};
+    assignPitch: function(noteHeads, staves, keySig) {
+        var acc = (keySig && keySig.accidentals) ? keySig.accidentals : {};
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var staff = staves[nh.staffIndex];
-            var halfSpace = staff.spacing / 2;
-            var distFromBottom = staff.bottom - nh.centerY;
-            var posIndex = Math.round(distFromBottom / halfSpace);
             var pitches = (staff.clef === 'bass') ? this.BASS_PITCHES : this.TREBLE_PITCHES;
+
+            // posIndex was already computed during scanning
+            var posIndex = nh.posIndex;
             var pitch;
             if (posIndex >= 0 && posIndex < pitches.length) {
-                pitch = { step: pitches[posIndex].step, octave: pitches[posIndex].octave };
+                pitch = { step: pitches[posIndex].s, octave: pitches[posIndex].o };
             } else {
                 var steps = this.STEPS;
                 var ref = posIndex >= pitches.length ? pitches[pitches.length - 1] : pitches[0];
                 var count = posIndex >= pitches.length ? posIndex - pitches.length + 1 : Math.abs(posIndex);
-                var dir = posIndex >= pitches.length ? 1 : -1;
-                var si = steps.indexOf(ref.step); var oct = ref.octave;
+                var dir = posIndex >= 0 ? 1 : -1;
+                var si = steps.indexOf(ref.s); var oct = ref.o;
                 for (var e = 0; e < count; e++) { si += dir; if (si >= 7) { si = 0; oct++; } if (si < 0) { si = 6; oct--; } }
                 pitch = { step: steps[si], octave: oct };
             }
@@ -846,86 +988,83 @@ PianoModeOMR.NoteDetector = {
         return noteHeads;
     },
 
-    /**
-     * Organize notes into events, sorted by SYSTEM then by x position.
-     * This ensures multi-system scores play in the right order.
-     */
     organizeNotes: function(noteHeads, staves) {
-        // Sort by system first, then by x within each system
         noteHeads.sort(function(a, b) {
-            var sysA = staves[a.staffIndex].systemIndex || 0;
-            var sysB = staves[b.staffIndex].systemIndex || 0;
-            if (sysA !== sysB) return sysA - sysB;
+            var sA = staves[a.staffIndex].systemIndex || 0;
+            var sB = staves[b.staffIndex].systemIndex || 0;
+            if (sA !== sB) return sA - sB;
             return a.centerX - b.centerX;
         });
-
-        var events = [];
-        var i = 0;
+        var events = []; var i = 0;
         while (i < noteHeads.length) {
-            var chord = [noteHeads[i]];
-            var j = i + 1;
+            var chord = [noteHeads[i]]; var j = i + 1;
             while (j < noteHeads.length &&
-                   (staves[noteHeads[j].staffIndex].systemIndex || 0) === (staves[noteHeads[i].staffIndex].systemIndex || 0) &&
-                   Math.abs(noteHeads[j].centerX - noteHeads[i].centerX) < noteHeads[i].width * 1.8) {
+                   (staves[noteHeads[j].staffIndex].systemIndex||0) === (staves[noteHeads[i].staffIndex].systemIndex||0) &&
+                   Math.abs(noteHeads[j].centerX - noteHeads[i].centerX) < noteHeads[i].width * 1.5) {
                 chord.push(noteHeads[j]); j++;
             }
             var minDur = 4;
             for (var c = 0; c < chord.length; c++) { if (chord[c].durationValue < minDur) minDur = chord[c].durationValue; }
             events.push({
-                notes: chord, x: chord[0].centerX,
-                staffIndex: chord[0].staffIndex,
+                notes: chord, x: chord[0].centerX, staffIndex: chord[0].staffIndex,
                 systemIndex: staves[chord[0].staffIndex].systemIndex || 0,
-                durationValue: minDur,
-                duration: chord[0].duration, mxlType: chord[0].mxlType
+                durationValue: minDur, duration: chord[0].duration, mxlType: chord[0].mxlType
             });
             i = j;
         }
         return events;
     },
 
-    /**
-     * Main detection pipeline v3.1
-     */
+    // -------------------------------------------------------
+    // MAIN PIPELINE v4.0
+    // -------------------------------------------------------
     detect: function(cleanedBinary, originalBinary, width, height, staves) {
+        // Step 1: Compute distance transform on the original binary
+        var distTransform = this.computeDistanceTransform(originalBinary, width, height);
+
+        // Step 2: Detect key & time signatures
         var keySig = this.detectKeySignature(originalBinary, width, staves);
         var timeSig = this.detectTimeSignature(originalBinary, width, staves);
+
+        // Step 3: Find note start positions (skip preamble)
         var noteStartX = this._findNoteStartX(originalBinary, width, staves);
-        var blobs = this.findBlobs(cleanedBinary, width, height);
-        var noteHeads = this.filterNoteHeads(blobs, staves, noteStartX);
+
+        // Step 4: TEMPLATE-MATCHING NOTEHEAD SCAN (the big improvement!)
+        var noteHeads = this.scanForNoteheads(originalBinary, distTransform, width, height, staves, noteStartX);
+
+        // Step 5: Detect stems, flags, beams
         noteHeads = this.detectStems(noteHeads, originalBinary, width, height, staves);
         noteHeads = this.detectFlags(noteHeads, originalBinary, width, height, staves);
         noteHeads = this.detectBeams(noteHeads, originalBinary, width, height, staves);
+
+        // Step 6: Classify duration and assign pitch
         noteHeads = this.classifyDuration(noteHeads);
         noteHeads = this.assignPitch(noteHeads, staves, keySig);
-        var rests = this.detectRests(blobs, staves, width, noteStartX);
+
+        // Step 7: Detect rests and bar lines
+        var rests = this.detectRests(cleanedBinary, width, height, staves, noteStartX);
         var barLines = this.detectBarLines(originalBinary, width, height, staves);
+
+        // Step 8: Organize into events
         var events = this.organizeNotes(noteHeads, staves);
 
-        // Merge rests (also sorted by system)
+        // Merge rests
         for (var r = 0; r < rests.length; r++) {
-            var rest = rests[r];
             events.push({
-                notes: [], isRest: true, restType: rest.type,
-                x: rest.centerX, staffIndex: rest.staffIndex,
-                systemIndex: staves[rest.staffIndex].systemIndex || 0,
-                durationValue: rest.durationValue, duration: rest.type, mxlType: rest.mxlType
+                notes:[], isRest:true, restType:rests[r].type, x:rests[r].centerX,
+                staffIndex:rests[r].staffIndex, systemIndex: staves[rests[r].staffIndex].systemIndex||0,
+                durationValue:rests[r].durationValue, duration:rests[r].type, mxlType:rests[r].mxlType
             });
         }
-
-        // Sort by system, then x
         events.sort(function(a, b) {
             if (a.systemIndex !== b.systemIndex) return a.systemIndex - b.systemIndex;
             return a.x - b.x;
         });
 
-        return { noteHeads: noteHeads, events: events, rests: rests, barLines: barLines, keySignature: keySig, timeSignature: timeSig };
+        return { noteHeads:noteHeads, events:events, rests:rests, barLines:barLines, keySignature:keySig, timeSignature:timeSig };
     }
 };
 
-
-// =====================================================
-// MUSICXML WRITER — Fixed for multi-system scores
-// =====================================================
 PianoModeOMR.MusicXMLWriter = {
 
     generate: function(events, staves, options) {
@@ -1262,5 +1401,5 @@ PianoModeOMR.Engine = {
     }
 };
 
-console.log('[PianoModeOMR] Engine v3.1 loaded — all modules ready');
+console.log('[PianoModeOMR] Engine v4.0 loaded — all modules ready');
 })();

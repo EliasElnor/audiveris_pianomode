@@ -429,44 +429,98 @@
 }
 
 /* =====================================================
-   PIANO KEYBOARD
+   PIANO KEYBOARD (88 keys, A0–C8)
    ===================================================== */
 .pm-omr-piano-wrap {
     overflow-x: auto;
-    padding: 0.75rem 0;
-    background: #111;
+    overflow-y: hidden;
+    padding: 12px 0 8px;
+    background: #161616;
     border-top: 1px solid rgba(215, 191, 129, 0.15);
     border-radius: 0 0 var(--pm-radius, 16px) var(--pm-radius, 16px);
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: var(--pm-gold, #D7BF81) #222;
+    min-height: 140px;
+    display: block;
+}
+
+.pm-omr-piano-wrap::-webkit-scrollbar {
+    height: 6px;
+}
+
+.pm-omr-piano-wrap::-webkit-scrollbar-track {
+    background: #222;
+    border-radius: 3px;
+}
+
+.pm-omr-piano-wrap::-webkit-scrollbar-thumb {
+    background: var(--pm-gold, #D7BF81);
+    border-radius: 3px;
 }
 
 .pm-omr-piano {
     position: relative;
-    margin: 0 auto;
+    margin: 0;
+    /* Width and height are set dynamically by JS based on 52 white keys */
 }
 
 .pm-piano-key {
     position: absolute;
     top: 0;
-    border-radius: 0 0 4px 4px;
+    border-radius: 0 0 5px 5px;
     cursor: pointer;
-    transition: background 0.08s;
+    transition: background 0.08s, box-shadow 0.08s;
+    box-sizing: border-box;
 }
 
 .pm-piano-white {
-    background: linear-gradient(180deg, #f8f8f8, #e8e8e8);
-    border: 1px solid #bbb;
+    background: linear-gradient(180deg, #fafafa 0%, #f0f0f0 85%, #e0e0e0 100%);
+    border: 1px solid #b0b0b0;
+    border-top: none;
     z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+}
+
+.pm-piano-white .pm-piano-label {
+    font-family: var(--pm-font, 'Montserrat', sans-serif);
+    font-size: 8px;
+    font-weight: 600;
+    color: #999;
+    text-align: center;
+    padding-bottom: 5px;
+    pointer-events: none;
+    user-select: none;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.pm-piano-white:hover {
+    background: linear-gradient(180deg, #fff 0%, #f5f5f5 85%, #e8e8e8 100%);
 }
 
 .pm-piano-black {
-    background: linear-gradient(180deg, #333, #111);
+    background: linear-gradient(180deg, #444 0%, #222 40%, #111 100%);
     border: 1px solid #000;
     z-index: 2;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5), inset 0 -1px 2px rgba(255, 255, 255, 0.05);
+}
+
+.pm-piano-black:hover {
+    background: linear-gradient(180deg, #555 0%, #333 40%, #222 100%);
 }
 
 .pm-piano-white.pm-piano-active {
     background: linear-gradient(180deg, var(--pm-gold, #D7BF81), #c4a860) !important;
     box-shadow: 0 0 12px rgba(215, 191, 129, 0.6);
+}
+
+.pm-piano-white.pm-piano-active .pm-piano-label {
+    color: #5a4a20;
 }
 
 .pm-piano-black.pm-piano-active {

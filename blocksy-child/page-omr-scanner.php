@@ -290,7 +290,7 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=3.1.0' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=4.0.0' ); ?>"></script>
 
 <!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
@@ -503,6 +503,10 @@ $theme_uri = get_stylesheet_directory_uri();
             // Load in AlphaTab
             updateProgress(4, 'Score ready — loading player...');
             show(resultPanel);
+
+            // Build the piano keyboard now that the result panel is visible
+            if (!pianoBuilt && pianoEl) buildPiano();
+
             initAlphaTab(result.musicxmlUrl);
 
             scanBtn.textContent = 'Analyse & Convert to Playable Score';
@@ -764,38 +768,130 @@ $theme_uri = get_stylesheet_directory_uri();
     });
 
     // -------------------------------------------------------
-    // Piano Keyboard — builds 4 octaves (C3-B6) as interactive SVG
+    // Piano Keyboard — full 88 keys (A0–C8) with geo-located labels
     // -------------------------------------------------------
     var pianoWrap = document.getElementById('omr-piano-wrap');
     var pianoEl = document.getElementById('omr-piano');
     var activeKeys = {};
+    var pianoBuilt = false;
 
+    // Note label systems: international vs latin (solfege)
+    var labelsInternational = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+    var labelsLatin = ['Do', 'Ré', 'Mi', 'Fa', 'Sol', 'La', 'Si'];
+    var pianoLabels = labelsInternational; // default
+
+    // Detect user locale for FR/IT/ES/PT → use latin (solfege) labels
+    (function detectNoteLocale() {
+        // 1. Check browser language first (instant, no network)
+        var lang = (navigator.language || navigator.userLanguage || '').toLowerCase().slice(0, 2);
+        if (['fr', 'it', 'es', 'pt'].indexOf(lang) !== -1) {
+            pianoLabels = labelsLatin;
+            return;
+        }
+        // 2. Geo-IP lookup as fallback (non-blocking)
+        try {
+            fetch('https://ipapi.co/json/', { mode: 'cors' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var cc = (data.country_code || '').toUpperCase();
+                    var latinCountries = [
+                        'FR', 'IT', 'ES', 'PT', 'BR', 'MX', 'AR', 'CO', 'CL',
+                        'PE', 'VE', 'EC', 'BO', 'PY', 'UY', 'CR', 'PA', 'DO',
+                        'GT', 'HN', 'SV', 'NI', 'CU', 'AO', 'MZ', 'GW', 'CV',
+                        'ST', 'TL', 'BE', 'LU', 'CH', 'MC', 'SN', 'CI', 'ML',
+                        'BF', 'NE', 'TD', 'CF', 'CG', 'CD', 'GA', 'CM', 'DJ',
+                        'KM', 'MG', 'HT', 'GQ'
+                    ];
+                    if (latinCountries.indexOf(cc) !== -1) {
+                        pianoLabels = labelsLatin;
+                        // Rebuild piano with updated labels if already built
+                        if (pianoBuilt) buildPiano();
+                    }
+                })
+                .catch(function() { /* silently ignore geo-IP failure */ });
+        } catch(e) { /* fetch not supported, keep default */ }
+    })();
+
+    // Full 88-key piano: A0 (MIDI 21) to C8 (MIDI 108)
+    // White keys: A0, B0, C1..B1, C2..B2, ... C7..B7, C8 = 52 white keys total.
+    // At 28px per white key = 1456px total width.
+    // A typical container (~900px) shows ~32 white keys (~4.5 octaves).
+    // At minimum 5 octaves visible, we keep keys compact enough.
     function buildPiano() {
-        var startOctave = 3, endOctave = 6;
         var whiteNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-        var blackMap = { 'C': true, 'D': true, 'F': true, 'G': true, 'A': true };
+        var hasSharp = { 'C': true, 'D': true, 'F': true, 'G': true, 'A': true };
+        var noteIndex = { 'C': 0, 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'A': 5, 'B': 6 };
+
+        var semiMap = { 'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11 };
+        function noteToMidi(note, oct) {
+            return 12 * (oct + 1) + semiMap[note];
+        }
+
+        // Calculate white key width to fit at least 5 octaves (35 white keys) on screen
+        var wrapWidth = pianoWrap ? pianoWrap.clientWidth : 900;
+        var minVisibleWhites = 35; // 5 octaves
+        var whiteW = Math.max(18, Math.min(28, Math.floor(wrapWidth / minVisibleWhites)));
+        var whiteH = Math.round(whiteW * 4.6); // realistic piano proportion ~4.6:1
+        var blackW = Math.round(whiteW * 0.6);
+        var blackH = Math.round(whiteH * 0.63);
+
         var html = '';
         var whiteIdx = 0;
-        var whiteW = 28, whiteH = 100, blackW = 18, blackH = 62;
 
-        for (var oct = startOctave; oct <= endOctave; oct++) {
+        // Build 52 white keys: A0, B0, C1..B7, C8
+        var keySequence = [];
+        keySequence.push({ note: 'A', oct: 0 });
+        keySequence.push({ note: 'B', oct: 0 });
+        for (var oct = 1; oct <= 7; oct++) {
             for (var n = 0; n < 7; n++) {
-                var note = whiteNotes[n];
-                var midi = PianoModeOMR.NoteDetector.noteToMidi(note, oct, 0);
-                var x = whiteIdx * whiteW;
-                html += '<div class="pm-piano-key pm-piano-white" data-midi="' + midi + '" style="left:' + x + 'px;width:' + whiteW + 'px;height:' + whiteH + 'px"></div>';
-
-                if (blackMap[note]) {
-                    var bx = x + whiteW - blackW / 2;
-                    var bmidi = midi + 1;
-                    html += '<div class="pm-piano-key pm-piano-black" data-midi="' + bmidi + '" style="left:' + bx + 'px;width:' + blackW + 'px;height:' + blackH + 'px"></div>';
-                }
-                whiteIdx++;
+                keySequence.push({ note: whiteNotes[n], oct: oct });
             }
         }
-        pianoEl.style.width = (whiteIdx * whiteW) + 'px';
+        keySequence.push({ note: 'C', oct: 8 });
+
+        for (var i = 0; i < keySequence.length; i++) {
+            var note = keySequence[i].note;
+            var oct = keySequence[i].oct;
+            var midi = noteToMidi(note, oct);
+            var x = whiteIdx * whiteW;
+            var label = pianoLabels[noteIndex[note]] + oct;
+
+            html += '<div class="pm-piano-key pm-piano-white" data-midi="' + midi +
+                '" style="left:' + x + 'px;width:' + whiteW + 'px;height:' + whiteH + 'px">' +
+                '<span class="pm-piano-label">' + label + '</span></div>';
+
+            // Black key to the right of C, D, F, G, A (not after last key C8)
+            if (hasSharp[note] && oct < 8) {
+                var bx = x + whiteW - Math.round(blackW / 2);
+                var bmidi = midi + 1;
+                html += '<div class="pm-piano-key pm-piano-black" data-midi="' + bmidi +
+                    '" style="left:' + bx + 'px;width:' + blackW + 'px;height:' + blackH + 'px"></div>';
+            }
+            whiteIdx++;
+        }
+
+        var totalWidth = whiteIdx * whiteW;
+        pianoEl.style.width = totalWidth + 'px';
         pianoEl.style.height = whiteH + 'px';
         pianoEl.innerHTML = html;
+        pianoBuilt = true;
+
+        // Update the CSS height on the wrap to match
+        if (pianoWrap) {
+            pianoWrap.style.minHeight = (whiteH + 24) + 'px';
+        }
+
+        // Scroll to middle C (C4) after a frame so layout is settled
+        requestAnimationFrame(function() {
+            if (pianoWrap) {
+                var c4Key = pianoEl.querySelector('[data-midi="60"]');
+                if (c4Key) {
+                    var keyLeft = parseInt(c4Key.style.left, 10);
+                    var visibleWidth = pianoWrap.clientWidth;
+                    pianoWrap.scrollLeft = Math.max(0, keyLeft - visibleWidth / 2 + whiteW / 2);
+                }
+            }
+        });
     }
 
     function highlightPianoKey(midiNote, on) {
@@ -817,8 +913,7 @@ $theme_uri = get_stylesheet_directory_uri();
         for (var i = 0; i < keys.length; i++) highlightPianoKey(parseInt(keys[i]), false);
     }
 
-    // Build piano on load
-    if (pianoEl && typeof PianoModeOMR !== 'undefined') buildPiano();
+    // Piano is built when results are shown, not at page load
 
 })();
 </script>
