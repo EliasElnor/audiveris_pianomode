@@ -192,9 +192,11 @@ $theme_uri = get_stylesheet_directory_uri();
                     </div>
                 </div>
 
-                <!-- Piano Keyboard -->
+                <!-- Piano Keyboard — Premium sightreading-quality -->
                 <div class="pm-omr-piano-wrap" id="omr-piano-wrap">
-                    <div class="pm-omr-piano" id="omr-piano"></div>
+                    <div class="pm-omr-piano-inner">
+                        <div class="pm-omr-piano" id="omr-piano"></div>
+                    </div>
                 </div>
             </div>
 
@@ -290,7 +292,7 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=4.1.0' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=5.0.0' ); ?>"></script>
 
 <!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
@@ -797,130 +799,133 @@ $theme_uri = get_stylesheet_directory_uri();
     });
 
     // -------------------------------------------------------
-    // Piano Keyboard — full 88 keys (A0–C8) with geo-located labels
+    // Premium Piano Keyboard — sightreading-quality, 88 keys (A0–C8)
+    // Responsive sizing, geo-located labels, AlphaTab integration
     // -------------------------------------------------------
     var pianoWrap = document.getElementById('omr-piano-wrap');
     var pianoEl = document.getElementById('omr-piano');
     var activeKeys = {};
     var pianoBuilt = false;
+    var pianoKeys = []; // Store key references for fast lookup
 
-    // Note label systems: international vs latin (solfege)
+    // Note label systems
     var labelsInternational = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
     var labelsLatin = ['Do', 'Ré', 'Mi', 'Fa', 'Sol', 'La', 'Si'];
-    var pianoLabels = labelsInternational; // default
+    var pianoLabels = labelsInternational;
 
-    // Detect user locale for FR/IT/ES/PT → use latin (solfege) labels
+    // Detect locale for solfege labels
     (function detectNoteLocale() {
-        // 1. Check browser language first (instant, no network)
         var lang = (navigator.language || navigator.userLanguage || '').toLowerCase().slice(0, 2);
         if (['fr', 'it', 'es', 'pt'].indexOf(lang) !== -1) {
             pianoLabels = labelsLatin;
             return;
         }
-        // 2. Geo-IP lookup as fallback (non-blocking)
         try {
             fetch('https://ipapi.co/json/', { mode: 'cors' })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var cc = (data.country_code || '').toUpperCase();
                     var latinCountries = [
-                        'FR', 'IT', 'ES', 'PT', 'BR', 'MX', 'AR', 'CO', 'CL',
-                        'PE', 'VE', 'EC', 'BO', 'PY', 'UY', 'CR', 'PA', 'DO',
-                        'GT', 'HN', 'SV', 'NI', 'CU', 'AO', 'MZ', 'GW', 'CV',
-                        'ST', 'TL', 'BE', 'LU', 'CH', 'MC', 'SN', 'CI', 'ML',
-                        'BF', 'NE', 'TD', 'CF', 'CG', 'CD', 'GA', 'CM', 'DJ',
-                        'KM', 'MG', 'HT', 'GQ'
+                        'FR','IT','ES','PT','BR','MX','AR','CO','CL','PE','VE','EC','BO',
+                        'PY','UY','CR','PA','DO','GT','HN','SV','NI','CU','AO','MZ','GW',
+                        'CV','ST','TL','BE','LU','CH','MC','SN','CI','ML','BF','NE','TD',
+                        'CF','CG','CD','GA','CM','DJ','KM','MG','HT','GQ'
                     ];
                     if (latinCountries.indexOf(cc) !== -1) {
                         pianoLabels = labelsLatin;
-                        // Rebuild piano with updated labels if already built
                         if (pianoBuilt) buildPiano();
                     }
                 })
-                .catch(function() { /* silently ignore geo-IP failure */ });
-        } catch(e) { /* fetch not supported, keep default */ }
+                .catch(function() {});
+        } catch(e) {}
     })();
 
-    // Full 88-key piano: A0 (MIDI 21) to C8 (MIDI 108)
-    // White keys: A0, B0, C1..B1, C2..B2, ... C7..B7, C8 = 52 white keys total.
-    // At 28px per white key = 1456px total width.
-    // A typical container (~900px) shows ~32 white keys (~4.5 octaves).
-    // At minimum 5 octaves visible, we keep keys compact enough.
+    function isBlackKey(midi) {
+        return [1, 3, 6, 8, 10].indexOf(midi % 12) !== -1;
+    }
+
+    function midiToNoteName(midi) {
+        var octave = Math.floor(midi / 12) - 1;
+        var noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+        return noteNames[midi % 12] + octave;
+    }
+
     function buildPiano() {
-        var whiteNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-        var hasSharp = { 'C': true, 'D': true, 'F': true, 'G': true, 'A': true };
+        pianoKeys = [];
+        pianoEl.innerHTML = '';
+
         var noteIndex = { 'C': 0, 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'A': 5, 'B': 6 };
+        var startPitch = 21; // A0
+        var endPitch = 108;  // C8
 
-        var semiMap = { 'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11 };
-        function noteToMidi(note, oct) {
-            return 12 * (oct + 1) + semiMap[note];
-        }
+        // Create all 88 keys using wrapper approach (like sightreading)
+        for (var pitch = startPitch; pitch <= endPitch; pitch++) {
+            var black = isBlackKey(pitch);
+            var noteName = midiToNoteName(pitch);
 
-        // Calculate white key width to fit at least 5 octaves (35 white keys) on screen
-        var wrapWidth = pianoWrap ? pianoWrap.clientWidth : 900;
-        var minVisibleWhites = 35; // 5 octaves
-        var whiteW = Math.max(18, Math.min(28, Math.floor(wrapWidth / minVisibleWhites)));
-        var whiteH = Math.round(whiteW * 4.6); // realistic piano proportion ~4.6:1
-        var blackW = Math.round(whiteW * 0.6);
-        var blackH = Math.round(whiteH * 0.63);
+            var wrapper = document.createElement('div');
+            wrapper.className = black
+                ? 'pm-piano-key-wrapper pm-piano-key-wrapper-black'
+                : 'pm-piano-key-wrapper pm-piano-key-wrapper-white';
 
-        var html = '';
-        var whiteIdx = 0;
+            var key = document.createElement('div');
+            key.className = 'pm-piano-key ' + (black ? 'pm-piano-black' : 'pm-piano-white');
+            key.setAttribute('data-midi', pitch);
+            key.setAttribute('data-note', noteName);
 
-        // Build 52 white keys: A0, B0, C1..B7, C8
-        var keySequence = [];
-        keySequence.push({ note: 'A', oct: 0 });
-        keySequence.push({ note: 'B', oct: 0 });
-        for (var oct = 1; oct <= 7; oct++) {
-            for (var n = 0; n < 7; n++) {
-                keySequence.push({ note: whiteNotes[n], oct: oct });
+            // Add label on C notes (white keys only)
+            if (!black && noteName.indexOf('C') === 0 && noteName.indexOf('#') === -1) {
+                var label = document.createElement('span');
+                label.className = 'pm-piano-label';
+                var oct = parseInt(noteName.replace('C', ''), 10);
+                label.textContent = pianoLabels[0] + oct;
+                key.appendChild(label);
             }
-        }
-        keySequence.push({ note: 'C', oct: 8 });
 
-        for (var i = 0; i < keySequence.length; i++) {
-            var note = keySequence[i].note;
-            var oct = keySequence[i].oct;
-            var midi = noteToMidi(note, oct);
-            var x = whiteIdx * whiteW;
-            var label = pianoLabels[noteIndex[note]] + oct;
+            wrapper.appendChild(key);
+            pianoEl.appendChild(wrapper);
 
-            html += '<div class="pm-piano-key pm-piano-white" data-midi="' + midi +
-                '" style="left:' + x + 'px;width:' + whiteW + 'px;height:' + whiteH + 'px">' +
-                '<span class="pm-piano-label">' + label + '</span></div>';
-
-            // Black key to the right of C, D, F, G, A (not after last key C8)
-            if (hasSharp[note] && oct < 8) {
-                var bx = x + whiteW - Math.round(blackW / 2);
-                var bmidi = midi + 1;
-                html += '<div class="pm-piano-key pm-piano-black" data-midi="' + bmidi +
-                    '" style="left:' + bx + 'px;width:' + blackW + 'px;height:' + blackH + 'px"></div>';
-            }
-            whiteIdx++;
+            pianoKeys.push({
+                element: key,
+                midi: pitch,
+                type: black ? 'black' : 'white'
+            });
         }
 
-        var totalWidth = whiteIdx * whiteW;
-        pianoEl.style.width = totalWidth + 'px';
-        pianoEl.style.height = whiteH + 'px';
-        pianoEl.innerHTML = html;
         pianoBuilt = true;
+        adjustPianoSize();
 
-        // Update the CSS height on the wrap to match
-        if (pianoWrap) {
-            pianoWrap.style.minHeight = (whiteH + 24) + 'px';
+        // Resize listener
+        if (!pianoEl._resizeListenerAdded) {
+            pianoEl._resizeListenerAdded = true;
+            var resizeTimeout;
+            window.addEventListener('resize', function() {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(adjustPianoSize, 150);
+            });
         }
+    }
 
-        // Scroll to middle C (C4) after a frame so layout is settled
-        requestAnimationFrame(function() {
-            if (pianoWrap) {
-                var c4Key = pianoEl.querySelector('[data-midi="60"]');
-                if (c4Key) {
-                    var keyLeft = parseInt(c4Key.style.left, 10);
-                    var visibleWidth = pianoWrap.clientWidth;
-                    pianoWrap.scrollLeft = Math.max(0, keyLeft - visibleWidth / 2 + whiteW / 2);
-                }
-            }
-        });
+    function adjustPianoSize() {
+        if (!pianoWrap || !pianoEl) return;
+        var containerWidth = pianoWrap.clientWidth;
+        if (containerWidth === 0) return;
+
+        // Count white keys: 52 for full 88-key piano
+        var whiteKeyCount = 52;
+        var availableWidth = containerWidth - 16; // padding
+        var whiteKeyWidth = availableWidth / whiteKeyCount;
+        var blackKeyWidth = whiteKeyWidth * 0.62;
+        var whiteKeyHeight = Math.min(160, Math.max(100, whiteKeyWidth * 4.5));
+        var blackKeyHeight = whiteKeyHeight * 0.65;
+
+        pianoEl.style.setProperty('--omr-white-key-width', whiteKeyWidth.toFixed(2) + 'px');
+        pianoEl.style.setProperty('--omr-black-key-width', blackKeyWidth.toFixed(2) + 'px');
+        pianoEl.style.setProperty('--omr-white-key-height', whiteKeyHeight.toFixed(0) + 'px');
+        pianoEl.style.setProperty('--omr-black-key-height', blackKeyHeight.toFixed(0) + 'px');
+
+        pianoEl.style.width = '100%';
+        pianoEl.style.height = whiteKeyHeight + 'px';
     }
 
     function highlightPianoKey(midiNote, on) {
@@ -942,20 +947,16 @@ $theme_uri = get_stylesheet_directory_uri();
         for (var i = 0; i < keys.length; i++) highlightPianoKey(parseInt(keys[i]), false);
     }
 
-    // Piano is built when results are shown, not at page load
-
     // -------------------------------------------------------
     // Preview canvas note highlighting during playback
     // -------------------------------------------------------
     var previewHighlightCtx = null;
-    var previewBaseImage = null;   // stores the base preview (image + staff lines + static annotations)
+    var previewBaseImage = null;
     var highlightedNoteIndices = [];
 
-    // After drawPreview completes, capture the base state for efficient re-drawing
     var _origDrawPreview = drawPreview;
     drawPreview = function(result) {
         _origDrawPreview(result);
-        // Capture base image after a short delay so the original draw completes
         setTimeout(function() {
             if (previewCanvas.width > 0 && previewCanvas.height > 0) {
                 var ctx = previewCanvas.getContext('2d');
@@ -967,22 +968,13 @@ $theme_uri = get_stylesheet_directory_uri();
 
     function highlightPreviewNotes(midiNotes) {
         if (!lastResult || !lastResult.noteHeads || !previewHighlightCtx || !previewBaseImage) return;
-
-        // Restore the base image first
         previewHighlightCtx.putImageData(previewBaseImage, 0, 0);
 
         var noteHeads = lastResult.noteHeads;
-        var matched = false;
-
-        // Track which noteheads we've already highlighted (by x position) to avoid
-        // re-highlighting the same notes across multiple playback events
         var usedIndices = {};
 
         for (var m = 0; m < midiNotes.length; m++) {
             var targetMidi = midiNotes[m];
-
-            // Find ALL noteheads with this MIDI value — pick the leftmost un-used one
-            // This gives a left-to-right sweep effect during playback
             var bestIdx = -1;
             for (var i = 0; i < noteHeads.length; i++) {
                 if (noteHeads[i].midiNote === targetMidi && !usedIndices[i]) {
@@ -991,12 +983,9 @@ $theme_uri = get_stylesheet_directory_uri();
                     }
                 }
             }
-
             if (bestIdx !== -1) {
                 usedIndices[bestIdx] = true;
                 var nh = noteHeads[bestIdx];
-
-                // Draw a gold glow circle around the notehead
                 previewHighlightCtx.save();
                 previewHighlightCtx.shadowColor = '#D7BF81';
                 previewHighlightCtx.shadowBlur = 18;
@@ -1005,15 +994,11 @@ $theme_uri = get_stylesheet_directory_uri();
                 previewHighlightCtx.beginPath();
                 previewHighlightCtx.arc(nh.centerX, nh.centerY, Math.max(nh.width, nh.height) * 0.8, 0, Math.PI * 2);
                 previewHighlightCtx.stroke();
-
-                // Semi-transparent gold fill
                 previewHighlightCtx.fillStyle = 'rgba(215, 191, 129, 0.25)';
                 previewHighlightCtx.fill();
                 previewHighlightCtx.restore();
-                matched = true;
             }
         }
-
         highlightedNoteIndices = Object.keys(usedIndices).map(Number);
     }
 
