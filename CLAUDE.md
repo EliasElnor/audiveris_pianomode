@@ -1,24 +1,29 @@
 # CLAUDE.md — PianoMode OCR Scanner Project
 
-## Current State (2026-04-04)
+## Current State (2026-04-05)
 Branch: `claude/integrate-audiveris-ocr-0XMux`
 
 ### What's Done
-- Single merged `omr-engine.js` with all 6 modules (1674 lines)
-- Engine uses async steps (setTimeout yields) so UI updates during processing
-- Real progress bar with percentage (gold gradient, 0-100%)
+- OMR Engine v5.0 with Audiveris-inspired algorithms (1907 lines)
+- Projection-based barline detection with adaptive thresholds
+- Measure-based note organization using detected barlines
+- Chamfer distance transform + template matching for noteheads
+- Proper grand staff handling with voice assignment
+- MusicXML with divisions=16, backup/forward, voice separation
+- MIDI with timeline-based delta calculation
+- Premium sightreading-quality piano keyboard (88 keys)
+- Piano + preview canvas highlighting during AlphaTab playback
+- Real progress bar with percentage (gold gradient)
 - CSS, API, admin, page template all functional
-- Old part files deleted
-- Hero padding fixed for header clearance
-- Everything pushed to remote
+- Cache buster: `ver=5.0.0`
 
 ### File Locations
 ```
 blocksy-child/
 ├── page-omr-scanner.php          ← WP template (must stay at root)
 ├── assets/OCR-Scan/
-│   ├── omr-engine.js             ← Complete OMR engine (all 6 modules)
-│   ├── omr-scanner.css           ← page styles + progress bar
+│   ├── omr-engine.js             ← Complete OMR engine v5.0 (all 6 modules)
+│   ├── omr-scanner.css           ← page styles + premium piano CSS
 │   ├── omr-scanner-api.php       ← REST API (save/history/delete)
 │   └── omr-admin.php             ← WP admin dashboard
 ├── functions.php                  ← loads API + admin + enqueues CSS
@@ -32,16 +37,26 @@ blocksy-child/
 - Admin panel under WP menu "OCR Scanner"
 - Async processing with UI yields between steps
 
-### JS Engine Structure
+### JS Engine Structure (v5.0)
 ```
 window.PianoModeOMR = {};
 PianoModeOMR.ImageProcessor  → loadImage, loadPDF, toGrayscale, otsuThreshold, binarize, cleanNoise
-PianoModeOMR.StaffDetector   → detect, removeStaffLines, detectClefs
-PianoModeOMR.NoteDetector    → findBlobs, filterNoteHeads, detectStems, detectFlags, detectBeams, detectRests, detectBarLines, classifyDuration, assignPitch, organizeNotes, detect
-PianoModeOMR.MusicXMLWriter  → generate
-PianoModeOMR.MIDIWriter      → generate, toBlob, toBlobURL
+PianoModeOMR.StaffDetector   → detect, groupIntoSystems, removeStaffLines, detectClefs
+PianoModeOMR.NoteDetector    → computeDistanceTransform, scanForNoteheads, detectStems, detectFlags,
+                                detectBeams, detectBarLines (projection-based), detectRests,
+                                classifyDuration, assignPitch, organizeNotes (measure-based), detect
+PianoModeOMR.MusicXMLWriter  → generate (with voice separation, backup/forward)
+PianoModeOMR.MIDIWriter      → generate (timeline-based), toBlob, toBlobURL
 PianoModeOMR.Engine          → process(file, onProgress) → Promise (async with yields)
 ```
+
+### v5.0 Key Algorithms (from Audiveris analysis)
+- **Barline detection**: Vertical projection per staff → derivative threshold (top 5 avg × 0.3) → peak detection → validation (narrow + spans 65%+ of staff)
+- **Notehead detection**: Chamfer distance transform → synthetic elliptical templates → position-based scanning (pos -6 to +14) → score threshold 0.35
+- **Stem detection**: Multi-side search with gap-stopping, min length 1.8× spacing
+- **Beam detection**: Horizontal ink band detection between stem endpoints, group tracking
+- **Measure organization**: Events assigned to measures by x-position between barline positions
+- **Grand staff**: 2 staves per system → treble=voice1/staff1, bass=voice2/staff2 → MusicXML backup
 
 ### Theme Conventions
 - CSS vars: `--pm-gold: #D7BF81`, `--pm-black: #1a1a1a`, `--pm-font: 'Montserrat'`
