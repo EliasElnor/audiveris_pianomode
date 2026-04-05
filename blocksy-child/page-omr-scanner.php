@@ -290,7 +290,7 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=4.0.0' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=4.1.0' ); ?>"></script>
 
 <!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
@@ -698,6 +698,9 @@ $theme_uri = get_stylesheet_directory_uri();
                 atPlayIcon.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
             } else {
                 atPlayIcon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
+                // Clear piano + preview highlights when stopped/paused
+                clearPianoKeys();
+                clearPreviewHighlights();
             }
         });
 
@@ -707,6 +710,32 @@ $theme_uri = get_stylesheet_directory_uri();
                 return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
             }
             atTime.textContent = fmt(e.currentTime) + ' / ' + fmt(e.endTime);
+        });
+
+        // ── Piano + Preview note highlighting via activeBeatsChanged ──
+        atApi.activeBeatsChanged.on(function(e) {
+            clearPianoKeys();
+            clearPreviewHighlights();
+
+            if (!e.activeBeats || e.activeBeats.length === 0) return;
+
+            var activeMidiNotes = [];
+            for (var b = 0; b < e.activeBeats.length; b++) {
+                var beat = e.activeBeats[b];
+                if (!beat.notes) continue;
+                for (var n = 0; n < beat.notes.length; n++) {
+                    var note = beat.notes[n];
+                    if (note.realValue >= 0) {
+                        activeMidiNotes.push(note.realValue);
+                        highlightPianoKey(note.realValue, true);
+                    }
+                }
+            }
+
+            // Highlight corresponding noteheads on the preview canvas
+            if (activeMidiNotes.length > 0 && lastResult && lastResult.noteHeads) {
+                highlightPreviewNotes(activeMidiNotes);
+            }
         });
 
         document.getElementById('omr-at-tempo-down').onclick = function() {
@@ -914,6 +943,86 @@ $theme_uri = get_stylesheet_directory_uri();
     }
 
     // Piano is built when results are shown, not at page load
+
+    // -------------------------------------------------------
+    // Preview canvas note highlighting during playback
+    // -------------------------------------------------------
+    var previewHighlightCtx = null;
+    var previewBaseImage = null;   // stores the base preview (image + staff lines + static annotations)
+    var highlightedNoteIndices = [];
+
+    // After drawPreview completes, capture the base state for efficient re-drawing
+    var _origDrawPreview = drawPreview;
+    drawPreview = function(result) {
+        _origDrawPreview(result);
+        // Capture base image after a short delay so the original draw completes
+        setTimeout(function() {
+            if (previewCanvas.width > 0 && previewCanvas.height > 0) {
+                var ctx = previewCanvas.getContext('2d');
+                previewBaseImage = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+                previewHighlightCtx = ctx;
+            }
+        }, 500);
+    };
+
+    function highlightPreviewNotes(midiNotes) {
+        if (!lastResult || !lastResult.noteHeads || !previewHighlightCtx || !previewBaseImage) return;
+
+        // Restore the base image first
+        previewHighlightCtx.putImageData(previewBaseImage, 0, 0);
+
+        var noteHeads = lastResult.noteHeads;
+        var matched = false;
+
+        // Track which noteheads we've already highlighted (by x position) to avoid
+        // re-highlighting the same notes across multiple playback events
+        var usedIndices = {};
+
+        for (var m = 0; m < midiNotes.length; m++) {
+            var targetMidi = midiNotes[m];
+
+            // Find ALL noteheads with this MIDI value — pick the leftmost un-used one
+            // This gives a left-to-right sweep effect during playback
+            var bestIdx = -1;
+            for (var i = 0; i < noteHeads.length; i++) {
+                if (noteHeads[i].midiNote === targetMidi && !usedIndices[i]) {
+                    if (bestIdx === -1 || noteHeads[i].centerX < noteHeads[bestIdx].centerX) {
+                        bestIdx = i;
+                    }
+                }
+            }
+
+            if (bestIdx !== -1) {
+                usedIndices[bestIdx] = true;
+                var nh = noteHeads[bestIdx];
+
+                // Draw a gold glow circle around the notehead
+                previewHighlightCtx.save();
+                previewHighlightCtx.shadowColor = '#D7BF81';
+                previewHighlightCtx.shadowBlur = 18;
+                previewHighlightCtx.strokeStyle = '#D7BF81';
+                previewHighlightCtx.lineWidth = 3;
+                previewHighlightCtx.beginPath();
+                previewHighlightCtx.arc(nh.centerX, nh.centerY, Math.max(nh.width, nh.height) * 0.8, 0, Math.PI * 2);
+                previewHighlightCtx.stroke();
+
+                // Semi-transparent gold fill
+                previewHighlightCtx.fillStyle = 'rgba(215, 191, 129, 0.25)';
+                previewHighlightCtx.fill();
+                previewHighlightCtx.restore();
+                matched = true;
+            }
+        }
+
+        highlightedNoteIndices = Object.keys(usedIndices).map(Number);
+    }
+
+    function clearPreviewHighlights() {
+        if (previewHighlightCtx && previewBaseImage) {
+            previewHighlightCtx.putImageData(previewBaseImage, 0, 0);
+        }
+        highlightedNoteIndices = [];
+    }
 
 })();
 </script>
