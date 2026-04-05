@@ -429,6 +429,52 @@
 }
 
 /* =====================================================
+   PIANO KEYBOARD
+   ===================================================== */
+.pm-omr-piano-wrap {
+    overflow-x: auto;
+    padding: 0.75rem 0;
+    background: #111;
+    border-top: 1px solid rgba(215, 191, 129, 0.15);
+    border-radius: 0 0 var(--pm-radius, 16px) var(--pm-radius, 16px);
+}
+
+.pm-omr-piano {
+    position: relative;
+    margin: 0 auto;
+}
+
+.pm-piano-key {
+    position: absolute;
+    top: 0;
+    border-radius: 0 0 4px 4px;
+    cursor: pointer;
+    transition: background 0.08s;
+}
+
+.pm-piano-white {
+    background: linear-gradient(180deg, #f8f8f8, #e8e8e8);
+    border: 1px solid #bbb;
+    z-index: 1;
+}
+
+.pm-piano-black {
+    background: linear-gradient(180deg, #333, #111);
+    border: 1px solid #000;
+    z-index: 2;
+}
+
+.pm-piano-white.pm-piano-active {
+    background: linear-gradient(180deg, var(--pm-gold, #D7BF81), #c4a860) !important;
+    box-shadow: 0 0 12px rgba(215, 191, 129, 0.6);
+}
+
+.pm-piano-black.pm-piano-active {
+    background: linear-gradient(180deg, #D7BF81, #a08840) !important;
+    box-shadow: 0 0 12px rgba(215, 191, 129, 0.6);
+}
+
+/* =====================================================
    ERROR MESSAGE
    ===================================================== */
 .pm-omr-error {

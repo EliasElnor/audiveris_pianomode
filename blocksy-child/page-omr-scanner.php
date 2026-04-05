@@ -191,6 +191,11 @@ $theme_uri = get_stylesheet_directory_uri();
                         </div>
                     </div>
                 </div>
+
+                <!-- Piano Keyboard -->
+                <div class="pm-omr-piano-wrap" id="omr-piano-wrap">
+                    <div class="pm-omr-piano" id="omr-piano"></div>
+                </div>
             </div>
 
             <!-- Download actions: MusicXML + MIDI + New Scan -->
@@ -285,7 +290,7 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=3.0.0' ); ?>"></script>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=3.1.0' ); ?>"></script>
 
 <!-- AlphaTab -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
@@ -757,6 +762,63 @@ $theme_uri = get_stylesheet_directory_uri();
 
         dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
+
+    // -------------------------------------------------------
+    // Piano Keyboard — builds 4 octaves (C3-B6) as interactive SVG
+    // -------------------------------------------------------
+    var pianoWrap = document.getElementById('omr-piano-wrap');
+    var pianoEl = document.getElementById('omr-piano');
+    var activeKeys = {};
+
+    function buildPiano() {
+        var startOctave = 3, endOctave = 6;
+        var whiteNotes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+        var blackMap = { 'C': true, 'D': true, 'F': true, 'G': true, 'A': true };
+        var html = '';
+        var whiteIdx = 0;
+        var whiteW = 28, whiteH = 100, blackW = 18, blackH = 62;
+
+        for (var oct = startOctave; oct <= endOctave; oct++) {
+            for (var n = 0; n < 7; n++) {
+                var note = whiteNotes[n];
+                var midi = PianoModeOMR.NoteDetector.noteToMidi(note, oct, 0);
+                var x = whiteIdx * whiteW;
+                html += '<div class="pm-piano-key pm-piano-white" data-midi="' + midi + '" style="left:' + x + 'px;width:' + whiteW + 'px;height:' + whiteH + 'px"></div>';
+
+                if (blackMap[note]) {
+                    var bx = x + whiteW - blackW / 2;
+                    var bmidi = midi + 1;
+                    html += '<div class="pm-piano-key pm-piano-black" data-midi="' + bmidi + '" style="left:' + bx + 'px;width:' + blackW + 'px;height:' + blackH + 'px"></div>';
+                }
+                whiteIdx++;
+            }
+        }
+        pianoEl.style.width = (whiteIdx * whiteW) + 'px';
+        pianoEl.style.height = whiteH + 'px';
+        pianoEl.innerHTML = html;
+    }
+
+    function highlightPianoKey(midiNote, on) {
+        if (!pianoEl) return;
+        var key = pianoEl.querySelector('[data-midi="' + midiNote + '"]');
+        if (key) {
+            if (on) {
+                key.classList.add('pm-piano-active');
+                activeKeys[midiNote] = true;
+            } else {
+                key.classList.remove('pm-piano-active');
+                delete activeKeys[midiNote];
+            }
+        }
+    }
+
+    function clearPianoKeys() {
+        var keys = Object.keys(activeKeys);
+        for (var i = 0; i < keys.length; i++) highlightPianoKey(parseInt(keys[i]), false);
+    }
+
+    // Build piano on load
+    if (pianoEl && typeof PianoModeOMR !== 'undefined') buildPiano();
 
 })();
 </script>

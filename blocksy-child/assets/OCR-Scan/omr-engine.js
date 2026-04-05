@@ -291,6 +291,39 @@ PianoModeOMR.StaffDetector = {
     },
 
     /**
+     * Group staves into systems (a system = one line of music across the page).
+     * Staves within a system are close vertically; systems are separated by larger gaps.
+     * Also assigns systemIndex and staffInSystem (0=treble, 1=bass, etc.)
+     */
+    groupIntoSystems: function(staves) {
+        if (staves.length === 0) return staves;
+
+        var systems = [[0]]; // first staff is in system 0
+        for (var i = 1; i < staves.length; i++) {
+            var gap = staves[i].top - staves[i - 1].bottom;
+            var avgSpacing = staves[i].spacing;
+            // If gap > 3x staff spacing, it's a new system
+            if (gap > avgSpacing * 3) {
+                systems.push([i]);
+            } else {
+                systems[systems.length - 1].push(i);
+            }
+        }
+
+        // Assign system info to each staff
+        for (var sys = 0; sys < systems.length; sys++) {
+            for (var j = 0; j < systems[sys].length; j++) {
+                var si = systems[sys][j];
+                staves[si].systemIndex = sys;
+                staves[si].staffInSystem = j; // 0=top staff, 1=bottom staff
+                staves[si].systemStaffCount = systems[sys].length;
+            }
+        }
+
+        return staves;
+    },
+
+    /**
      * Remove staff lines from binary image (for note detection)
      * Only removes pixels that are part of horizontal runs
      */
@@ -369,14 +402,12 @@ PianoModeOMR.StaffDetector = {
 
 
 // =====================================================
-// NOTE DETECTOR v3.0 — Major accuracy improvements
+// NOTE DETECTOR v3.1 — Fixed multi-system + better detection
 // =====================================================
 PianoModeOMR.NoteDetector = {
 
-    // Chromatic scale for pitch calculations
     STEPS: ['C', 'D', 'E', 'F', 'G', 'A', 'B'],
 
-    // Treble clef: bottom line (line 1) = E4, each half-space up = next diatonic pitch
     TREBLE_PITCHES: [
         { step: 'E', octave: 4 }, { step: 'F', octave: 4 },
         { step: 'G', octave: 4 }, { step: 'A', octave: 4 },
@@ -387,7 +418,6 @@ PianoModeOMR.NoteDetector = {
         { step: 'C', octave: 6 }
     ],
 
-    // Bass clef: bottom line (line 1) = G2
     BASS_PITCHES: [
         { step: 'G', octave: 2 }, { step: 'A', octave: 2 },
         { step: 'B', octave: 2 }, { step: 'C', octave: 3 },
@@ -404,195 +434,209 @@ PianoModeOMR.NoteDetector = {
     },
 
     /**
-     * Determine the left margin to skip (clef + key sig + time sig region)
-     * Returns x coordinate where actual notes begin for each staff
+     * Find where notes start on each staff (skip clef/keysig/timesig).
+     * LESS aggressive than v3 — uses sp*4 minimum instead of sp*8.
      */
     _findNoteStartX: function(binary, width, staves) {
         var results = [];
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
             var sp = staff.spacing;
-            // Scan columns from left: find where dense ink clusters end
-            // Clef typically occupies ~3-4 spaces, key sig ~2-3, time sig ~2
-            // Use a conservative skip of 8 spaces from left margin
-            var skipWidth = Math.round(sp * 8);
+            // Minimum skip: clef region only (~3 spaces)
+            var minSkip = Math.round(sp * 3);
+            // Scan for a gap column after the preamble symbols
+            var bestGap = minSkip;
+            var maxScan = Math.round(sp * 7); // don't scan too far
 
-            // But also detect actual end of preamble by looking for
-            // a gap (low ink density column) after the initial symbols
-            var minX = Math.round(sp * 4); // at least skip clef
-            var bestGap = minX;
-
-            for (var x = minX; x < Math.min(width, skipWidth + Math.round(sp * 4)); x++) {
+            for (var x = minSkip; x < Math.min(width, maxScan); x++) {
                 var ink = 0;
                 for (var y = staff.top; y <= staff.bottom; y++) {
                     if (binary[y * width + x] === 1) ink++;
                 }
-                var staffH = staff.bottom - staff.top;
-                // A "gap" column has very little ink (just staff lines, ~5 pixels)
-                if (ink < staffH * 0.15) {
-                    if (x > bestGap) bestGap = x;
+                if (ink < (staff.bottom - staff.top) * 0.12) {
+                    bestGap = x;
                 }
             }
-            results.push(Math.max(bestGap, minX));
+            results.push(bestGap);
         }
         return results;
     },
 
     /**
-     * Detect key signature: count sharps or flats after clef
-     * Returns { fifths: N } where positive = sharps, negative = flats
+     * Detect key signature
      */
     detectKeySignature: function(binary, width, staves) {
         if (staves.length === 0) return { fifths: 0, accidentals: {} };
-
         var staff = staves[0];
         var sp = staff.spacing;
-        // Key signature region: after clef (~4 spaces), before time sig
-        var startX = Math.round(sp * 3.5);
-        var endX = Math.round(sp * 7);
-        var keySigTop = staff.top - Math.round(sp);
-        var keySigBot = staff.bottom + Math.round(sp);
+        var startX = Math.round(sp * 3);
+        var endX = Math.round(sp * 6.5);
+        var top = staff.top - Math.round(sp);
+        var bot = staff.bottom + Math.round(sp);
 
-        // Count small dense blobs in key signature region
-        // Sharps are taller and have cross-hatch pattern
-        // Flats are smaller with a round bottom
-        var sharpCount = 0;
-        var flatCount = 0;
-
-        // Vertical projection in key sig area
         var columns = [];
         for (var x = startX; x < Math.min(width, endX); x++) {
             var ink = 0;
-            for (var y = keySigTop; y <= keySigBot; y++) {
-                if (y >= 0 && y < Math.floor(binary.length / width)) {
-                    if (binary[y * width + x] === 1) ink++;
-                }
+            for (var y = Math.max(0, top); y <= Math.min(bot, Math.floor(binary.length / width) - 1); y++) {
+                if (binary[y * width + x] === 1) ink++;
             }
             columns.push(ink);
         }
 
-        // Find clusters of ink (each accidental symbol)
-        var inCluster = false;
-        var clusterStart = 0;
-        var clusters = [];
+        // Find ink clusters
+        var inCluster = false, clStart = 0, clusters = [];
         for (var i = 0; i < columns.length; i++) {
-            if (columns[i] > sp * 0.3 && !inCluster) {
-                inCluster = true;
-                clusterStart = i;
-            } else if (columns[i] <= sp * 0.3 && inCluster) {
+            if (columns[i] > sp * 0.3 && !inCluster) { inCluster = true; clStart = i; }
+            else if (columns[i] <= sp * 0.3 && inCluster) {
                 inCluster = false;
-                var clusterWidth = i - clusterStart;
-                if (clusterWidth > sp * 0.2 && clusterWidth < sp * 2) {
-                    clusters.push({ start: clusterStart + startX, width: clusterWidth });
-                }
+                var w = i - clStart;
+                if (w > sp * 0.2 && w < sp * 1.8) clusters.push({ start: clStart + startX, width: w });
             }
         }
 
-        // Analyze cluster shapes to determine sharp vs flat
+        // Count accidentals based on cluster height
+        var sharpCount = 0, flatCount = 0;
         for (var c = 0; c < clusters.length; c++) {
             var cl = clusters[c];
-            var clHeight = 0;
-            var pixels = 0;
-            for (var y = keySigTop; y <= keySigBot; y++) {
+            var maxH = 0;
+            for (var y = Math.max(0, top); y <= bot; y++) {
                 for (var x = cl.start; x < cl.start + cl.width; x++) {
-                    if (y >= 0 && x < width && binary[y * width + x] === 1) {
-                        pixels++;
-                        clHeight = y - keySigTop;
-                    }
+                    if (x < width && binary[y * width + x] === 1) { var h = y - top; if (h > maxH) maxH = h; }
                 }
             }
-            var h = clHeight;
-            // Sharps are taller (~2.5 spaces), flats shorter (~1.5 spaces)
-            if (h > sp * 2) sharpCount++;
-            else if (h > sp * 0.5) flatCount++;
+            if (maxH > sp * 2) sharpCount++; else if (maxH > sp * 0.5) flatCount++;
         }
 
         var fifths = 0;
         if (sharpCount > flatCount && sharpCount <= 7) fifths = sharpCount;
         else if (flatCount > sharpCount && flatCount <= 7) fifths = -flatCount;
 
-        // Build accidental map from key signature
         var accidentals = {};
         var sharpOrder = ['F', 'C', 'G', 'D', 'A', 'E', 'B'];
         var flatOrder = ['B', 'E', 'A', 'D', 'G', 'C', 'F'];
-
-        if (fifths > 0) {
-            for (var i = 0; i < fifths; i++) accidentals[sharpOrder[i]] = 1;
-        } else if (fifths < 0) {
-            for (var i = 0; i < Math.abs(fifths); i++) accidentals[flatOrder[i]] = -1;
-        }
+        if (fifths > 0) { for (var i = 0; i < fifths; i++) accidentals[sharpOrder[i]] = 1; }
+        else if (fifths < 0) { for (var i = 0; i < -fifths; i++) accidentals[flatOrder[i]] = -1; }
 
         return { fifths: fifths, accidentals: accidentals };
     },
 
     /**
-     * Find connected components (blobs) using two-pass labeling
+     * Detect time signature by analyzing ink patterns after key signature
+     */
+    detectTimeSignature: function(binary, width, staves) {
+        if (staves.length === 0) return { beats: 4, beatType: 4 };
+        var staff = staves[0];
+        var sp = staff.spacing;
+        // Time sig is typically between x=5*sp and x=7*sp
+        var startX = Math.round(sp * 5);
+        var endX = Math.round(sp * 7.5);
+        var midY = staff.center;
+
+        // Look for a digit-like blob in top half and bottom half of staff
+        var topInk = 0, botInk = 0;
+        var topPixels = [], botPixels = [];
+        for (var x = startX; x < Math.min(width, endX); x++) {
+            var tInk = 0, bInk = 0;
+            for (var y = staff.top; y < midY; y++) {
+                if (binary[y * width + x] === 1) tInk++;
+            }
+            for (var y = midY; y <= staff.bottom; y++) {
+                if (binary[y * width + x] === 1) bInk++;
+            }
+            topInk += tInk;
+            botInk += bInk;
+            if (tInk > sp * 0.2) topPixels.push(x);
+            if (bInk > sp * 0.2) botPixels.push(x);
+        }
+
+        // If we found time sig symbols, try to identify the numbers
+        // For now, use the pixel density patterns
+        // Common signatures: 2/4, 3/4, 4/4, 6/8, 3/8
+        if (topPixels.length < 3 && botPixels.length < 3) {
+            return { beats: 4, beatType: 4 }; // default
+        }
+
+        // Simple heuristic: analyze the shape of the top number
+        // 2 has a distinctive curve, 3 has two bumps, 4 has straight lines, 6 is round
+        var topWidth = topPixels.length > 0 ? topPixels[topPixels.length - 1] - topPixels[0] : 0;
+        var topDensity = topInk / Math.max(1, (midY - staff.top) * (endX - startX));
+
+        // Count the number of horizontal crossings in the middle of the top half
+        var crossY = Math.round((staff.top + midY) / 2);
+        var crossings = 0;
+        var prev = 0;
+        for (var x = startX; x < endX; x++) {
+            var cur = binary[crossY * width + x];
+            if (cur === 1 && prev === 0) crossings++;
+            prev = cur;
+        }
+
+        var beats = 4, beatType = 4;
+        // 3 has 2 crossings typically, 2 has 1-2, 4 has 2-3, 6 has 1
+        if (topDensity > 0.05) {
+            if (crossings <= 1 && topWidth > sp * 0.8) beats = 6;
+            else if (crossings >= 3) beats = 4;
+            else beats = crossings <= 1 ? 2 : 3;
+        }
+
+        // Bottom number: 4 vs 8
+        var botCrossY = Math.round((midY + staff.bottom) / 2);
+        var botCrossings = 0;
+        prev = 0;
+        for (var x = startX; x < endX; x++) {
+            var cur = binary[botCrossY * width + x];
+            if (cur === 1 && prev === 0) botCrossings++;
+            prev = cur;
+        }
+        beatType = botCrossings >= 2 ? 8 : 4;
+
+        return { beats: beats, beatType: beatType };
+    },
+
+    /**
+     * Find connected components (blobs) — same as v3
      */
     findBlobs: function(binary, width, height) {
         var labels = new Int32Array(binary.length);
         var nextLabel = 1;
-        var equivalences = {};
-
-        function find(x) {
-            while (equivalences[x] && equivalences[x] !== x) x = equivalences[x];
-            return x;
-        }
-        function union(a, b) {
-            a = find(a); b = find(b);
-            if (a !== b) equivalences[Math.max(a, b)] = Math.min(a, b);
-        }
+        var eq = {};
+        function find(x) { while (eq[x] && eq[x] !== x) x = eq[x]; return x; }
+        function union(a, b) { a = find(a); b = find(b); if (a !== b) eq[Math.max(a, b)] = Math.min(a, b); }
 
         for (var y = 0; y < height; y++) {
             for (var x = 0; x < width; x++) {
                 var idx = y * width + x;
                 if (binary[idx] === 0) continue;
-                var neighbors = [];
-                if (x > 0 && labels[idx - 1] > 0) neighbors.push(labels[idx - 1]);
-                if (y > 0 && labels[idx - width] > 0) neighbors.push(labels[idx - width]);
-                if (x > 0 && y > 0 && labels[idx - width - 1] > 0) neighbors.push(labels[idx - width - 1]);
-                if (x < width - 1 && y > 0 && labels[idx - width + 1] > 0) neighbors.push(labels[idx - width + 1]);
-
-                if (neighbors.length === 0) {
-                    labels[idx] = nextLabel;
-                    equivalences[nextLabel] = nextLabel;
-                    nextLabel++;
-                } else {
-                    var minLabel = Math.min.apply(null, neighbors);
-                    labels[idx] = minLabel;
-                    for (var n = 0; n < neighbors.length; n++) union(minLabel, neighbors[n]);
-                }
+                var nb = [];
+                if (x > 0 && labels[idx - 1] > 0) nb.push(labels[idx - 1]);
+                if (y > 0 && labels[idx - width] > 0) nb.push(labels[idx - width]);
+                if (x > 0 && y > 0 && labels[idx - width - 1] > 0) nb.push(labels[idx - width - 1]);
+                if (x < width - 1 && y > 0 && labels[idx - width + 1] > 0) nb.push(labels[idx - width + 1]);
+                if (nb.length === 0) { labels[idx] = nextLabel; eq[nextLabel] = nextLabel; nextLabel++; }
+                else { var m = Math.min.apply(null, nb); labels[idx] = m; for (var n = 0; n < nb.length; n++) union(m, nb[n]); }
             }
         }
-
         var blobs = {};
         for (var y = 0; y < height; y++) {
             for (var x = 0; x < width; x++) {
                 var idx = y * width + x;
                 if (labels[idx] === 0) continue;
-                var resolved = find(labels[idx]);
-                labels[idx] = resolved;
-                if (!blobs[resolved]) {
-                    blobs[resolved] = { id: resolved, minX: x, maxX: x, minY: y, maxY: y, pixels: 0 };
-                }
-                var b = blobs[resolved];
-                if (x < b.minX) b.minX = x;
-                if (x > b.maxX) b.maxX = x;
-                if (y < b.minY) b.minY = y;
-                if (y > b.maxY) b.maxY = y;
+                var r = find(labels[idx]);
+                if (!blobs[r]) blobs[r] = { id: r, minX: x, maxX: x, minY: y, maxY: y, pixels: 0 };
+                var b = blobs[r];
+                if (x < b.minX) b.minX = x; if (x > b.maxX) b.maxX = x;
+                if (y < b.minY) b.minY = y; if (y > b.maxY) b.maxY = y;
                 b.pixels++;
             }
         }
-
         var result = [];
         var keys = Object.keys(blobs);
         for (var i = 0; i < keys.length; i++) {
             var b = blobs[keys[i]];
-            b.width = b.maxX - b.minX + 1;
-            b.height = b.maxY - b.minY + 1;
+            b.width = b.maxX - b.minX + 1; b.height = b.maxY - b.minY + 1;
             b.centerX = Math.round((b.minX + b.maxX) / 2);
             b.centerY = Math.round((b.minY + b.maxY) / 2);
-            b.area = b.width * b.height;
-            b.fillRatio = b.pixels / b.area;
+            b.area = b.width * b.height; b.fillRatio = b.pixels / b.area;
             b.aspectRatio = b.width / b.height;
             result.push(b);
         }
@@ -600,415 +644,239 @@ PianoModeOMR.NoteDetector = {
     },
 
     /**
-     * Filter blobs to find notehead candidates — MUCH stricter than v2
-     * Key improvements:
-     * - Skip clef/keysig/timesig region
-     * - Tighter aspect ratio (noteheads are ~1.2-1.6x wider than tall)
-     * - Better size constraints relative to staff spacing
-     * - Elliptical shape validation
+     * Filter blobs to noteheads — balanced filtering (not too strict, not too loose)
      */
     filterNoteHeads: function(blobs, staves, noteStartX) {
         if (staves.length === 0) return [];
+        var avgSp = 0;
+        for (var i = 0; i < staves.length; i++) avgSp += staves[i].spacing;
+        avgSp /= staves.length;
 
-        var avgSpacing = 0;
-        for (var i = 0; i < staves.length; i++) avgSpacing += staves[i].spacing;
-        avgSpacing /= staves.length;
-
-        // Notehead size: roughly 1 space wide, 0.7-0.9 spaces tall
-        var minW = avgSpacing * 0.5;
-        var maxW = avgSpacing * 2.0;
-        var minH = avgSpacing * 0.35;
-        var maxH = avgSpacing * 1.5;
         var noteHeads = [];
-
         for (var i = 0; i < blobs.length; i++) {
             var b = blobs[i];
+            // Size: roughly 0.5-2.0 spaces
+            if (b.width < avgSp * 0.4 || b.width > avgSp * 2.2) continue;
+            if (b.height < avgSp * 0.3 || b.height > avgSp * 1.6) continue;
+            // Aspect ratio: noteheads are 0.5 to 2.5
+            if (b.aspectRatio < 0.5 || b.aspectRatio > 2.8) continue;
+            // Min pixels
+            if (b.pixels < avgSp * avgSp * 0.1) continue;
 
-            // CRITICAL: Skip blobs in clef/key-sig/time-sig region
+            // Must be near a staff
             var staffIdx = -1;
             for (var s = 0; s < staves.length; s++) {
                 var staff = staves[s];
-                var margin = staff.spacing * 4;
+                var margin = staff.spacing * 3;
                 if (b.centerY >= staff.top - margin && b.centerY <= staff.bottom + margin) {
-                    staffIdx = s;
-                    break;
+                    staffIdx = s; break;
                 }
             }
             if (staffIdx === -1) continue;
 
-            // Skip if in preamble region (clef, key sig, time sig)
+            // Skip preamble
             var startX = noteStartX ? noteStartX[staffIdx] : 0;
             if (b.centerX < startX) continue;
 
-            // Size filter
-            if (b.width < minW || b.width > maxW) continue;
-            if (b.height < minH || b.height > maxH) continue;
-
-            // Aspect ratio: noteheads are wider than tall (0.7 to 2.2)
-            if (b.aspectRatio < 0.6 || b.aspectRatio > 2.5) continue;
-
-            // Fill ratio: noteheads have decent fill
-            if (b.pixels < minW * minH * 0.25) continue;
-
-            // Filled vs open notehead
-            if (b.fillRatio > 0.50) {
-                b.isFilled = true;
-            } else if (b.fillRatio > 0.25 && b.aspectRatio > 0.8) {
-                b.isFilled = false; // open notehead (half/whole)
-            } else {
-                continue; // too sparse, not a notehead
-            }
+            // Classify fill
+            b.isFilled = b.fillRatio > 0.48;
+            if (b.fillRatio < 0.20) continue; // too sparse
 
             b.staffIndex = staffIdx;
             noteHeads.push(b);
         }
-
         return noteHeads;
     },
 
-    /**
-     * Detect stems attached to noteheads
-     */
     detectStems: function(noteHeads, binary, width, height, staves) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var staff = staves[nh.staffIndex];
             var stemLen = staff.spacing * 3;
             var hasStemUp = false, hasStemDown = false;
-
-            // Check right side and left side for vertical stem
             var sides = [nh.maxX, nh.minX];
             for (var si = 0; si < sides.length; si++) {
-                var checkX = sides[si];
-
-                // Check upward
-                var upCount = 0;
+                var cx = sides[si];
+                var up = 0;
                 for (var y = nh.minY - 1; y >= Math.max(0, nh.minY - stemLen); y--) {
-                    var found = false;
-                    for (var dx = -1; dx <= 1; dx++) {
-                        var cx = checkX + dx;
-                        if (cx >= 0 && cx < width && binary[y * width + cx] === 1) { found = true; break; }
-                    }
-                    if (found) upCount++;
+                    var f = false;
+                    for (var dx = -1; dx <= 1; dx++) { var xx = cx + dx; if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { f = true; break; } }
+                    if (f) up++;
                 }
-                if (upCount > stemLen * 0.45) { hasStemUp = true; break; }
-
-                // Check downward
-                var downCount = 0;
+                if (up > stemLen * 0.4) { hasStemUp = true; break; }
+                var dn = 0;
                 for (var y = nh.maxY + 1; y <= Math.min(height - 1, nh.maxY + stemLen); y++) {
-                    var found = false;
-                    for (var dx = -1; dx <= 1; dx++) {
-                        var cx = checkX + dx;
-                        if (cx >= 0 && cx < width && binary[y * width + cx] === 1) { found = true; break; }
-                    }
-                    if (found) downCount++;
+                    var f = false;
+                    for (var dx = -1; dx <= 1; dx++) { var xx = cx + dx; if (xx >= 0 && xx < width && binary[y * width + xx] === 1) { f = true; break; } }
+                    if (f) dn++;
                 }
-                if (downCount > stemLen * 0.45) { hasStemDown = true; break; }
+                if (dn > stemLen * 0.4) { hasStemDown = true; break; }
             }
-
             nh.hasStem = hasStemUp || hasStemDown;
             nh.stemDirection = hasStemUp ? 'up' : (hasStemDown ? 'down' : 'none');
         }
         return noteHeads;
     },
 
-    /**
-     * Detect flags on stems
-     */
     detectFlags: function(noteHeads, binary, width, height, staves) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             if (!nh.hasStem) { nh.flagCount = 0; continue; }
-            var staff = staves[nh.staffIndex];
-            var flagZone = Math.round(staff.spacing * 1.2);
-            var stemEndY = nh.stemDirection === 'up'
-                ? nh.minY - Math.round(staff.spacing * 2.5)
-                : nh.maxY + Math.round(staff.spacing * 2.5);
-            var stemX = nh.maxX;
-
-            var flagPixels = 0, totalPixels = 0;
-            var yS = Math.max(0, Math.min(stemEndY, stemEndY + flagZone) - 2);
-            var yE = Math.min(height - 1, Math.max(stemEndY, stemEndY + flagZone) + 2);
-            for (var y = yS; y <= yE; y++) {
-                for (var x = stemX; x < Math.min(width, stemX + flagZone); x++) {
-                    totalPixels++;
-                    if (binary[y * width + x] === 1) flagPixels++;
-                }
-            }
-            var density = totalPixels > 0 ? flagPixels / totalPixels : 0;
-            nh.flagCount = density > 0.3 ? 2 : (density > 0.15 ? 1 : 0);
+            var staff = staves[nh.staffIndex]; var fz = Math.round(staff.spacing * 1.2);
+            var sey = nh.stemDirection === 'up' ? nh.minY - Math.round(staff.spacing * 2.5) : nh.maxY + Math.round(staff.spacing * 2.5);
+            var sx = nh.maxX;
+            var fp = 0, tp = 0;
+            var yS = Math.max(0, Math.min(sey, sey + fz) - 2);
+            var yE = Math.min(height - 1, Math.max(sey, sey + fz) + 2);
+            for (var y = yS; y <= yE; y++) { for (var x = sx; x < Math.min(width, sx + fz); x++) { tp++; if (binary[y * width + x] === 1) fp++; } }
+            var d = tp > 0 ? fp / tp : 0;
+            nh.flagCount = d > 0.3 ? 2 : (d > 0.15 ? 1 : 0);
         }
         return noteHeads;
     },
 
-    /**
-     * Detect beams connecting stems
-     */
     detectBeams: function(noteHeads, binary, width, height, staves) {
         for (var i = 0; i < noteHeads.length; i++) noteHeads[i].beamCount = 0;
-
         for (var i = 0; i < noteHeads.length - 1; i++) {
-            var nh1 = noteHeads[i], nh2 = noteHeads[i + 1];
-            if (!nh1.hasStem || !nh2.hasStem) continue;
-            if (nh1.staffIndex !== nh2.staffIndex) continue;
-            var staff = staves[nh1.staffIndex];
-            if (Math.abs(nh2.centerX - nh1.centerX) > staff.spacing * 5) continue;
-
-            var stemEnd1Y = nh1.stemDirection === 'up'
-                ? nh1.minY - Math.round(staff.spacing * 2)
-                : nh1.maxY + Math.round(staff.spacing * 2);
-            var stemEnd2Y = nh2.stemDirection === 'up'
-                ? nh2.minY - Math.round(staff.spacing * 2)
-                : nh2.maxY + Math.round(staff.spacing * 2);
-
-            var beamY = Math.round((stemEnd1Y + stemEnd2Y) / 2);
-            var startX = Math.min(nh1.centerX, nh2.centerX);
-            var endX = Math.max(nh1.centerX, nh2.centerX);
-            var beamPx = 0, totalScan = 0;
-            for (var dy = -2; dy <= 2; dy++) {
-                var y = beamY + dy;
-                if (y < 0 || y >= height) continue;
-                for (var x = startX; x <= endX; x++) {
-                    totalScan++;
-                    if (binary[y * width + x] === 1) beamPx++;
-                }
-            }
-            if (totalScan > 0 && beamPx / totalScan > 0.4) {
-                nh1.beamCount = Math.max(nh1.beamCount, 1);
-                nh2.beamCount = Math.max(nh2.beamCount, 1);
-                // Check double beam
-                var offset = nh1.stemDirection === 'up' ? Math.round(staff.spacing * 0.5) : -Math.round(staff.spacing * 0.5);
-                var b2Y = beamY + offset;
-                var b2Px = 0, t2 = 0;
-                for (var dy = -1; dy <= 1; dy++) {
-                    var y = b2Y + dy;
-                    if (y < 0 || y >= height) continue;
-                    for (var x = startX; x <= endX; x++) { t2++; if (binary[y * width + x] === 1) b2Px++; }
-                }
-                if (t2 > 0 && b2Px / t2 > 0.4) {
-                    nh1.beamCount = Math.max(nh1.beamCount, 2);
-                    nh2.beamCount = Math.max(nh2.beamCount, 2);
-                }
-            }
+            var a = noteHeads[i], b = noteHeads[i + 1];
+            if (!a.hasStem || !b.hasStem || a.staffIndex !== b.staffIndex) continue;
+            var staff = staves[a.staffIndex];
+            if (Math.abs(b.centerX - a.centerX) > staff.spacing * 5) continue;
+            var ae = a.stemDirection === 'up' ? a.minY - Math.round(staff.spacing * 2) : a.maxY + Math.round(staff.spacing * 2);
+            var be = b.stemDirection === 'up' ? b.minY - Math.round(staff.spacing * 2) : b.maxY + Math.round(staff.spacing * 2);
+            var by = Math.round((ae + be) / 2);
+            var sx = Math.min(a.centerX, b.centerX), ex = Math.max(a.centerX, b.centerX);
+            var bp = 0, ts = 0;
+            for (var dy = -2; dy <= 2; dy++) { var y = by + dy; if (y < 0 || y >= height) continue; for (var x = sx; x <= ex; x++) { ts++; if (binary[y * width + x] === 1) bp++; } }
+            if (ts > 0 && bp / ts > 0.4) { a.beamCount = Math.max(a.beamCount, 1); b.beamCount = Math.max(b.beamCount, 1); }
         }
         return noteHeads;
     },
 
-    /**
-     * Detect rests
-     */
     detectRests: function(blobs, staves, width, noteStartX) {
         var rests = [];
         if (staves.length === 0) return rests;
-        var avgSpacing = 0;
-        for (var i = 0; i < staves.length; i++) avgSpacing += staves[i].spacing;
-        avgSpacing /= staves.length;
+        var avgSp = 0;
+        for (var i = 0; i < staves.length; i++) avgSp += staves[i].spacing;
+        avgSp /= staves.length;
 
         for (var i = 0; i < blobs.length; i++) {
             var b = blobs[i];
-            var nearStaff = -1;
+            var ns = -1;
             for (var s = 0; s < staves.length; s++) {
-                var staff = staves[s];
-                if (b.centerY >= staff.top - staff.spacing && b.centerY <= staff.bottom + staff.spacing) {
-                    nearStaff = s; break;
-                }
+                if (b.centerY >= staves[s].top - staves[s].spacing && b.centerY <= staves[s].bottom + staves[s].spacing) { ns = s; break; }
             }
-            if (nearStaff === -1) continue;
+            if (ns === -1) continue;
+            var sx = noteStartX ? noteStartX[ns] : 0;
+            if (b.centerX < sx) continue;
+            var staff = staves[ns];
 
-            // Skip preamble region
-            var startX = noteStartX ? noteStartX[nearStaff] : 0;
-            if (b.centerX < startX) continue;
-
-            var staff = staves[nearStaff];
-
-            // Whole/half rest: rectangular, wider than tall
-            if (b.width > avgSpacing * 0.5 && b.width < avgSpacing * 2 &&
-                b.height > avgSpacing * 0.2 && b.height < avgSpacing * 0.8 &&
-                b.fillRatio > 0.7 && b.aspectRatio > 1.2) {
-                var restType = b.centerY < staff.center ? 'half' : 'whole';
-                rests.push({
-                    type: restType, durationValue: restType === 'half' ? 2 : 4,
-                    mxlType: restType, centerX: b.centerX, centerY: b.centerY,
-                    staffIndex: nearStaff, isRest: true
-                });
+            if (b.width > avgSp * 0.5 && b.width < avgSp * 2 && b.height > avgSp * 0.2 && b.height < avgSp * 0.8 && b.fillRatio > 0.7 && b.aspectRatio > 1.2) {
+                var rt = b.centerY < staff.center ? 'half' : 'whole';
+                rests.push({ type: rt, durationValue: rt === 'half' ? 2 : 4, mxlType: rt, centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
                 continue;
             }
-
-            // Quarter rest: tall, narrow, zigzag
-            if (b.height > avgSpacing * 1.5 && b.height < avgSpacing * 4 &&
-                b.width < avgSpacing * 1.2 && b.aspectRatio < 0.6 &&
-                b.fillRatio > 0.25 && b.fillRatio < 0.65) {
-                rests.push({
-                    type: 'quarter', durationValue: 1, mxlType: 'quarter',
-                    centerX: b.centerX, centerY: b.centerY,
-                    staffIndex: nearStaff, isRest: true
-                });
+            if (b.height > avgSp * 1.5 && b.height < avgSp * 4 && b.width < avgSp * 1.2 && b.aspectRatio < 0.6 && b.fillRatio > 0.25 && b.fillRatio < 0.65) {
+                rests.push({ type: 'quarter', durationValue: 1, mxlType: 'quarter', centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
                 continue;
             }
-
-            // Eighth rest
-            if (b.height > avgSpacing * 0.8 && b.height < avgSpacing * 2 &&
-                b.width < avgSpacing * 1.0 && b.fillRatio > 0.2 && b.fillRatio < 0.55 &&
-                b.pixels > avgSpacing * 0.5 && b.aspectRatio < 0.8 && b.height > b.width * 1.2) {
-                rests.push({
-                    type: 'eighth', durationValue: 0.5, mxlType: 'eighth',
-                    centerX: b.centerX, centerY: b.centerY,
-                    staffIndex: nearStaff, isRest: true
-                });
+            if (b.height > avgSp * 0.8 && b.height < avgSp * 2 && b.width < avgSp * 1.0 && b.fillRatio > 0.2 && b.fillRatio < 0.55 && b.aspectRatio < 0.8) {
+                rests.push({ type: 'eighth', durationValue: 0.5, mxlType: 'eighth', centerX: b.centerX, centerY: b.centerY, staffIndex: ns, isRest: true });
             }
         }
         return rests;
     },
 
-    /**
-     * Detect bar lines
-     */
     detectBarLines: function(binary, width, height, staves) {
         var barLines = [];
         for (var s = 0; s < staves.length; s++) {
-            var staff = staves[s];
-            var staffTop = staff.top - 2;
-            var staffBot = staff.bottom + 2;
-            var staffH = staffBot - staffTop;
-
+            var staff = staves[s]; var st = staff.top - 2; var sb = staff.bottom + 2; var sh = sb - st;
             for (var x = 0; x < width; x++) {
-                var blackRun = 0;
-                for (var y = staffTop; y <= staffBot; y++) {
-                    if (y >= 0 && y < height && binary[y * width + x] === 1) blackRun++;
-                }
-                if (blackRun > staffH * 0.8) {
-                    // Check it's narrow
-                    var isNarrow = true;
-                    for (var dx = -3; dx <= 3; dx++) {
-                        if (dx === 0) continue;
-                        var nx = x + dx;
-                        if (nx < 0 || nx >= width) continue;
-                        var nRun = 0;
-                        for (var y = staffTop; y <= staffBot; y++) {
-                            if (binary[y * width + nx] === 1) nRun++;
-                        }
-                        if (Math.abs(dx) > 2 && nRun > staffH * 0.7) { isNarrow = false; break; }
-                    }
-                    if (isNarrow) {
-                        var isDup = false;
-                        for (var b = 0; b < barLines.length; b++) {
-                            if (barLines[b].staffIndex === s && Math.abs(barLines[b].x - x) < 8) { isDup = true; break; }
-                        }
-                        if (!isDup) barLines.push({ x: x, staffIndex: s });
-                    }
+                var br = 0;
+                for (var y = st; y <= sb; y++) { if (y >= 0 && y < height && binary[y * width + x] === 1) br++; }
+                if (br > sh * 0.8) {
+                    var narrow = true;
+                    for (var dx = -3; dx <= 3; dx++) { if (dx === 0) continue; var nx = x + dx; if (nx < 0 || nx >= width) continue; var nr = 0; for (var y = st; y <= sb; y++) { if (binary[y * width + nx] === 1) nr++; } if (Math.abs(dx) > 2 && nr > sh * 0.7) { narrow = false; break; } }
+                    if (narrow) { var dup = false; for (var b = 0; b < barLines.length; b++) { if (barLines[b].staffIndex === s && Math.abs(barLines[b].x - x) < 8) { dup = true; break; } } if (!dup) barLines.push({ x: x, staffIndex: s }); }
                 }
             }
         }
         return barLines;
     },
 
-    /**
-     * Classify note duration
-     */
     classifyDuration: function(noteHeads) {
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var flags = Math.max(nh.flagCount || 0, nh.beamCount || 0);
-            if (!nh.isFilled && !nh.hasStem) {
-                nh.duration = 'whole'; nh.durationValue = 4; nh.mxlType = 'whole';
-            } else if (!nh.isFilled && nh.hasStem) {
-                nh.duration = 'half'; nh.durationValue = 2; nh.mxlType = 'half';
-            } else if (nh.isFilled && nh.hasStem && flags >= 2) {
-                nh.duration = '16th'; nh.durationValue = 0.25; nh.mxlType = '16th';
-            } else if (nh.isFilled && nh.hasStem && flags >= 1) {
-                nh.duration = 'eighth'; nh.durationValue = 0.5; nh.mxlType = 'eighth';
-            } else {
-                nh.duration = 'quarter'; nh.durationValue = 1; nh.mxlType = 'quarter';
-            }
+            if (!nh.isFilled && !nh.hasStem) { nh.duration = 'whole'; nh.durationValue = 4; nh.mxlType = 'whole'; }
+            else if (!nh.isFilled && nh.hasStem) { nh.duration = 'half'; nh.durationValue = 2; nh.mxlType = 'half'; }
+            else if (nh.isFilled && nh.hasStem && flags >= 2) { nh.duration = '16th'; nh.durationValue = 0.25; nh.mxlType = '16th'; }
+            else if (nh.isFilled && nh.hasStem && flags >= 1) { nh.duration = 'eighth'; nh.durationValue = 0.5; nh.mxlType = 'eighth'; }
+            else { nh.duration = 'quarter'; nh.durationValue = 1; nh.mxlType = 'quarter'; }
         }
         return noteHeads;
     },
 
-    /**
-     * Assign pitch — IMPROVED: uses weighted center, applies key signature
-     */
     assignPitch: function(noteHeads, staves, keySignature) {
-        var accidentals = (keySignature && keySignature.accidentals) ? keySignature.accidentals : {};
-
+        var acc = (keySignature && keySignature.accidentals) ? keySignature.accidentals : {};
         for (var i = 0; i < noteHeads.length; i++) {
             var nh = noteHeads[i];
             var staff = staves[nh.staffIndex];
             var halfSpace = staff.spacing / 2;
-
-            // Use weighted vertical center for better precision
-            // The center of the notehead blob is used
-            var noteY = nh.centerY;
-
-            // Calculate position index relative to bottom line
-            var distFromBottom = staff.bottom - noteY;
+            var distFromBottom = staff.bottom - nh.centerY;
             var posIndex = Math.round(distFromBottom / halfSpace);
-
-            // Look up pitch from table
             var pitches = (staff.clef === 'bass') ? this.BASS_PITCHES : this.TREBLE_PITCHES;
             var pitch;
-
             if (posIndex >= 0 && posIndex < pitches.length) {
                 pitch = { step: pitches[posIndex].step, octave: pitches[posIndex].octave };
             } else {
-                // Extrapolate above or below
                 var steps = this.STEPS;
-                var refPitch, direction, count;
-                if (posIndex >= pitches.length) {
-                    refPitch = pitches[pitches.length - 1];
-                    count = posIndex - pitches.length + 1;
-                    direction = 1;
-                } else {
-                    refPitch = pitches[0];
-                    count = Math.abs(posIndex);
-                    direction = -1;
-                }
-                var si = steps.indexOf(refPitch.step);
-                var oct = refPitch.octave;
-                for (var e = 0; e < count; e++) {
-                    si += direction;
-                    if (si >= 7) { si = 0; oct++; }
-                    if (si < 0) { si = 6; oct--; }
-                }
+                var ref = posIndex >= pitches.length ? pitches[pitches.length - 1] : pitches[0];
+                var count = posIndex >= pitches.length ? posIndex - pitches.length + 1 : Math.abs(posIndex);
+                var dir = posIndex >= pitches.length ? 1 : -1;
+                var si = steps.indexOf(ref.step); var oct = ref.octave;
+                for (var e = 0; e < count; e++) { si += dir; if (si >= 7) { si = 0; oct++; } if (si < 0) { si = 6; oct--; } }
                 pitch = { step: steps[si], octave: oct };
             }
-
-            // Apply key signature accidentals
-            var alter = accidentals[pitch.step] || 0;
-            pitch.alter = alter;
-
+            pitch.alter = acc[pitch.step] || 0;
             nh.pitch = pitch;
-            nh.midiNote = this.noteToMidi(pitch.step, pitch.octave, alter);
-            nh.pitchName = pitch.step + (alter === 1 ? '#' : (alter === -1 ? 'b' : '')) + pitch.octave;
+            nh.midiNote = this.noteToMidi(pitch.step, pitch.octave, pitch.alter);
+            nh.pitchName = pitch.step + (pitch.alter === 1 ? '#' : (pitch.alter === -1 ? 'b' : '')) + pitch.octave;
         }
         return noteHeads;
     },
 
     /**
-     * Organize notes into events (chords grouped by x-position)
+     * Organize notes into events, sorted by SYSTEM then by x position.
+     * This ensures multi-system scores play in the right order.
      */
-    organizeNotes: function(noteHeads) {
-        noteHeads.sort(function(a, b) { return a.centerX - b.centerX; });
+    organizeNotes: function(noteHeads, staves) {
+        // Sort by system first, then by x within each system
+        noteHeads.sort(function(a, b) {
+            var sysA = staves[a.staffIndex].systemIndex || 0;
+            var sysB = staves[b.staffIndex].systemIndex || 0;
+            if (sysA !== sysB) return sysA - sysB;
+            return a.centerX - b.centerX;
+        });
+
         var events = [];
         var i = 0;
         while (i < noteHeads.length) {
             var chord = [noteHeads[i]];
             var j = i + 1;
             while (j < noteHeads.length &&
-                   noteHeads[j].staffIndex === noteHeads[i].staffIndex &&
-                   Math.abs(noteHeads[j].centerX - noteHeads[i].centerX) < noteHeads[i].width * 1.5) {
-                chord.push(noteHeads[j]);
-                j++;
+                   (staves[noteHeads[j].staffIndex].systemIndex || 0) === (staves[noteHeads[i].staffIndex].systemIndex || 0) &&
+                   Math.abs(noteHeads[j].centerX - noteHeads[i].centerX) < noteHeads[i].width * 1.8) {
+                chord.push(noteHeads[j]); j++;
             }
             var minDur = 4;
-            for (var c = 0; c < chord.length; c++) {
-                if (chord[c].durationValue < minDur) minDur = chord[c].durationValue;
-            }
+            for (var c = 0; c < chord.length; c++) { if (chord[c].durationValue < minDur) minDur = chord[c].durationValue; }
             events.push({
                 notes: chord, x: chord[0].centerX,
                 staffIndex: chord[0].staffIndex,
+                systemIndex: staves[chord[0].staffIndex].systemIndex || 0,
                 durationValue: minDur,
-                duration: chord[0].duration,
-                mxlType: chord[0].mxlType
+                duration: chord[0].duration, mxlType: chord[0].mxlType
             });
             i = j;
         }
@@ -1016,521 +884,303 @@ PianoModeOMR.NoteDetector = {
     },
 
     /**
-     * Main detection pipeline v3.0
+     * Main detection pipeline v3.1
      */
     detect: function(cleanedBinary, originalBinary, width, height, staves) {
-        // Step 1: Detect key signature
         var keySig = this.detectKeySignature(originalBinary, width, staves);
-
-        // Step 2: Find where notes begin (skip clef/keysig/timesig)
+        var timeSig = this.detectTimeSignature(originalBinary, width, staves);
         var noteStartX = this._findNoteStartX(originalBinary, width, staves);
-
-        // Step 3: Find all blobs
         var blobs = this.findBlobs(cleanedBinary, width, height);
-
-        // Step 4: Filter noteheads (with preamble skip)
         var noteHeads = this.filterNoteHeads(blobs, staves, noteStartX);
-
-        // Step 5: Detect stems
         noteHeads = this.detectStems(noteHeads, originalBinary, width, height, staves);
-
-        // Step 6: Detect flags and beams
         noteHeads = this.detectFlags(noteHeads, originalBinary, width, height, staves);
         noteHeads = this.detectBeams(noteHeads, originalBinary, width, height, staves);
-
-        // Step 7: Classify duration
         noteHeads = this.classifyDuration(noteHeads);
-
-        // Step 8: Assign pitch WITH key signature
         noteHeads = this.assignPitch(noteHeads, staves, keySig);
-
-        // Step 9: Detect rests (with preamble skip)
         var rests = this.detectRests(blobs, staves, width, noteStartX);
-
-        // Step 10: Detect bar lines
         var barLines = this.detectBarLines(originalBinary, width, height, staves);
+        var events = this.organizeNotes(noteHeads, staves);
 
-        // Step 11: Organize into events
-        var events = this.organizeNotes(noteHeads);
-
-        // Merge rests
+        // Merge rests (also sorted by system)
         for (var r = 0; r < rests.length; r++) {
+            var rest = rests[r];
             events.push({
-                notes: [], isRest: true, restType: rests[r].type,
-                x: rests[r].centerX, staffIndex: rests[r].staffIndex,
-                durationValue: rests[r].durationValue,
-                duration: rests[r].type, mxlType: rests[r].mxlType
+                notes: [], isRest: true, restType: rest.type,
+                x: rest.centerX, staffIndex: rest.staffIndex,
+                systemIndex: staves[rest.staffIndex].systemIndex || 0,
+                durationValue: rest.durationValue, duration: rest.type, mxlType: rest.mxlType
             });
         }
 
-        events.sort(function(a, b) { return a.x - b.x; });
+        // Sort by system, then x
+        events.sort(function(a, b) {
+            if (a.systemIndex !== b.systemIndex) return a.systemIndex - b.systemIndex;
+            return a.x - b.x;
+        });
 
-        return {
-            noteHeads: noteHeads, events: events,
-            rests: rests, barLines: barLines,
-            keySignature: keySig
-        };
+        return { noteHeads: noteHeads, events: events, rests: rests, barLines: barLines, keySignature: keySig, timeSignature: timeSig };
     }
 };
 
 
-
+// =====================================================
+// MUSICXML WRITER — Fixed for multi-system scores
+// =====================================================
 PianoModeOMR.MusicXMLWriter = {
 
-    /**
-     * Generate MusicXML string from detected events grouped by staff
-     * @param {Array} events - from NoteDetector.detect()
-     * @param {Array} staves - from StaffDetector.detect()
-     * @param {Object} options - { title, beatsPerMeasure, beatType, tempo }
-     * @returns {string} MusicXML content
-     */
     generate: function(events, staves, options) {
         options = options || {};
         var title = options.title || 'Scanned Score';
-        var beats = options.beatsPerMeasure || 4;
-        var beatType = options.beatType || 4;
+        var keySig = options.keySignature || { fifths: 0 };
+        var timeSig = options.timeSignature || { beats: 4, beatType: 4 };
+        var beats = timeSig.beats;
+        var beatType = timeSig.beatType;
         var tempo = options.tempo || 120;
-        var divisions = 4; // divisions per quarter note (allows 16th notes)
+        var divisions = 4;
 
         var xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
         xml += '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n';
         xml += '<score-partwise version="4.0">\n';
+        xml += '  <work><work-title>' + this._escapeXml(title) + '</work-title></work>\n';
+        xml += '  <identification><creator type="composer">PianoMode OCR</creator>';
+        xml += '<encoding><software>PianoMode OMR v3.1</software>';
+        xml += '<encoding-date>' + new Date().toISOString().slice(0, 10) + '</encoding-date></encoding></identification>\n';
 
-        // Work title
-        xml += '  <work>\n';
-        xml += '    <work-title>' + this._escapeXml(title) + '</work-title>\n';
-        xml += '  </work>\n';
-
-        // Identification
-        xml += '  <identification>\n';
-        xml += '    <creator type="composer">PianoMode OCR Scanner</creator>\n';
-        xml += '    <encoding>\n';
-        xml += '      <software>PianoMode OMR Engine 1.0</software>\n';
-        xml += '      <encoding-date>' + new Date().toISOString().slice(0, 10) + '</encoding-date>\n';
-        xml += '    </encoding>\n';
-        xml += '  </identification>\n';
-
-        // Part list — one part per staff pair (or per staff if odd)
-        var parts = this._buildParts(staves);
-        xml += '  <part-list>\n';
-        for (var p = 0; p < parts.length; p++) {
-            xml += '    <score-part id="P' + (p + 1) + '">\n';
-            xml += '      <part-name>' + parts[p].name + '</part-name>\n';
-            xml += '      <midi-instrument id="P' + (p + 1) + '-I1">\n';
-            xml += '        <midi-channel>1</midi-channel>\n';
-            xml += '        <midi-program>1</midi-program>\n'; // Acoustic Grand Piano
-            xml += '      </midi-instrument>\n';
-            xml += '    </score-part>\n';
+        // Determine how many unique staff-in-system positions we have
+        // For a grand staff: 2 positions (treble=0, bass=1)
+        // All systems share the same part structure
+        var stavesPerSystem = 1;
+        for (var i = 0; i < staves.length; i++) {
+            if (staves[i].systemStaffCount > stavesPerSystem) stavesPerSystem = staves[i].systemStaffCount;
         }
+
+        // Single Piano part containing all staves
+        xml += '  <part-list>\n';
+        xml += '    <score-part id="P1"><part-name>Piano</part-name>';
+        xml += '<midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>';
+        xml += '</score-part>\n';
         xml += '  </part-list>\n';
 
-        // Parts content
-        for (var p = 0; p < parts.length; p++) {
-            var part = parts[p];
-            xml += '  <part id="P' + (p + 1) + '">\n';
+        xml += '  <part id="P1">\n';
 
-            // Get events for this part's staves
-            var partEvents = [];
-            for (var e = 0; e < events.length; e++) {
-                if (part.staffIndices.indexOf(events[e].staffIndex) !== -1) {
-                    partEvents.push(events[e]);
-                }
-            }
+        // ALL events from ALL systems go into this single part, in order
+        // Events are already sorted by system then by x
+        var measures = this._splitIntoMeasures(events, beats, beatType, divisions);
 
-            // Split events into measures
-            var measures = this._splitIntoMeasures(partEvents, beats, beatType, divisions);
+        for (var m = 0; m < measures.length; m++) {
+            xml += '    <measure number="' + (m + 1) + '">\n';
 
-            for (var m = 0; m < measures.length; m++) {
-                xml += '    <measure number="' + (m + 1) + '">\n';
-
-                // Attributes on first measure
-                if (m === 0) {
-                    xml += '      <attributes>\n';
-                    xml += '        <divisions>' + divisions + '</divisions>\n';
-                    var fifths = (options.keySignature && options.keySignature.fifths) ? options.keySignature.fifths : 0;
-                    xml += '        <key><fifths>' + fifths + '</fifths></key>\n';
-                    xml += '        <time>\n';
-                    xml += '          <beats>' + beats + '</beats>\n';
-                    xml += '          <beat-type>' + beatType + '</beat-type>\n';
-                    xml += '        </time>\n';
-
-                    // Clef(s)
-                    if (part.staffIndices.length === 2) {
-                        xml += '        <staves>2</staves>\n';
-                        xml += '        <clef number="1"><sign>G</sign><line>2</line></clef>\n';
-                        xml += '        <clef number="2"><sign>F</sign><line>4</line></clef>\n';
-                    } else {
-                        var clef = staves[part.staffIndices[0]].clef;
-                        if (clef === 'bass') {
-                            xml += '        <clef><sign>F</sign><line>4</line></clef>\n';
-                        } else {
-                            xml += '        <clef><sign>G</sign><line>2</line></clef>\n';
-                        }
-                    }
-                    xml += '      </attributes>\n';
-
-                    // Tempo
-                    xml += '      <direction placement="above">\n';
-                    xml += '        <direction-type>\n';
-                    xml += '          <metronome>\n';
-                    xml += '            <beat-unit>quarter</beat-unit>\n';
-                    xml += '            <per-minute>' + tempo + '</per-minute>\n';
-                    xml += '          </metronome>\n';
-                    xml += '        </direction-type>\n';
-                    xml += '        <sound tempo="' + tempo + '"/>\n';
-                    xml += '      </direction>\n';
-                }
-
-                // Notes
-                var measureEvents = measures[m];
-                if (measureEvents.length === 0) {
-                    // Empty measure — write whole rest
-                    xml += '      <note>\n';
-                    xml += '        <rest/>\n';
-                    xml += '        <duration>' + (divisions * beats) + '</duration>\n';
-                    xml += '        <type>whole</type>\n';
-                    xml += '      </note>\n';
+            if (m === 0) {
+                xml += '      <attributes>\n';
+                xml += '        <divisions>' + divisions + '</divisions>\n';
+                xml += '        <key><fifths>' + keySig.fifths + '</fifths></key>\n';
+                xml += '        <time><beats>' + beats + '</beats><beat-type>' + beatType + '</beat-type></time>\n';
+                if (stavesPerSystem >= 2) {
+                    xml += '        <staves>2</staves>\n';
+                    xml += '        <clef number="1"><sign>G</sign><line>2</line></clef>\n';
+                    xml += '        <clef number="2"><sign>F</sign><line>4</line></clef>\n';
                 } else {
-                    for (var e = 0; e < measureEvents.length; e++) {
-                        var evt = measureEvents[e];
-                        var dur = this._durationToDivisions(evt.durationValue, divisions);
-
-                        // Handle rests
-                        if (evt.isRest) {
-                            xml += '      <note>\n';
-                            xml += '        <rest/>\n';
-                            xml += '        <duration>' + dur + '</duration>\n';
-                            xml += '        <type>' + (evt.mxlType || 'quarter') + '</type>\n';
-                            xml += '      </note>\n';
-                            continue;
-                        }
-
-                        for (var n = 0; n < evt.notes.length; n++) {
-                            var note = evt.notes[n];
-                            xml += '      <note>\n';
-
-                            // Chord (not first note in chord)
-                            if (n > 0) {
-                                xml += '        <chord/>\n';
-                            }
-
-                            xml += '        <pitch>\n';
-                            xml += '          <step>' + note.pitch.step + '</step>\n';
-                            if (note.pitch.alter) { xml += '          <alter>' + note.pitch.alter + '</alter>\n'; }
-                            xml += '          <octave>' + note.pitch.octave + '</octave>\n';
-                            xml += '        </pitch>\n';
-                            xml += '        <duration>' + dur + '</duration>\n';
-                            xml += '        <type>' + (evt.mxlType || 'quarter') + '</type>\n';
-
-                            // Beam notation for eighth/sixteenth notes
-                            if (evt.mxlType === 'eighth' || evt.mxlType === '16th') {
-                                xml += '        <beam number="1">begin</beam>\n';
-                            }
-
-                            // Staff number for grand staff
-                            if (part.staffIndices.length === 2) {
-                                var staffNum = (note.staffIndex === part.staffIndices[0]) ? 1 : 2;
-                                xml += '        <staff>' + staffNum + '</staff>\n';
-                            }
-
-                            xml += '      </note>\n';
-                        }
-                    }
+                    xml += '        <clef><sign>G</sign><line>2</line></clef>\n';
                 }
-
-                xml += '    </measure>\n';
+                xml += '      </attributes>\n';
+                xml += '      <direction placement="above"><direction-type><metronome>';
+                xml += '<beat-unit>quarter</beat-unit><per-minute>' + tempo + '</per-minute>';
+                xml += '</metronome></direction-type><sound tempo="' + tempo + '"/></direction>\n';
             }
 
-            xml += '  </part>\n';
+            var measureEvents = measures[m];
+            if (measureEvents.length === 0) {
+                xml += '      <note><rest/><duration>' + (divisions * beats) + '</duration><type>whole</type></note>\n';
+            } else {
+                for (var e = 0; e < measureEvents.length; e++) {
+                    var evt = measureEvents[e];
+                    var dur = this._durationToDivisions(evt.durationValue, divisions);
+
+                    if (evt.isRest) {
+                        xml += '      <note><rest/><duration>' + dur + '</duration><type>' + (evt.mxlType || 'quarter') + '</type>';
+                        if (stavesPerSystem >= 2) {
+                            var rStaff = (staves[evt.staffIndex] && staves[evt.staffIndex].staffInSystem === 1) ? 2 : 1;
+                            xml += '<staff>' + rStaff + '</staff>';
+                        }
+                        xml += '</note>\n';
+                        continue;
+                    }
+
+                    for (var n = 0; n < evt.notes.length; n++) {
+                        var note = evt.notes[n];
+                        xml += '      <note>';
+                        if (n > 0) xml += '<chord/>';
+                        xml += '<pitch><step>' + note.pitch.step + '</step>';
+                        if (note.pitch.alter) xml += '<alter>' + note.pitch.alter + '</alter>';
+                        xml += '<octave>' + note.pitch.octave + '</octave></pitch>';
+                        xml += '<duration>' + dur + '</duration>';
+                        xml += '<type>' + (evt.mxlType || 'quarter') + '</type>';
+                        if (stavesPerSystem >= 2) {
+                            var sn = (staves[note.staffIndex] && staves[note.staffIndex].staffInSystem === 1) ? 2 : 1;
+                            xml += '<staff>' + sn + '</staff>';
+                        }
+                        xml += '</note>\n';
+                    }
+                }
+            }
+            xml += '    </measure>\n';
         }
 
-        xml += '</score-partwise>\n';
+        xml += '  </part>\n</score-partwise>\n';
         return xml;
     },
 
-    _escapeXml: function(str) {
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    },
-
-    _buildParts: function(staves) {
-        var parts = [];
-        if (staves.length >= 2) {
-            // Pair staves into grand staff parts
-            for (var i = 0; i < staves.length; i += 2) {
-                if (i + 1 < staves.length) {
-                    parts.push({
-                        name: 'Piano',
-                        staffIndices: [i, i + 1]
-                    });
-                } else {
-                    parts.push({
-                        name: (staves[i].clef === 'bass') ? 'Bass' : 'Treble',
-                        staffIndices: [i]
-                    });
-                }
-            }
-        } else if (staves.length === 1) {
-            parts.push({
-                name: 'Piano',
-                staffIndices: [0]
-            });
-        }
-        if (parts.length === 0) {
-            parts.push({ name: 'Piano', staffIndices: [0] });
-        }
-        return parts;
-    },
+    _escapeXml: function(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); },
 
     _splitIntoMeasures: function(events, beats, beatType, divisions) {
-        var beatsPerMeasure = beats;
-        var divisionsPerMeasure = divisions * beatsPerMeasure;
+        var divsPerMeasure = divisions * beats;
         var measures = [[]];
         var currentBeat = 0;
-
         for (var i = 0; i < events.length; i++) {
-            var evt = events[i];
-            var dur = this._durationToDivisions(evt.durationValue, divisions);
-
-            if (currentBeat + dur > divisionsPerMeasure) {
-                // Start new measure
+            var dur = this._durationToDivisions(events[i].durationValue, divisions);
+            if (currentBeat + dur > divsPerMeasure) {
                 measures.push([]);
                 currentBeat = 0;
             }
-
-            measures[measures.length - 1].push(evt);
+            measures[measures.length - 1].push(events[i]);
             currentBeat += dur;
-
-            if (currentBeat >= divisionsPerMeasure) {
-                measures.push([]);
-                currentBeat = 0;
-            }
+            if (currentBeat >= divsPerMeasure) { measures.push([]); currentBeat = 0; }
         }
-
-        // Remove trailing empty measure
-        if (measures.length > 1 && measures[measures.length - 1].length === 0) {
-            measures.pop();
-        }
-
-        // Ensure at least 1 measure
+        if (measures.length > 1 && measures[measures.length - 1].length === 0) measures.pop();
         if (measures.length === 0) measures.push([]);
-
         return measures;
     },
 
-    _durationToDivisions: function(durationValue, divisions) {
-        // durationValue: 4=whole, 2=half, 1=quarter, 0.5=eighth
-        return Math.round(durationValue * divisions);
-    }
+    _durationToDivisions: function(dv, div) { return Math.round(dv * div); }
 };
+
 
 // =====================================================
 // MIDI WRITER
 // =====================================================
 PianoModeOMR.MIDIWriter = {
 
-    /**
-     * Generate a standard MIDI file (Format 0) as Uint8Array
-     * @param {Array} events - from NoteDetector
-     * @param {Object} options - { tempo, channel }
-     * @returns {Uint8Array} MIDI file data
-     */
     generate: function(events, options) {
         options = options || {};
         var tempo = options.tempo || 120;
         var channel = options.channel || 0;
-        var ppq = 480; // pulses per quarter note
+        var ppq = 480;
         var velocity = 80;
-
         var trackData = [];
 
-        // Tempo meta event: FF 51 03 tt tt tt (microseconds per beat)
+        // Tempo meta event
         var usPerBeat = Math.round(60000000 / tempo);
-        trackData.push(0x00); // delta time 0
-        trackData.push(0xFF, 0x51, 0x03);
-        trackData.push((usPerBeat >> 16) & 0xFF);
-        trackData.push((usPerBeat >> 8) & 0xFF);
-        trackData.push(usPerBeat & 0xFF);
+        trackData.push(0x00, 0xFF, 0x51, 0x03);
+        trackData.push((usPerBeat >> 16) & 0xFF, (usPerBeat >> 8) & 0xFF, usPerBeat & 0xFF);
 
-        // Program change: channel, program 0 (Acoustic Grand Piano)
-        trackData.push(0x00); // delta 0
-        trackData.push(0xC0 | channel, 0x00);
+        // Program change: piano
+        trackData.push(0x00, 0xC0 | channel, 0x00);
 
         // Track name
-        var trackName = 'Piano';
-        trackData.push(0x00); // delta 0
-        trackData.push(0xFF, 0x03);
-        this._pushVLQ(trackData, trackName.length);
-        for (var c = 0; c < trackName.length; c++) {
-            trackData.push(trackName.charCodeAt(c));
-        }
+        var name = 'Piano';
+        trackData.push(0x00, 0xFF, 0x03);
+        this._pushVLQ(trackData, name.length);
+        for (var c = 0; c < name.length; c++) trackData.push(name.charCodeAt(c));
 
         // Note events
+        var lastNoteOff = false;
         for (var i = 0; i < events.length; i++) {
             var evt = events[i];
             var durationTicks = Math.round(evt.durationValue * ppq);
 
-            // Handle rests: just advance time, no note on/off
             if (evt.isRest || !evt.notes || evt.notes.length === 0) {
-                // If this is the first event, push initial delta
-                if (i === 0) {
-                    trackData.push(0x00);
-                    // Use a silent note-on/off pair to create the rest duration
+                // Rest: insert silence by adding delta to next note
+                if (lastNoteOff) {
+                    // Handled by the note-off delta of previous note
+                } else {
+                    // If first event is a rest, push a delta
+                    // This is handled by accumulating rest durations below
                 }
-                // The delta time for the next event will account for the rest
-                // We track accumulated rest ticks
                 continue;
             }
 
-            // Note On for all notes in chord (delta 0 for chord notes)
-            for (var n = 0; n < evt.notes.length; n++) {
-                var note = evt.notes[n];
-                var midiNote = note.midiNote;
-                if (midiNote < 0 || midiNote > 127) continue;
-
-                if (n === 0 && i === 0) {
-                    trackData.push(0x00); // delta 0 for first note
-                } else if (n === 0) {
-                    // Calculate accumulated rest time from previous rests
-                    var restTicks = 0;
-                    for (var r = i - 1; r >= 0; r--) {
-                        if (events[r].isRest || !events[r].notes || events[r].notes.length === 0) {
-                            restTicks += Math.round(events[r].durationValue * ppq);
-                        } else {
-                            break;
-                        }
-                    }
-                    if (restTicks > 0) {
-                        // This note-on already has delta from previous note-off
-                        // The rest time was not accounted for, so we don't add extra here
-                        // (it's handled by the note-off delta of the previous played note)
-                    }
-                    // Delta 0 for first note in a new chord after note-off
-                } else {
-                    trackData.push(0x00); // chord: delta 0
-                }
-
-                trackData.push(0x90 | channel); // Note On
-                trackData.push(midiNote & 0x7F);
-                trackData.push(velocity & 0x7F);
-            }
-
-            // Calculate total duration including any following rests
-            var totalDuration = durationTicks;
-            // Look ahead for rests immediately after this note
-            for (var r = i + 1; r < events.length; r++) {
+            // Calculate total rest time before this note
+            var restBefore = 0;
+            for (var r = i - 1; r >= 0; r--) {
                 if (events[r].isRest || !events[r].notes || events[r].notes.length === 0) {
-                    totalDuration += Math.round(events[r].durationValue * ppq);
-                } else {
-                    break;
-                }
+                    restBefore += Math.round(events[r].durationValue * ppq);
+                } else { break; }
             }
 
-            // Note Off after duration (includes any following rests)
+            // Note On
             for (var n = 0; n < evt.notes.length; n++) {
                 var note = evt.notes[n];
-                var midiNote = note.midiNote;
-                if (midiNote < 0 || midiNote > 127) continue;
+                var midi = note.midiNote;
+                if (midi < 0 || midi > 127) continue;
 
                 if (n === 0) {
-                    this._pushVLQ(trackData, totalDuration);
-                } else {
-                    trackData.push(0x00); // chord: delta 0
+                    if (!lastNoteOff && i === 0) {
+                        this._pushVLQ(trackData, restBefore || 0);
+                    }
+                    // Delta 0 if coming right after note-off
                 }
+                if (n > 0) trackData.push(0x00);
 
-                trackData.push(0x80 | channel); // Note Off
-                trackData.push(midiNote & 0x7F);
-                trackData.push(0x00); // velocity 0
+                trackData.push(0x90 | channel, midi & 0x7F, velocity & 0x7F);
             }
+
+            // Note Off after duration + any following rests
+            var totalDur = durationTicks;
+            for (var r = i + 1; r < events.length; r++) {
+                if (events[r].isRest || !events[r].notes || events[r].notes.length === 0) {
+                    totalDur += Math.round(events[r].durationValue * ppq);
+                } else { break; }
+            }
+
+            for (var n = 0; n < evt.notes.length; n++) {
+                var note = evt.notes[n];
+                var midi = note.midiNote;
+                if (midi < 0 || midi > 127) continue;
+                if (n === 0) this._pushVLQ(trackData, totalDur);
+                else trackData.push(0x00);
+                trackData.push(0x80 | channel, midi & 0x7F, 0x00);
+            }
+            lastNoteOff = true;
         }
 
         // End of track
-        trackData.push(0x00);
-        trackData.push(0xFF, 0x2F, 0x00);
+        trackData.push(0x00, 0xFF, 0x2F, 0x00);
 
-        // Build complete MIDI file
+        // Build MIDI file
         var midi = [];
-
-        // Header chunk: MThd
-        midi.push(0x4D, 0x54, 0x68, 0x64); // "MThd"
-        midi.push(0x00, 0x00, 0x00, 0x06); // chunk length = 6
-        midi.push(0x00, 0x00);             // format 0
-        midi.push(0x00, 0x01);             // 1 track
-        midi.push((ppq >> 8) & 0xFF, ppq & 0xFF); // ticks per quarter
-
-        // Track chunk: MTrk
-        midi.push(0x4D, 0x54, 0x72, 0x6B); // "MTrk"
-        var trackLen = trackData.length;
-        midi.push((trackLen >> 24) & 0xFF);
-        midi.push((trackLen >> 16) & 0xFF);
-        midi.push((trackLen >> 8) & 0xFF);
-        midi.push(trackLen & 0xFF);
-
-        // Append track data
-        for (var t = 0; t < trackData.length; t++) {
-            midi.push(trackData[t]);
-        }
-
+        midi.push(0x4D, 0x54, 0x68, 0x64); // MThd
+        midi.push(0x00, 0x00, 0x00, 0x06); // length 6
+        midi.push(0x00, 0x00); // format 0
+        midi.push(0x00, 0x01); // 1 track
+        midi.push((ppq >> 8) & 0xFF, ppq & 0xFF);
+        midi.push(0x4D, 0x54, 0x72, 0x6B); // MTrk
+        var tl = trackData.length;
+        midi.push((tl >> 24) & 0xFF, (tl >> 16) & 0xFF, (tl >> 8) & 0xFF, tl & 0xFF);
+        for (var t = 0; t < trackData.length; t++) midi.push(trackData[t]);
         return new Uint8Array(midi);
     },
 
-    /**
-     * Push a variable-length quantity to an array
-     */
-    _pushVLQ: function(arr, value) {
-        if (value < 0) value = 0;
-        var bytes = [];
-        bytes.push(value & 0x7F);
-        value >>= 7;
-        while (value > 0) {
-            bytes.push((value & 0x7F) | 0x80);
-            value >>= 7;
-        }
-        // VLQ is big-endian
-        for (var i = bytes.length - 1; i >= 0; i--) {
-            arr.push(bytes[i]);
-        }
+    _pushVLQ: function(arr, v) {
+        if (v < 0) v = 0;
+        var bytes = [v & 0x7F]; v >>= 7;
+        while (v > 0) { bytes.push((v & 0x7F) | 0x80); v >>= 7; }
+        for (var i = bytes.length - 1; i >= 0; i--) arr.push(bytes[i]);
     },
 
-    /**
-     * Create a downloadable Blob URL for the MIDI data
-     */
-    toBlob: function(midiData) {
-        return new Blob([midiData], { type: 'audio/midi' });
-    },
-
-    toBlobURL: function(midiData) {
-        return URL.createObjectURL(this.toBlob(midiData));
-    }
+    toBlob: function(d) { return new Blob([d], { type: 'audio/midi' }); },
+    toBlobURL: function(d) { return URL.createObjectURL(this.toBlob(d)); }
 };
 
 // =====================================================
-// MAIN ORCHESTRATOR (async steps for UI responsiveness)
+// MAIN ORCHESTRATOR (async steps)
 // =====================================================
 PianoModeOMR.Engine = {
+    _yield: function() { return new Promise(function(r) { setTimeout(r, 20); }); },
 
-    /**
-     * Yield control to the browser so the UI can repaint.
-     * Returns a promise that resolves after a short delay.
-     */
-    _yield: function() {
-        return new Promise(function(resolve) {
-            setTimeout(resolve, 20);
-        });
-    },
-
-    /**
-     * Process an image or PDF file end-to-end.
-     * Each major step yields to the browser so progress updates render.
-     *
-     * @param {File} file - User-uploaded file
-     * @param {Function} onProgress - callback(step, message, percent)
-     * @returns {Promise<Object>} { musicxml, midiBlob, midiUrl, events, staves, noteCount }
-     */
     process: function(file, onProgress) {
         onProgress = onProgress || function() {};
         var self = this;
         var isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-
         onProgress(1, 'Loading file...', 5);
 
         var loadPromise = isPDF
@@ -1540,119 +1190,77 @@ PianoModeOMR.Engine = {
         return loadPromise.then(function(loaded) {
             onProgress(1, 'Image loaded (' + loaded.width + 'x' + loaded.height + ')', 15);
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Grayscale
             onProgress(2, 'Converting to grayscale...', 20);
-            var gray = PianoModeOMR.ImageProcessor.toGrayscale(loaded.imageData);
-            loaded._gray = gray;
+            loaded._gray = PianoModeOMR.ImageProcessor.toGrayscale(loaded.imageData);
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Binarize
             onProgress(2, 'Binarizing image...', 30);
-            var gray = loaded._gray;
-            var threshold = PianoModeOMR.ImageProcessor.otsuThreshold(gray);
-            var binary = PianoModeOMR.ImageProcessor.binarize(gray, threshold);
-            loaded._binary = binary;
+            var t = PianoModeOMR.ImageProcessor.otsuThreshold(loaded._gray);
+            loaded._binary = PianoModeOMR.ImageProcessor.binarize(loaded._gray, t);
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Detect staff lines
             onProgress(2, 'Detecting staff lines...', 40);
             var staves = PianoModeOMR.StaffDetector.detect(loaded._binary, loaded.width, loaded.height);
-
-            if (staves.length === 0) {
-                throw new Error('No staff lines detected. Please use a clear, high-resolution image of printed sheet music.');
-            }
-
-            onProgress(2, staves.length + ' staff(s) detected', 45);
+            if (staves.length === 0) throw new Error('No staff lines detected. Use a clear, high-resolution image.');
+            // Group staves into systems
+            staves = PianoModeOMR.StaffDetector.groupIntoSystems(staves);
             staves = PianoModeOMR.StaffDetector.detectClefs(loaded._binary, loaded.width, staves);
+            var systemCount = 0;
+            for (var i = 0; i < staves.length; i++) {
+                if ((staves[i].systemIndex || 0) > systemCount) systemCount = staves[i].systemIndex;
+            }
+            onProgress(2, staves.length + ' staves in ' + (systemCount + 1) + ' system(s)', 45);
             loaded._staves = staves;
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Remove staff lines
             onProgress(2, 'Removing staff lines...', 50);
-            var cleaned = PianoModeOMR.StaffDetector.removeStaffLines(
-                loaded._binary, loaded.width, loaded.height, loaded._staves
-            );
-            loaded._cleaned = cleaned;
+            loaded._cleaned = PianoModeOMR.StaffDetector.removeStaffLines(loaded._binary, loaded.width, loaded.height, loaded._staves);
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Detect notes
-            onProgress(3, 'Detecting notes, rests & musical symbols...', 60);
+            onProgress(3, 'Detecting notes...', 60);
             return self._yield().then(function() {
-                var result = PianoModeOMR.NoteDetector.detect(
-                    loaded._cleaned, loaded._binary, loaded.width, loaded.height, loaded._staves
-                );
-                loaded._result = result;
+                loaded._result = PianoModeOMR.NoteDetector.detect(loaded._cleaned, loaded._binary, loaded.width, loaded.height, loaded._staves);
                 return loaded;
             });
-
         }).then(function(loaded) {
             var result = loaded._result;
-            onProgress(3, 'Analyzing detection results...', 75);
-
-            if (result.events.length === 0) {
-                throw new Error('No notes detected. The image may be too low quality or not contain standard music notation.');
-            }
-
-            var noteCount = 0;
-            var restCount = 0;
+            onProgress(3, 'Analyzing...', 75);
+            if (result.events.length === 0) throw new Error('No notes detected. The image may be too low quality.');
+            var nc = 0, rc = 0;
             for (var e = 0; e < result.events.length; e++) {
-                if (result.events[e].isRest) { restCount++; }
-                else { noteCount += result.events[e].notes.length; }
+                if (result.events[e].isRest) rc++; else nc += result.events[e].notes.length;
             }
-            var barLineCount = result.barLines ? result.barLines.length : 0;
-            onProgress(3, noteCount + ' notes, ' + restCount + ' rests, ' + barLineCount + ' bar lines', 80);
-
-            loaded._noteCount = noteCount;
-            loaded._restCount = restCount;
+            onProgress(3, nc + ' notes, ' + rc + ' rests', 80);
+            loaded._noteCount = nc;
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Generate MusicXML
             onProgress(3, 'Generating MusicXML...', 85);
             var title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ');
-            var musicxml = PianoModeOMR.MusicXMLWriter.generate(
-                loaded._result.events, loaded._staves, { title: title, keySignature: loaded._result.keySignature }
-            );
-            loaded._musicxml = musicxml;
-            loaded._title = title;
+            var musicxml = PianoModeOMR.MusicXMLWriter.generate(loaded._result.events, loaded._staves, {
+                title: title,
+                keySignature: loaded._result.keySignature,
+                timeSignature: loaded._result.timeSignature
+            });
+            loaded._musicxml = musicxml; loaded._title = title;
             return self._yield().then(function() { return loaded; });
-
         }).then(function(loaded) {
-            // Generate MIDI
             onProgress(3, 'Generating MIDI...', 92);
             var midiData = PianoModeOMR.MIDIWriter.generate(loaded._result.events, {});
             var midiBlob = PianoModeOMR.MIDIWriter.toBlob(midiData);
             var midiUrl = URL.createObjectURL(midiBlob);
-
-            // MusicXML blob
             var xmlBlob = new Blob([loaded._musicxml], { type: 'application/xml' });
             var xmlUrl = URL.createObjectURL(xmlBlob);
-
-            onProgress(4, 'Done! ' + loaded._noteCount + ' notes in ' + loaded._staves.length + ' staff(s)', 100);
-
+            onProgress(4, 'Done! ' + loaded._noteCount + ' notes in ' + loaded._staves.length + ' staves', 100);
             return {
-                musicxml: loaded._musicxml,
-                musicxmlBlob: xmlBlob,
-                musicxmlUrl: xmlUrl,
-                midiData: midiData,
-                midiBlob: midiBlob,
-                midiUrl: midiUrl,
-                events: loaded._result.events,
-                noteHeads: loaded._result.noteHeads,
-                staves: loaded._staves,
-                noteCount: loaded._noteCount,
-                title: loaded._title
+                musicxml: loaded._musicxml, musicxmlBlob: xmlBlob, musicxmlUrl: xmlUrl,
+                midiData: midiData, midiBlob: midiBlob, midiUrl: midiUrl,
+                events: loaded._result.events, noteHeads: loaded._result.noteHeads,
+                staves: loaded._staves, noteCount: loaded._noteCount, title: loaded._title
             };
         });
     }
 };
 
-
-console.log('[PianoModeOMR] Engine v3.0 loaded — all modules ready');
+console.log('[PianoModeOMR] Engine v3.1 loaded — all modules ready');
 })();
