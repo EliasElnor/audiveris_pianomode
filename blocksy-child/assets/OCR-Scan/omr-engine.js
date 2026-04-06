@@ -1,27 +1,28 @@
 /**
- * PianoMode OMR Engine v5.0 - Complete Client-Side Music Recognition
+ * PianoMode OMR Engine v6.0 - Complete Client-Side Music Recognition
  * Converts sheet music images/PDFs into MusicXML + MIDI entirely in the browser.
  *
  * Modules: ImageProcessor, StaffDetector, NoteDetector, MusicXMLWriter, MIDIWriter, Engine
  * No server dependencies. No Java. No Audiveris.
  *
- * Key v5.0 improvements over v4.0:
+ * Key v6.0 improvements over v5.0:
+ *   - FIXED: Distance transform was inverted (foreground=INF instead of 0)
+ *   - FIXED: Position-based scanning replaces sliding window (Audiveris NoteHeadsBuilder)
+ *   - FIXED: Pitch assignment was off by 2 diatonic steps (wrong array offset)
+ *   - FIXED: Pitch arrays now cover full range posIndex -6 to +14 (21 entries)
+ *   - NEW: Separate filled + void (half-note) templates with Audiveris-style weighted scoring
+ *   - NEW: foreWeight=4, backWeight=1, holeWeight=0.5 template matching
  *   - Audiveris-style barline detection via vertical projection + derivative peaks
  *   - Measure-based note organization (barline-bounded)
- *   - Proper time/voice assignment within measures
- *   - Beam group detection for duration classification
- *   - Key/time signature detection (Audiveris KeyBuilder approach)
  *   - Grand staff handling with proper MusicXML staves/voices
- *   - Fixed MusicXML timing (backup/forward, divisions=16)
- *   - Fixed MIDI rest handling and delta times
  *
  * @package PianoMode
- * @version 5.0.0
+ * @version 6.0.0
  */
 (function() {
 'use strict';
 
-var VERSION = 'v5.0';
+var VERSION = 'v6.0';
 var OMR = window.PianoModeOMR = {};
 
 /* =========================================================================
@@ -460,12 +461,14 @@ OMR.StaffDetector = {
 OMR.NoteDetector = {
 
     computeDistanceTransform: function(bin, width, height) {
+        // Audiveris convention: foreground (ink=1) → 0, background → distance to nearest ink
+        // This allows template matching: low DT = on ink (good match), high DT = far from ink (bad)
         var dt = new Uint16Array(width * height);
         var INF = 30000;
         var x, y, idx;
 
         for (idx = 0; idx < width * height; idx++) {
-            dt[idx] = bin[idx] === 1 ? INF : 0;
+            dt[idx] = bin[idx] === 1 ? 0 : INF;
         }
 
         for (y = 1; y < height - 1; y++) {
@@ -505,14 +508,16 @@ OMR.NoteDetector = {
         return dt;
     },
 
-    _makeNoteTemplate: function(sp) {
-        var rx = Math.round(sp * 0.65);
-        var ry = Math.round(sp * 0.42);
+    _makeFilledTemplate: function(sp) {
+        // Filled notehead: solid ellipse, ~20deg tilt (Audiveris style)
+        var rx = Math.round(sp * 0.62);
+        var ry = Math.round(sp * 0.40);
         var tw = rx * 2 + 1;
         var th = ry * 2 + 1;
-        var tpl = new Uint8Array(tw * th);
+        var fore = []; // foreground pixel offsets (inside ellipse)
+        var back = []; // background pixel offsets (ring around ellipse)
         var cx = rx, cy = ry;
-        var angle = -0.35;
+        var angle = -0.35; // ~20 degrees tilt
         var cosA = Math.cos(angle);
         var sinA = Math.sin(angle);
 
@@ -523,72 +528,191 @@ OMR.NoteDetector = {
                 var rdx = dx * cosA + dy * sinA;
                 var rdy = -dx * sinA + dy * cosA;
                 var val = (rdx * rdx) / (rx * rx) + (rdy * rdy) / (ry * ry);
-                tpl[ty * tw + tx] = val <= 1.0 ? 1 : 0;
+                if (val <= 1.0) {
+                    fore.push({ dx: tx - cx, dy: ty - cy });
+                } else if (val <= 1.8) {
+                    back.push({ dx: tx - cx, dy: ty - cy });
+                }
             }
         }
-        return { data: tpl, width: tw, height: th };
+        return { fore: fore, back: back, width: tw, height: th, rx: rx, ry: ry };
+    },
+
+    _makeVoidTemplate: function(sp) {
+        // Void (half note) notehead: hollow ellipse with thicker border
+        var rx = Math.round(sp * 0.65);
+        var ry = Math.round(sp * 0.42);
+        var tw = rx * 2 + 1;
+        var th = ry * 2 + 1;
+        var fore = [];
+        var hole = []; // interior pixels that should be empty
+        var back = [];
+        var cx = rx, cy = ry;
+        var angle = -0.35;
+        var cosA = Math.cos(angle);
+        var sinA = Math.sin(angle);
+        var innerScale = 0.55; // inner boundary for the hollow
+
+        for (var ty = 0; ty < th; ty++) {
+            for (var tx = 0; tx < tw; tx++) {
+                var dx = tx - cx;
+                var dy = ty - cy;
+                var rdx = dx * cosA + dy * sinA;
+                var rdy = -dx * sinA + dy * cosA;
+                var val = (rdx * rdx) / (rx * rx) + (rdy * rdy) / (ry * ry);
+                if (val <= innerScale) {
+                    hole.push({ dx: tx - cx, dy: ty - cy });
+                } else if (val <= 1.0) {
+                    fore.push({ dx: tx - cx, dy: ty - cy });
+                } else if (val <= 1.8) {
+                    back.push({ dx: tx - cx, dy: ty - cy });
+                }
+            }
+        }
+        return { fore: fore, hole: hole, back: back, width: tw, height: th, rx: rx, ry: ry };
+    },
+
+    _scoreTemplate: function(dt, bin, width, height, cx, cy, tpl, isVoid) {
+        // Audiveris-style weighted scoring:
+        //   foreWeight=4 (template ink pixels should be on ink → low DT)
+        //   backWeight=1 (template background pixels should be off ink → high DT)
+        //   holeWeight=0.5 (for void notes: interior should be empty → high DT)
+        var FORE_W = 4.0;
+        var BACK_W = 1.0;
+        var HOLE_W = 0.5;
+        var totalWeight = 0;
+        var totalScore = 0;
+        var i, px, py, idx, distVal, simil;
+
+        // Foreground pixels: want LOW distance (on ink)
+        for (i = 0; i < tpl.fore.length; i++) {
+            px = cx + tpl.fore[i].dx;
+            py = cy + tpl.fore[i].dy;
+            if (px < 0 || px >= width || py < 0 || py >= height) continue;
+            idx = py * width + px;
+            distVal = dt[idx] / 3.0;
+            simil = 1.0 / (1.0 + distVal * distVal);
+            totalScore += FORE_W * simil;
+            totalWeight += FORE_W;
+        }
+
+        // Background pixels: want HIGH distance (off ink)
+        for (i = 0; i < tpl.back.length; i++) {
+            px = cx + tpl.back[i].dx;
+            py = cy + tpl.back[i].dy;
+            if (px < 0 || px >= width || py < 0 || py >= height) continue;
+            idx = py * width + px;
+            distVal = dt[idx] / 3.0;
+            simil = distVal / (1.0 + distVal); // high when far from ink
+            totalScore += BACK_W * simil;
+            totalWeight += BACK_W;
+        }
+
+        // Hole pixels (void notes only): interior should be empty
+        if (isVoid && tpl.hole) {
+            for (i = 0; i < tpl.hole.length; i++) {
+                px = cx + tpl.hole[i].dx;
+                py = cy + tpl.hole[i].dy;
+                if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                idx = py * width + px;
+                distVal = dt[idx] / 3.0;
+                simil = distVal / (1.0 + distVal);
+                totalScore += HOLE_W * simil;
+                totalWeight += HOLE_W;
+            }
+        }
+
+        return totalWeight > 0 ? totalScore / totalWeight : 0;
     },
 
     scanForNoteheads: function(bin, dt, width, height, staves, staffSpacing, preambleWidths) {
+        // Audiveris NoteHeadsBuilder approach: scan at each valid pitch position
+        // instead of sliding over every pixel. This drastically reduces false positives.
         var sp = staffSpacing;
-        var tpl = this._makeNoteTemplate(sp);
-        var tw = tpl.width;
-        var th = tpl.height;
-        var tplData = tpl.data;
-        var tplPixCount = 0;
-        var ti;
-        for (ti = 0; ti < tplData.length; ti++) {
-            if (tplData[ti] === 1) tplPixCount++;
-        }
-
+        var halfSp = sp / 2.0;
+        var filledTpl = this._makeFilledTemplate(sp);
+        var voidTpl = this._makeVoidTemplate(sp);
         var noteheads = [];
-        var MATCH_THRESHOLD = 0.35;
+        var FILLED_THRESHOLD = 0.45;
+        var VOID_THRESHOLD = 0.40;
+        var STEP_X = Math.max(1, Math.round(sp * 0.15)); // horizontal scan step
 
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
             var preambleWidth = (preambleWidths && preambleWidths[s]) ? preambleWidths[s] : Math.round(sp * 5);
             var scanLeft = staff.left + preambleWidth;
             var scanRight = staff.right - Math.round(sp * 0.5);
-            var scanTop = staff.lines[0] - Math.round(sp * 4);
-            var scanBottom = staff.lines[4] + Math.round(sp * 4);
-            if (scanTop < 0) scanTop = 0;
-            if (scanBottom >= height) scanBottom = height - 1;
 
-            for (var sy = scanTop; sy <= scanBottom - th; sy++) {
-                for (var sx = scanLeft; sx <= scanRight - tw; sx += 1) {
-                    var cenIdx = (sy + Math.floor(th / 2)) * width + (sx + Math.floor(tw / 2));
-                    if (bin[cenIdx] === 0) continue;
+            // Scan each pitch position: -6 (3 ledger lines above) to +14 (3 ledger lines below)
+            for (var posIndex = -6; posIndex <= 14; posIndex++) {
+                var targetY = Math.round(staff.lines[0] + posIndex * halfSp);
+                if (targetY < 0 || targetY >= height) continue;
 
-                    var matchSum = 0;
-                    var totalWeight = 0;
-                    for (var ty = 0; ty < th; ty++) {
-                        for (var tx = 0; tx < tw; tx++) {
-                            if (tplData[ty * tw + tx] === 1) {
-                                var imgIdx = (sy + ty) * width + (sx + tx);
-                                var distVal = dt[imgIdx];
-                                var norm = distVal / 3.0;
-                                var simil = 1.0 / (1.0 + norm * norm * 0.5);
-                                matchSum += simil;
-                                totalWeight++;
+                // For ledger line positions, verify there's actually ink nearby
+                var isLedgerPos = posIndex < 0 || posIndex > 8;
+                if (isLedgerPos && Math.abs(posIndex) % 2 === 0) {
+                    // On a ledger line — check there IS a horizontal ink line here
+                    var ledgerInk = 0;
+                    var ledgerSamples = 0;
+                    for (var lx = scanLeft; lx <= scanRight; lx += Math.round(sp * 2)) {
+                        ledgerSamples++;
+                        for (var ldy = -2; ldy <= 2; ldy++) {
+                            var ly = targetY + ldy;
+                            if (ly >= 0 && ly < height && bin[ly * width + lx] === 1) {
+                                ledgerInk++;
+                                break;
                             }
                         }
                     }
+                    // Don't require ledger lines everywhere — just allow the position
+                }
 
-                    var score = totalWeight > 0 ? matchSum / totalWeight : 0;
-                    if (score < MATCH_THRESHOLD) continue;
+                // Horizontal scan at this pitch position
+                for (var sx = scanLeft; sx <= scanRight; sx += STEP_X) {
+                    // Quick pre-check: is there enough ink in the notehead region?
+                    var quickInk = 0;
+                    var qrx = Math.round(sp * 0.5);
+                    var qry = Math.round(sp * 0.35);
+                    var qTotal = 0;
+                    for (var qy = -qry; qy <= qry; qy += 2) {
+                        for (var qx = -qrx; qx <= qrx; qx += 2) {
+                            var gx = sx + qx, gy = targetY + qy;
+                            if (gx >= 0 && gx < width && gy >= 0 && gy < height) {
+                                qTotal++;
+                                if (bin[gy * width + gx] === 1) quickInk++;
+                            }
+                        }
+                    }
+                    // Need at least 20% ink in region for a notehead candidate
+                    if (qTotal > 0 && quickInk / qTotal < 0.20) continue;
 
-                    var headCx = sx + Math.floor(tw / 2);
-                    var headCy = sy + Math.floor(th / 2);
+                    // Score with filled template
+                    var filledScore = this._scoreTemplate(dt, bin, width, height, sx, targetY, filledTpl, false);
+                    // Score with void template
+                    var voidScore = this._scoreTemplate(dt, bin, width, height, sx, targetY, voidTpl, true);
 
+                    var bestScore = 0;
+                    var isFilled = true;
+                    if (filledScore >= FILLED_THRESHOLD && filledScore >= voidScore) {
+                        bestScore = filledScore;
+                        isFilled = true;
+                    } else if (voidScore >= VOID_THRESHOLD) {
+                        bestScore = voidScore;
+                        isFilled = false;
+                    }
+
+                    if (bestScore < Math.min(FILLED_THRESHOLD, VOID_THRESHOLD)) continue;
+
+                    // Determine fill ratio for duration classification
                     var innerFilled = 0, innerTotal = 0;
-                    var innerRx = Math.round(sp * 0.35);
-                    var innerRy = Math.round(sp * 0.22);
+                    var innerRx = Math.round(sp * 0.30);
+                    var innerRy = Math.round(sp * 0.20);
                     for (var iy = -innerRy; iy <= innerRy; iy++) {
                         for (var ix = -innerRx; ix <= innerRx; ix++) {
                             var er = (ix * ix) / (innerRx * innerRx) + (iy * iy) / (innerRy * innerRy);
                             if (er <= 0.7) {
                                 innerTotal++;
-                                var pi = (headCy + iy) * width + (headCx + ix);
+                                var pi = (targetY + iy) * width + (sx + ix);
                                 if (pi >= 0 && pi < width * height && bin[pi] === 1) {
                                     innerFilled++;
                                 }
@@ -596,35 +720,43 @@ OMR.NoteDetector = {
                         }
                     }
                     var fillRatio = innerTotal > 0 ? innerFilled / innerTotal : 0;
-                    var isFilled = fillRatio > 0.55;
+                    isFilled = fillRatio > 0.50;
 
+                    var hrx = filledTpl.rx;
+                    var hry = filledTpl.ry;
                     noteheads.push({
-                        centerX: headCx,
-                        centerY: headCy,
-                        minX: sx,
-                        maxX: sx + tw - 1,
-                        minY: sy,
-                        maxY: sy + th - 1,
-                        width: tw,
-                        height: th,
+                        centerX: sx,
+                        centerY: targetY,
+                        minX: sx - hrx,
+                        maxX: sx + hrx,
+                        minY: targetY - hry,
+                        maxY: targetY + hry,
+                        width: hrx * 2 + 1,
+                        height: hry * 2 + 1,
                         isFilled: isFilled,
                         fillRatio: fillRatio,
                         staffIndex: s,
-                        matchScore: score
+                        matchScore: bestScore,
+                        posIndex: posIndex
                     });
 
-                    sx += Math.round(tw * 0.6);
+                    // Skip ahead past this notehead
+                    sx += Math.round(sp * 0.5);
                 }
             }
         }
 
+        // Non-maximum suppression: keep highest scoring, suppress overlapping
         noteheads.sort(function(a, b) { return b.matchScore - a.matchScore; });
         var keep = [];
         var suppressed = new Array(noteheads.length);
         for (var ni = 0; ni < suppressed.length; ni++) suppressed[ni] = false;
 
-        var minDistSq = Math.round(sp * 0.6);
-        minDistSq = minDistSq * minDistSq;
+        // Min distance between noteheads: ~60% of staff spacing
+        var minDist = Math.round(sp * 0.55);
+        var minDistSq = minDist * minDist;
+        // But allow vertically stacked notes (chords) — use tighter x threshold
+        var minChordX = Math.round(sp * 0.4);
 
         for (var pi2 = 0; pi2 < noteheads.length; pi2++) {
             if (suppressed[pi2]) continue;
@@ -633,7 +765,14 @@ OMR.NoteDetector = {
                 if (suppressed[qi]) continue;
                 var dxx = noteheads[pi2].centerX - noteheads[qi].centerX;
                 var dyy = noteheads[pi2].centerY - noteheads[qi].centerY;
-                if (dxx * dxx + dyy * dyy < minDistSq) {
+                var distSq = dxx * dxx + dyy * dyy;
+                // Suppress if too close, but allow vertical stacking for chords
+                var absX = Math.abs(dxx);
+                var absY = Math.abs(dyy);
+                if (absX < minChordX && absY < Math.round(sp * 0.4)) {
+                    // Same position approximately — suppress lower score
+                    suppressed[qi] = true;
+                } else if (distSq < minDistSq) {
                     suppressed[qi] = true;
                 }
             }
@@ -873,22 +1012,34 @@ OMR.NoteDetector = {
     },
 
     assignPitch: function(noteheads, staves) {
-        var trebleDiatonic = [77, 76, 74, 72, 71, 69, 67, 65, 64, 62, 60, 59, 57, 55, 53, 52, 50, 48, 47, 45];
-        var bassDiatonic = [57, 55, 53, 52, 50, 48, 47, 45, 43, 41, 40, 38, 36, 35, 33, 31, 29, 28, 26, 24];
-
+        // Correct pitch mapping for posIndex -6 to +14 (21 entries)
+        // posIndex 0 = top staff line, each +1 = one half-space down = one diatonic step down
+        // Treble clef: top line = F5, bottom line = E4
+        //   Above: -1=G5, -2=A5, -3=B5, -4=C6, -5=D6, -6=E6
+        //   Below: 9=D4, 10=C4, 11=B3, 12=A3, 13=G3, 14=F3
+        var trebleDiatonic = [
+            88, 86, 84, 83, 81, 79,   // pos -6 to -1: E6, D6, C6, B5, A5, G5
+            77, 76, 74, 72, 71, 69, 67, 65, 64, // pos 0-8: F5, E5, D5, C5, B4, A4, G4, F4, E4
+            62, 60, 59, 57, 55, 53    // pos 9-14: D4, C4, B3, A3, G3, F3
+        ];
         var trebleSteps = [
-            {step:'F',oct:5},{step:'E',oct:5},{step:'D',oct:5},{step:'C',oct:5},
-            {step:'B',oct:4},{step:'A',oct:4},{step:'G',oct:4},{step:'F',oct:4},
-            {step:'E',oct:4},{step:'D',oct:4},{step:'C',oct:4},{step:'B',oct:3},
-            {step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3},{step:'E',oct:3},
-            {step:'D',oct:3},{step:'C',oct:3},{step:'B',oct:2},{step:'A',oct:2}
+            {step:'E',oct:6},{step:'D',oct:6},{step:'C',oct:6},{step:'B',oct:5},{step:'A',oct:5},{step:'G',oct:5},
+            {step:'F',oct:5},{step:'E',oct:5},{step:'D',oct:5},{step:'C',oct:5},{step:'B',oct:4},{step:'A',oct:4},{step:'G',oct:4},{step:'F',oct:4},{step:'E',oct:4},
+            {step:'D',oct:4},{step:'C',oct:4},{step:'B',oct:3},{step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3}
+        ];
+
+        // Bass clef: top line = A3, bottom line = G2
+        //   Above: -1=B3, -2=C4, -3=D4, -4=E4, -5=F4, -6=G4
+        //   Below: 9=F2, 10=E2, 11=D2, 12=C2, 13=B1, 14=A1
+        var bassDiatonic = [
+            67, 65, 64, 62, 60, 59,   // pos -6 to -1: G4, F4, E4, D4, C4, B3
+            57, 55, 53, 52, 50, 48, 47, 45, 43, // pos 0-8: A3, G3, F3, E3, D3, C3, B2, A2, G2
+            41, 40, 38, 36, 35, 33    // pos 9-14: F2, E2, D2, C2, B1, A1
         ];
         var bassSteps = [
-            {step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3},{step:'E',oct:3},
-            {step:'D',oct:3},{step:'C',oct:3},{step:'B',oct:2},{step:'A',oct:2},
-            {step:'G',oct:2},{step:'F',oct:2},{step:'E',oct:2},{step:'D',oct:2},
-            {step:'C',oct:2},{step:'B',oct:1},{step:'A',oct:1},{step:'G',oct:1},
-            {step:'F',oct:1},{step:'E',oct:1},{step:'D',oct:1},{step:'C',oct:1}
+            {step:'G',oct:4},{step:'F',oct:4},{step:'E',oct:4},{step:'D',oct:4},{step:'C',oct:4},{step:'B',oct:3},
+            {step:'A',oct:3},{step:'G',oct:3},{step:'F',oct:3},{step:'E',oct:3},{step:'D',oct:3},{step:'C',oct:3},{step:'B',oct:2},{step:'A',oct:2},{step:'G',oct:2},
+            {step:'F',oct:2},{step:'E',oct:2},{step:'D',oct:2},{step:'C',oct:2},{step:'B',oct:1},{step:'A',oct:1}
         ];
 
         for (var n = 0; n < noteheads.length; n++) {
@@ -897,8 +1048,14 @@ OMR.NoteDetector = {
             if (!staff) continue;
 
             var halfSpacing = staff.spacing / 2;
-            var posFromTop = (head.centerY - staff.lines[0]) / halfSpacing;
-            var posIndex = Math.round(posFromTop);
+            // If posIndex was already set by position-based scanning, use it
+            var posIndex;
+            if (typeof head.posIndex === 'number') {
+                posIndex = head.posIndex;
+            } else {
+                var posFromTop = (head.centerY - staff.lines[0]) / halfSpacing;
+                posIndex = Math.round(posFromTop);
+            }
 
             if (posIndex < -6) posIndex = -6;
             if (posIndex > 14) posIndex = 14;
@@ -907,7 +1064,8 @@ OMR.NoteDetector = {
             var diatonicArr = staff.clef === 'bass' ? bassDiatonic : trebleDiatonic;
             var stepsArr = staff.clef === 'bass' ? bassSteps : trebleSteps;
 
-            var lookupIdx = posIndex + 2;
+            // Direct mapping: posIndex + 6 = array index (posIndex -6 → idx 0, posIndex 0 → idx 6)
+            var lookupIdx = posIndex + 6;
             if (lookupIdx < 0) lookupIdx = 0;
             if (lookupIdx >= diatonicArr.length) lookupIdx = diatonicArr.length - 1;
 

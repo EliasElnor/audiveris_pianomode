@@ -1,10 +1,14 @@
 # CLAUDE.md — PianoMode OCR Scanner Project
 
-## Current State (2026-04-05)
+## Current State (2026-04-06)
 Branch: `claude/integrate-audiveris-ocr-0XMux`
 
 ### What's Done
-- OMR Engine v5.0 with Audiveris-inspired algorithms (1907 lines)
+- OMR Engine v6.0 with critical accuracy fixes
+- FIXED: Distance transform was inverted (broke all template matching)
+- FIXED: Position-based scanning replaces sliding window (Audiveris NoteHeadsBuilder)
+- FIXED: Pitch assignment offset corrected (+6 instead of +2, 21-entry arrays)
+- NEW: Separate filled + void templates with weighted scoring (fore=4, back=1, hole=0.5)
 - Projection-based barline detection with adaptive thresholds
 - Measure-based note organization using detected barlines
 - Chamfer distance transform + template matching for noteheads
@@ -15,7 +19,7 @@ Branch: `claude/integrate-audiveris-ocr-0XMux`
 - Piano + preview canvas highlighting during AlphaTab playback
 - Real progress bar with percentage (gold gradient)
 - CSS, API, admin, page template all functional
-- Cache buster: `ver=5.0.0`
+- Cache buster: `ver=6.0.0`
 
 ### File Locations
 ```
