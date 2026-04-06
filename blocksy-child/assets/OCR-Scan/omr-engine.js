@@ -341,7 +341,7 @@ OMR.StaffDetector = {
         globalSpacing = globalSpacing / staves.length;
 
         var systems = this.groupIntoSystems(staves, globalSpacing);
-        this.detectClefs(bin, width, height, staves);
+        this.detectClefs(bin, width, height, staves, systems);
         for (i = 0; i < staves.length; i++) staves[i].staffIndex = i;
 
         console.log('[StaffDetector] Found ' + staves.length + ' staves in ' + systems.length + ' systems, spacing=' + Math.round(globalSpacing));
@@ -415,40 +415,53 @@ OMR.StaffDetector = {
         return cleaned;
     },
 
-    detectClefs: function(bin, width, height, staves) {
+    detectClefs: function(bin, width, height, staves, systems) {
+        // First: use heuristic detection for each staff individually
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
             var sp = staff.spacing;
             var regionLeft = staff.left;
-            var regionRight = Math.min(staff.left + Math.round(sp * 3), staff.right);
-            var regionTop = staff.lines[0] - Math.round(sp * 1.5);
-            var regionBottom = staff.lines[4] + Math.round(sp * 1.5);
+            var regionRight = Math.min(staff.left + Math.round(sp * 3.5), staff.right);
+            var regionTop = staff.lines[0] - Math.round(sp * 2.5);
+            var regionBottom = staff.lines[4] + Math.round(sp * 2.5);
             if (regionTop < 0) regionTop = 0;
             if (regionBottom >= height) regionBottom = height - 1;
 
-            var centerY = Math.round((staff.lines[0] + staff.lines[4]) / 2);
-            var aboveCount = 0, belowCount = 0;
-            for (var y = regionTop; y <= regionBottom; y++) {
-                for (var x = regionLeft; x < regionRight; x++) {
-                    if (bin[y * width + x] === 1) {
-                        if (y < centerY) aboveCount++;
-                        else belowCount++;
-                    }
-                }
-            }
-
-            var ratio = (aboveCount + 1) / (belowCount + 1);
+            // Treble clef extends significantly above the staff (the swirl goes up ~2sp above top line)
+            // Bass clef has dots near lines 3-4, doesn't extend far above
             var extentAbove = 0;
-            for (y = regionTop; y < staff.lines[0]; y++) {
-                for (x = regionLeft; x < regionRight; x++) {
-                    if (bin[y * width + x] === 1) { extentAbove++; break; }
+            for (var y = regionTop; y < staff.lines[0] - Math.round(sp * 0.5); y++) {
+                var rowHasInk = false;
+                for (var x = regionLeft; x < regionRight; x++) {
+                    if (bin[y * width + x] === 1) { rowHasInk = true; break; }
                 }
+                if (rowHasInk) extentAbove++;
             }
 
-            if (extentAbove > sp * 1.2 && ratio > 0.7) {
-                staff.clef = 'treble';
-            } else {
-                staff.clef = 'bass';
+            var extentBelow = 0;
+            for (y = staff.lines[4] + Math.round(sp * 0.5); y <= regionBottom; y++) {
+                var rowHasInk2 = false;
+                for (x = regionLeft; x < regionRight; x++) {
+                    if (bin[y * width + x] === 1) { rowHasInk2 = true; break; }
+                }
+                if (rowHasInk2) extentBelow++;
+            }
+
+            // Treble clef: tall swirl extends ~2sp above AND below staff
+            // Bass clef: compact, sits mostly within/near the staff
+            var isLikelyTreble = extentAbove > sp * 1.0;
+            staff.clef = isLikelyTreble ? 'treble' : 'bass';
+        }
+
+        // Second: for grand staff systems, FORCE treble/bass assignment
+        // In piano music, the top staff is ALWAYS treble and bottom is ALWAYS bass
+        if (systems) {
+            for (var si = 0; si < systems.length; si++) {
+                var sys = systems[si];
+                if (sys.isGrandStaff && sys.staves.length >= 2) {
+                    sys.staves[0].clef = 'treble';
+                    sys.staves[1].clef = 'bass';
+                }
             }
         }
     }
@@ -573,13 +586,13 @@ OMR.NoteDetector = {
     },
 
     _scoreTemplate: function(dt, bin, width, height, cx, cy, tpl, isVoid) {
-        // Audiveris-style weighted scoring:
-        //   foreWeight=4 (template ink pixels should be on ink → low DT)
+        // Audiveris Template.java scoring weights:
+        //   foreWeight=6 (template ink pixels should be on ink → low DT)
         //   backWeight=1 (template background pixels should be off ink → high DT)
-        //   holeWeight=0.5 (for void notes: interior should be empty → high DT)
-        var FORE_W = 4.0;
+        //   holeWeight=4 (for void notes: interior should be empty → high DT)
+        var FORE_W = 6.0;
         var BACK_W = 1.0;
-        var HOLE_W = 0.5;
+        var HOLE_W = 4.0;
         var totalWeight = 0;
         var totalScore = 0;
         var i, px, py, idx, distVal, simil;
@@ -625,17 +638,29 @@ OMR.NoteDetector = {
         return totalWeight > 0 ? totalScore / totalWeight : 0;
     },
 
-    scanForNoteheads: function(bin, dt, width, height, staves, staffSpacing, preambleWidths) {
-        // Audiveris NoteHeadsBuilder approach: scan at each valid pitch position
-        // instead of sliding over every pixel. This drastically reduces false positives.
+    scanForNoteheads: function(bin, dt, width, height, staves, staffSpacing, preambleWidths, barlines) {
+        // Audiveris NoteHeadsBuilder: position-based scanning with strict filtering
         var sp = staffSpacing;
         var halfSp = sp / 2.0;
         var filledTpl = this._makeFilledTemplate(sp);
         var voidTpl = this._makeVoidTemplate(sp);
         var noteheads = [];
-        var FILLED_THRESHOLD = 0.45;
-        var VOID_THRESHOLD = 0.40;
-        var STEP_X = Math.max(1, Math.round(sp * 0.15)); // horizontal scan step
+        // Audiveris uses maxDistanceLow=0.40, maxDistanceHigh=0.50
+        // Our scoring is normalized differently, raise thresholds to reduce false positives
+        var FILLED_THRESHOLD = 0.55;
+        var VOID_THRESHOLD = 0.50;
+        var STEP_X = Math.max(1, Math.round(sp * 0.12));
+
+        // Build barline exclusion zones (Audiveris COMPETING_SHAPES concept)
+        var barlineExclusions = [];
+        if (barlines) {
+            for (var bi = 0; bi < barlines.length; bi++) {
+                barlineExclusions.push({
+                    x: barlines[bi].x,
+                    margin: Math.round(sp * 0.8) // exclude within 0.8 × spacing of barline
+                });
+            }
+        }
 
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
@@ -643,32 +668,41 @@ OMR.NoteDetector = {
             var scanLeft = staff.left + preambleWidth;
             var scanRight = staff.right - Math.round(sp * 0.5);
 
-            // Scan each pitch position: -6 (3 ledger lines above) to +14 (3 ledger lines below)
-            for (var posIndex = -6; posIndex <= 14; posIndex++) {
+            // Scan each pitch position: -4 to +12 (2 ledger lines above/below)
+            // Limit range to reduce false positives on distant ledger positions
+            for (var posIndex = -4; posIndex <= 12; posIndex++) {
                 var targetY = Math.round(staff.lines[0] + posIndex * halfSp);
                 if (targetY < 0 || targetY >= height) continue;
 
-                // For ledger line positions, verify there's actually ink nearby
+                // For ledger line positions (outside staff), require local ink evidence
                 var isLedgerPos = posIndex < 0 || posIndex > 8;
-                if (isLedgerPos && Math.abs(posIndex) % 2 === 0) {
-                    // On a ledger line — check there IS a horizontal ink line here
-                    var ledgerInk = 0;
-                    var ledgerSamples = 0;
-                    for (var lx = scanLeft; lx <= scanRight; lx += Math.round(sp * 2)) {
-                        ledgerSamples++;
-                        for (var ldy = -2; ldy <= 2; ldy++) {
-                            var ly = targetY + ldy;
-                            if (ly >= 0 && ly < height && bin[ly * width + lx] === 1) {
-                                ledgerInk++;
-                                break;
-                            }
+                if (isLedgerPos) {
+                    // Check if there's any significant ink concentration at this y
+                    var localInk = 0;
+                    var localSamples = 0;
+                    var sampleStep = Math.max(1, Math.round(sp * 0.5));
+                    for (var lx = scanLeft; lx <= scanRight; lx += sampleStep) {
+                        localSamples++;
+                        if (lx >= 0 && lx < width && targetY >= 0 && targetY < height && bin[targetY * width + lx] === 1) {
+                            localInk++;
                         }
                     }
-                    // Don't require ledger lines everywhere — just allow the position
+                    // Skip this position entirely if < 5% ink presence
+                    if (localSamples > 0 && localInk / localSamples < 0.05) continue;
                 }
 
                 // Horizontal scan at this pitch position
                 for (var sx = scanLeft; sx <= scanRight; sx += STEP_X) {
+                    // Check barline exclusion: skip near barlines
+                    var nearBarline = false;
+                    for (var bx = 0; bx < barlineExclusions.length; bx++) {
+                        if (Math.abs(sx - barlineExclusions[bx].x) < barlineExclusions[bx].margin) {
+                            nearBarline = true;
+                            break;
+                        }
+                    }
+                    if (nearBarline) continue;
+
                     // Quick pre-check: is there enough ink in the notehead region?
                     var quickInk = 0;
                     var qrx = Math.round(sp * 0.5);
@@ -683,8 +717,20 @@ OMR.NoteDetector = {
                             }
                         }
                     }
-                    // Need at least 20% ink in region for a notehead candidate
-                    if (qTotal > 0 && quickInk / qTotal < 0.20) continue;
+                    // Need at least 30% ink in region for a notehead candidate (raised from 20%)
+                    if (qTotal > 0 && quickInk / qTotal < 0.30) continue;
+
+                    // Aspect ratio check: noteheads are WIDER than tall
+                    // Reject if the ink blob is more vertical than horizontal (likely a barline fragment)
+                    var hRun = 0, vRun = 0;
+                    for (var ar = -Math.round(sp * 0.6); ar <= Math.round(sp * 0.6); ar++) {
+                        var hx = sx + ar;
+                        if (hx >= 0 && hx < width && bin[targetY * width + hx] === 1) hRun++;
+                        var vy = targetY + ar;
+                        if (vy >= 0 && vy < height && bin[vy * width + sx] === 1) vRun++;
+                    }
+                    // If vertical run is much longer than horizontal, it's likely a stem/barline
+                    if (vRun > hRun * 2.5 && hRun < sp * 0.5) continue;
 
                     // Score with filled template
                     var filledScore = this._scoreTemplate(dt, bin, width, height, sx, targetY, filledTpl, false);
@@ -701,7 +747,7 @@ OMR.NoteDetector = {
                         isFilled = false;
                     }
 
-                    if (bestScore < Math.min(FILLED_THRESHOLD, VOID_THRESHOLD)) continue;
+                    if (bestScore < VOID_THRESHOLD) continue;
 
                     // Determine fill ratio for duration classification
                     var innerFilled = 0, innerTotal = 0;
@@ -752,11 +798,9 @@ OMR.NoteDetector = {
         var suppressed = new Array(noteheads.length);
         for (var ni = 0; ni < suppressed.length; ni++) suppressed[ni] = false;
 
-        // Min distance between noteheads: ~60% of staff spacing
-        var minDist = Math.round(sp * 0.55);
+        // Suppression radius: ~70% of staff spacing
+        var minDist = Math.round(sp * 0.65);
         var minDistSq = minDist * minDist;
-        // But allow vertically stacked notes (chords) — use tighter x threshold
-        var minChordX = Math.round(sp * 0.4);
 
         for (var pi2 = 0; pi2 < noteheads.length; pi2++) {
             if (suppressed[pi2]) continue;
@@ -765,14 +809,12 @@ OMR.NoteDetector = {
                 if (suppressed[qi]) continue;
                 var dxx = noteheads[pi2].centerX - noteheads[qi].centerX;
                 var dyy = noteheads[pi2].centerY - noteheads[qi].centerY;
-                var distSq = dxx * dxx + dyy * dyy;
-                // Suppress if too close, but allow vertical stacking for chords
                 var absX = Math.abs(dxx);
                 var absY = Math.abs(dyy);
-                if (absX < minChordX && absY < Math.round(sp * 0.4)) {
-                    // Same position approximately — suppress lower score
+                // Allow vertically stacked notes (chords) with very close X
+                if (absX < Math.round(sp * 0.35) && absY < halfSp * 0.9) {
                     suppressed[qi] = true;
-                } else if (distSq < minDistSq) {
+                } else if (dxx * dxx + dyy * dyy < minDistSq) {
                     suppressed[qi] = true;
                 }
             }
@@ -1531,12 +1573,31 @@ OMR.NoteDetector = {
         var globalTimeSig = staves[0]._timeSig || { beats: 4, beatType: 4 };
 
         var barlines = this.detectBarLines(bin, width, height, staves, staffSpacing);
-        var noteheads = this.scanForNoteheads(cleanBin, dt, width, height, staves, staffSpacing, preambleWidths);
+        // Pass barlines to scanner for exclusion zones (Audiveris COMPETING_SHAPES)
+        var noteheads = this.scanForNoteheads(cleanBin, dt, width, height, staves, staffSpacing, preambleWidths, barlines);
         this.detectStems(bin, width, height, noteheads, staffSpacing);
         this.detectFlags(bin, width, height, noteheads, staffSpacing);
         this.detectBeams(bin, width, height, noteheads, staffSpacing);
         this.classifyDuration(noteheads);
         this.assignPitch(noteheads, staves);
+
+        // Post-filter: remove filled noteheads that have no stem (likely false positives)
+        // Audiveris requires stem linkage for all non-whole notes
+        var verified = [];
+        for (var vi = 0; vi < noteheads.length; vi++) {
+            var nh = noteheads[vi];
+            if (nh.isFilled && !nh.hasStem) {
+                // Filled notehead without stem — likely a false positive (barline fragment, text, etc.)
+                // Only keep if very high match score
+                if (nh.matchScore >= 0.70) {
+                    verified.push(nh);
+                }
+            } else {
+                verified.push(nh);
+            }
+        }
+        noteheads = verified;
+
         var rests = this.detectRests(cleanBin, width, height, staves, staffSpacing, barlines);
         var measures = this.organizeNotes(noteheads, rests, barlines, staves, globalTimeSig);
 

@@ -441,7 +441,8 @@
     width: 100%;
     box-sizing: border-box;
     position: relative;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     min-height: 120px;
 }
 
@@ -474,13 +475,17 @@
 .pm-piano-key-wrapper {
     position: relative;
     height: 100%;
-    display: inline-block;
-    vertical-align: top;
+    flex-shrink: 0;
+}
+
+.pm-piano-key-wrapper-white {
+    width: var(--omr-white-key-width);
 }
 
 .pm-piano-key-wrapper-black {
     width: 0;
     overflow: visible;
+    z-index: 2;
 }
 
 .pm-piano-key {

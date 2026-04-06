@@ -893,7 +893,9 @@ $theme_uri = get_stylesheet_directory_uri();
         }
 
         pianoBuilt = true;
-        adjustPianoSize();
+        // Delay adjustPianoSize to ensure container is laid out after display:block
+        setTimeout(adjustPianoSize, 50);
+        setTimeout(adjustPianoSize, 300);
 
         // Resize listener
         if (!pianoEl._resizeListenerAdded) {
