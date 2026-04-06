@@ -1,0 +1,34 @@
+{
+  "name": "museopenocr",
+  "version": "1.0.0",
+  "description": "OCR musical open-source para converter PDF de partituras em MusicXML (.sib via importação)",
+  "license": "MIT",
+  "author": "JoaoMarcusAndrade",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "nodemon --exec tsx src/server.ts",
+    "test": "jest",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.6",
+    "express": "^5.2.1",
+    "node-tesseract-ocr": "^2.2.1"
+  },
+  "devDependencies": {
+    "@types/gm": "^1.25.4",
+    "@types/jest": "^30.0.0",
+    "@types/multer": "^2.0.0",
+    "gm": "^1.25.1",
+    "jest": "^30.3.0",
+    "multer": "^2.0.2",
+    "nodemon": "^3.1.11",
+    "pdf2pic": "^3.2.0",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

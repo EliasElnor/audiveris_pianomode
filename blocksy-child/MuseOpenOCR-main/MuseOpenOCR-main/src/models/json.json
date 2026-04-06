@@ -1,0 +1,37 @@
+{
+    "scoreSheet": {
+        "identification": {
+            "title": "",
+            "composer": "",
+            "lyricist": "",
+            "rights": "",
+            "encoding": {
+                "encodingDate": "",
+                "encode": "",
+                "software": ""
+            }
+        },
+        "system": [
+            {
+                "block": [
+                    {
+                        "compass": {
+                            "clef": "",
+                            "keySignature": "",
+                            "timeSignature": "",
+                            "beats": [
+                                {
+                                    "beat": {
+                                        "type": "",
+                                        "pitch": "",
+                                        "value": 0.0
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+}
