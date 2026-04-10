@@ -1,11 +1,17 @@
 /**
- * PianoMode OMR Engine v6.0 - Complete Client-Side Music Recognition
+ * PianoMode OMR Engine v6.0.1 - Complete Client-Side Music Recognition
  * Converts sheet music images/PDFs into MusicXML + MIDI entirely in the browser.
  *
  * Modules: ImageProcessor, StaffDetector, NoteDetector, MusicXMLWriter, MIDIWriter, Engine
  * No server dependencies. No Java. No Audiveris.
  *
- * Key v6.0 improvements over v5.0:
+ * Phase 0 (v6.0.1) — player unblock:
+ *   - FIXED: Engine.process() now calls report(step, message, percent) to match
+ *     the page template callback signature. Previously it called report(percent, msg)
+ *     which meant `step` was never a valid 1-4 stepper index and the progress bar
+ *     + AlphaTab handoff silently broke.
+ *
+ * Legacy v6.0 improvements over v5.0 (still in place):
  *   - FIXED: Distance transform was inverted (foreground=INF instead of 0)
  *   - FIXED: Position-based scanning replaces sliding window (Audiveris NoteHeadsBuilder)
  *   - FIXED: Pitch assignment was off by 2 diatonic steps (wrong array offset)
@@ -17,12 +23,12 @@
  *   - Grand staff handling with proper MusicXML staves/voices
  *
  * @package PianoMode
- * @version 6.0.0
+ * @version 6.0.1
  */
 (function() {
 'use strict';
 
-var VERSION = 'v6.0';
+var VERSION = 'v6.0.1';
 var OMR = window.PianoModeOMR = {};
 
 /* =========================================================================
@@ -1982,13 +1988,18 @@ OMR.Engine = {
 
     process: function(file, onProgress) {
         var self = this;
+        // Progress contract: report(step, message, percent)
+        //   step 1 = Loading      (  0% -> 10%)
+        //   step 2 = Image proc   ( 10% -> 40%)
+        //   step 3 = Note detect  ( 40% -> 80%)
+        //   step 4 = Encoding     ( 80% -> 100%)
         var report = onProgress || function() {};
 
         return new Promise(function(resolve, reject) {
             var fileName = file.name || 'Untitled';
             var title = fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
 
-            report(0, 'Loading file...');
+            report(1, 'Loading file...', 0);
 
             var loadPromise;
             if (file.type === 'application/pdf' || (fileName && fileName.toLowerCase().indexOf('.pdf') !== -1)) {
@@ -1998,29 +2009,29 @@ OMR.Engine = {
             }
 
             loadPromise.then(function(imgResult) {
-                report(10, 'Processing image...');
+                report(2, 'Processing image...', 10);
                 return self._yieldThen(function() {
                     var gray = OMR.ImageProcessor.toGrayscale(imgResult.imageData);
-                    report(15, 'Binarizing...');
+                    report(2, 'Binarizing...', 15);
                     return { gray: gray, w: imgResult.width, h: imgResult.height };
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     var threshold = OMR.ImageProcessor.otsuThreshold(ctx.gray);
                     var bin = OMR.ImageProcessor.binarize(ctx.gray, threshold);
-                    report(20, 'Cleaning noise...');
+                    report(2, 'Cleaning noise...', 20);
                     return { bin: bin, w: ctx.w, h: ctx.h };
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     OMR.ImageProcessor.cleanNoise(ctx.bin, ctx.w, ctx.h, 6);
-                    report(25, 'Detecting staves...');
+                    report(2, 'Detecting staves...', 25);
                     return ctx;
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
-                    report(35, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...');
+                    report(2, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...', 35);
                     ctx.staves = staffResult.staves;
                     ctx.staffSpacing = staffResult.staffSpacing;
                     ctx.systems = staffResult.systems;
@@ -2029,21 +2040,21 @@ OMR.Engine = {
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     var cleanBin = OMR.StaffDetector.removeStaffLines(ctx.bin, ctx.w, ctx.h, ctx.staves);
-                    report(45, 'Computing distance transform...');
+                    report(3, 'Computing distance transform...', 45);
                     ctx.cleanBin = cleanBin;
                     return ctx;
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     var dt = OMR.NoteDetector.computeDistanceTransform(ctx.cleanBin, ctx.w, ctx.h);
-                    report(55, 'Detecting notes and symbols...');
+                    report(3, 'Detecting notes and symbols...', 55);
                     ctx.dt = dt;
                     return ctx;
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     var detection = OMR.NoteDetector.detect(ctx.bin, ctx.cleanBin, ctx.dt, ctx.w, ctx.h, ctx.staves, ctx.staffSpacing);
-                    report(75, 'Generating MusicXML...');
+                    report(4, 'Generating MusicXML...', 75);
                     ctx.detection = detection;
                     return ctx;
                 });
@@ -2053,7 +2064,7 @@ OMR.Engine = {
                     var musicxml = OMR.MusicXMLWriter.generate(ctx.detection, ctx.systems, title);
                     var musicxmlBlob = new Blob([musicxml], { type: 'application/xml' });
                     var musicxmlUrl = URL.createObjectURL(musicxmlBlob);
-                    report(85, 'Generating MIDI...');
+                    report(4, 'Generating MIDI...', 85);
                     ctx.musicxml = musicxml;
                     ctx.musicxmlBlob = musicxmlBlob;
                     ctx.musicxmlUrl = musicxmlUrl;
@@ -2064,14 +2075,14 @@ OMR.Engine = {
                     var midiData = OMR.MIDIWriter.generate(ctx.detection);
                     var midiBlob = OMR.MIDIWriter.toBlob(midiData);
                     var midiUrl = OMR.MIDIWriter.toBlobURL(midiData);
-                    report(95, 'Finalizing...');
+                    report(4, 'Finalizing...', 95);
                     ctx.midiData = midiData;
                     ctx.midiBlob = midiBlob;
                     ctx.midiUrl = midiUrl;
                     return ctx;
                 });
             }).then(function(ctx) {
-                report(100, 'Complete!');
+                report(4, 'Complete!', 100);
                 var noteCount = ctx.detection.noteHeads ? ctx.detection.noteHeads.length : 0;
 
                 resolve({
