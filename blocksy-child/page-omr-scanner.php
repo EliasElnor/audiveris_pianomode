@@ -292,10 +292,11 @@ $theme_uri = get_stylesheet_directory_uri();
 </script>
 
 <!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=6.0.0' ); ?>"></script>
+<?php $pm_omr_ver = defined( 'PIANOMODE_OMR_VER' ) ? PIANOMODE_OMR_VER : '6.0.1'; ?>
+<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=' . $pm_omr_ver ); ?>"></script>
 
-<!-- AlphaTab -->
-<script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
+<!-- AlphaTab (pinned version - @latest is unreliable) -->
+<script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/alphaTab.js"></script>
 
 <!-- ===== Inline JavaScript ===== -->
 <script>
@@ -503,7 +504,7 @@ $theme_uri = get_stylesheet_directory_uri();
                 result.events.length + ' musical events';
 
             // Load in AlphaTab
-            updateProgress(4, 'Score ready — loading player...');
+            updateProgress(4, 'Score ready — loading player...', 100);
             show(resultPanel);
 
             // Build the piano keyboard now that the result panel is visible
@@ -583,14 +584,31 @@ $theme_uri = get_stylesheet_directory_uri();
     // -------------------------------------------------------
     // AlphaTab Initialization
     // -------------------------------------------------------
+    var atLoadTimeoutId = null;
+    function clearAtLoadTimeout() {
+        if (atLoadTimeoutId) {
+            clearTimeout(atLoadTimeoutId);
+            atLoadTimeoutId = null;
+        }
+    }
+
     function initAlphaTab(musicxmlUrl) {
+        if (typeof alphaTab === 'undefined') {
+            console.error('[PianoMode] AlphaTab library failed to load from CDN');
+            atProgress.textContent = 'Error: player library unavailable';
+            atProgress.style.color = '#ff4444';
+            return;
+        }
+
         if (atApi) {
             try { atApi.destroy(); } catch(e) {}
             atApi = null;
             atMain.innerHTML = '';
         }
 
-        atProgress.textContent = 'Loading...';
+        clearAtLoadTimeout();
+        atProgress.textContent = 'Loading player...';
+        atProgress.style.color = '';
         atProgress.style.opacity = '1';
         atProgress.style.display = '';
         atPlay.disabled = true;
@@ -600,6 +618,13 @@ $theme_uri = get_stylesheet_directory_uri();
 
         var currentTempo = 1.0;
 
+        // Watchdog: if after 45s we still have no playerReady, surface the problem
+        atLoadTimeoutId = setTimeout(function() {
+            console.error('[PianoMode] AlphaTab player never became ready within 45s');
+            atProgress.textContent = 'Player timeout — check console';
+            atProgress.style.color = '#ff4444';
+        }, 45000);
+
         var settings = {
             file: musicxmlUrl,
             player: {
@@ -607,7 +632,7 @@ $theme_uri = get_stylesheet_directory_uri();
                 enableCursor: true,
                 enableUserInteraction: true,
                 scrollMode: 1,
-                soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
+                soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/soundfont/sonivox.sf2',
                 scrollElement: document.getElementById('omr-at-viewport')
             },
             display: {
@@ -637,10 +662,22 @@ $theme_uri = get_stylesheet_directory_uri();
             }
         };
 
-        atApi = new alphaTab.AlphaTabApi(atMain, settings);
+        try {
+            atApi = new alphaTab.AlphaTabApi(atMain, settings);
+        } catch (initErr) {
+            clearAtLoadTimeout();
+            console.error('[PianoMode] AlphaTabApi constructor threw:', initErr);
+            atProgress.textContent = 'Player init failed — check console';
+            atProgress.style.color = '#ff4444';
+            return;
+        }
 
         atApi.error.on(function(e) {
-            atProgress.textContent = 'Error loading score';
+            clearAtLoadTimeout();
+            console.error('[PianoMode] AlphaTab error event:', e);
+            var msg = 'Error loading score';
+            if (e && e.message) msg += ': ' + e.message;
+            atProgress.textContent = msg;
             atProgress.style.color = '#ff4444';
         });
 
@@ -686,10 +723,12 @@ $theme_uri = get_stylesheet_directory_uri();
         });
 
         atApi.playerReady.on(function() {
+            clearAtLoadTimeout();
             atProgress.style.display = 'none';
             atPlay.disabled = false;
             atStop.disabled = false;
             atApi.masterVolume = atVolume.value / 100;
+            console.log('[PianoMode] AlphaTab player ready');
         });
 
         atPlay.onclick = function() { atApi.playPause(); };
