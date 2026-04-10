@@ -1,9 +1,21 @@
 /**
- * PianoMode OMR Engine v6.0.1 - Complete Client-Side Music Recognition
- * Converts sheet music images/PDFs into MusicXML + MIDI entirely in the browser.
+ * PianoMode OMR Engine — Legacy v6 Modules + Orchestrator (Phase 1)
  *
- * Modules: ImageProcessor, StaffDetector, NoteDetector, MusicXMLWriter, MIDIWriter, Engine
- * No server dependencies. No Java. No Audiveris.
+ * This file is the legacy v6 code path. It still holds ImageProcessor,
+ * StaffDetector, NoteDetector, MusicXMLWriter, MIDIWriter and the Engine
+ * orchestrator. Phases 2..14 of the Audiveris port will progressively
+ * carve these modules out into dedicated per-phase files under
+ * blocksy-child/assets/OCR-Scan/engine/ and flip OMR.flags.useNew*
+ * feature flags to switch between legacy and ported code.
+ *
+ * REQUIRES: engine/omr-core.js must be loaded BEFORE this file so that
+ *           window.PianoModeOMR, OMR.VERSION, OMR.flags and OMR.debug
+ *           already exist.
+ *
+ * Phase 1 (v6.1.0) — file split infrastructure:
+ *   - Moved into engine/ subdirectory
+ *   - No longer creates window.PianoModeOMR; pulls from omr-core.js
+ *   - Uses OMR.VERSION from the shared core bootstrap
  *
  * Phase 0 (v6.0.1) — player unblock:
  *   - FIXED: Engine.process() now calls report(step, message, percent) to match
@@ -23,13 +35,23 @@
  *   - Grand staff handling with proper MusicXML staves/voices
  *
  * @package PianoMode
- * @version 6.0.1
+ * @version 6.1.0
  */
 (function() {
 'use strict';
 
-var VERSION = 'v6.0.1';
-var OMR = window.PianoModeOMR = {};
+// Pull the shared namespace set up by engine/omr-core.js. Defensive
+// fallback: if omr-core.js failed to load we still create the namespace
+// so legacy code keeps working, but log a loud warning.
+var OMR = window.PianoModeOMR;
+if (!OMR) {
+    if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[PianoModeOMR] omr-core.js was not loaded before omr-engine.js — '
+                     + 'falling back to inline namespace bootstrap.');
+    }
+    OMR = window.PianoModeOMR = { VERSION: 'v6.1.0', flags: {}, debug: { enabled: false, last: {} } };
+}
+var VERSION = OMR.VERSION || 'v6.1.0';
 
 /* =========================================================================
  *  MODULE 1: ImageProcessor
@@ -2125,6 +2147,6 @@ OMR.Engine = {
     }
 };
 
-console.log('[PianoModeOMR] Engine ' + VERSION + ' loaded \u2014 all modules ready');
+console.log('[PianoModeOMR] legacy engine ' + VERSION + ' loaded \u2014 all v6 modules ready');
 
 })();
