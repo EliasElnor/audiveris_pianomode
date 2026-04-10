@@ -104,3 +104,6 @@ docs/pdf/build
 # flatpak
 dev/flatpak/.flatpak-builder/
 dev/flatpak/gradle/
+
+# Local OMR test fixtures (available on origin/master; do NOT ship on feature branches)
+test-fixtures/
