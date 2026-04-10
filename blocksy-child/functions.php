@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.4.0' );
+    define( 'PIANOMODE_OMR_VER', '6.5.0' );
 }
 
 /**
@@ -442,6 +442,17 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 5. Phase 5: BarsRetriever + StaffProjector — barline detection and
+    //    system assembly (grand staff grouping). Depends on Phase 4 for
+    //    Staff inputs.
+    wp_enqueue_script(
+        'pm-omr-grid-bars',
+        $base_uri . '/engine/omr-grid-bars.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -454,7 +465,8 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-scale',
             'pm-omr-distance',
             'pm-omr-filaments',
-            'pm-omr-grid-lines'
+            'pm-omr-grid-lines',
+            'pm-omr-grid-bars'
         ],
         PIANOMODE_OMR_VER,
         false
