@@ -2047,6 +2047,23 @@ OMR.Engine = {
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     OMR.ImageProcessor.cleanNoise(ctx.bin, ctx.w, ctx.h, 6);
+                    report(2, 'Computing scale...', 22);
+                    return ctx;
+                });
+            }).then(function(ctx) {
+                return self._yieldThen(function() {
+                    // Phase 2: ScaleBuilder port. Runs unconditionally so the
+                    // result is available for debugging and for phases 3..14.
+                    // Legacy StaffDetector still drives staff detection until
+                    // Phase 4 flips OMR.flags.useNewStaff.
+                    if (OMR.Scale && typeof OMR.Scale.build === 'function') {
+                        try {
+                            ctx.scale = OMR.Scale.build(ctx.bin, ctx.w, ctx.h);
+                        } catch (scaleErr) {
+                            console.error('[PianoModeOMR] Scale.build failed:', scaleErr);
+                            ctx.scale = null;
+                        }
+                    }
                     report(2, 'Detecting staves...', 25);
                     return ctx;
                 });
@@ -2125,6 +2142,7 @@ OMR.Engine = {
                     timeSignature: ctx.detection.timeSignature,
                     measures: ctx.detection.measures,
                     systems: ctx.systems,
+                    scale: ctx.scale || null,  // Phase 2 ScaleBuilder result
                     version: VERSION
                 });
             }).catch(function(err) {
