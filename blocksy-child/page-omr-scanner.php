@@ -291,9 +291,12 @@ $theme_uri = get_stylesheet_directory_uri();
     }
 </script>
 
-<!-- OMR Engine (client-side) -->
-<?php $pm_omr_ver = defined( 'PIANOMODE_OMR_VER' ) ? PIANOMODE_OMR_VER : '6.0.1'; ?>
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=' . $pm_omr_ver ); ?>"></script>
+<!--
+    OMR Engine (client-side) — now enqueued via functions.php
+    pianomode_omr_scanner_assets() under the 'pm-omr-core' and
+    'pm-omr-engine' handles, so there is no inline <script> tag here.
+    Cache busting is controlled by the PIANOMODE_OMR_VER constant.
+-->
 
 <!-- AlphaTab (pinned version - @latest is unreliable) -->
 <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/alphaTab.js"></script>
