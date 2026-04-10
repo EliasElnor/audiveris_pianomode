@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.2.0' );
+    define( 'PIANOMODE_OMR_VER', '6.3.0' );
 }
 
 /**
@@ -410,6 +410,27 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 3a. Phase 3: Chamfer distance transform primitive used by Phases
+    //     6 (StemSeedsBuilder), 8 (NoteHeads template matching) and
+    //     9 (LedgersBuilder).
+    wp_enqueue_script(
+        'pm-omr-distance',
+        $base_uri . '/engine/omr-distance.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 3b. Phase 3: Filament primitives (BasicLine, Filament,
+    //     buildHorizontalFilaments) used by Phase 4 LinesRetriever.
+    wp_enqueue_script(
+        'pm-omr-filaments',
+        $base_uri . '/engine/omr-filaments.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -417,7 +438,7 @@ function pianomode_omr_scanner_assets() {
     wp_enqueue_script(
         'pm-omr-engine',
         $base_uri . '/engine/omr-engine.js',
-        [ 'pm-omr-core', 'pm-omr-scale' ],
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-distance', 'pm-omr-filaments' ],
         PIANOMODE_OMR_VER,
         false
     );
