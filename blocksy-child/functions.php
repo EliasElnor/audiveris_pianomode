@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.3.0' );
+    define( 'PIANOMODE_OMR_VER', '6.4.0' );
 }
 
 /**
@@ -431,6 +431,17 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 4. Phase 4: LinesRetriever + ClustersRetriever — staff detection
+    //    from horizontal filaments into 5-line Staff objects. Depends on
+    //    Phase 2 scale + Phase 3 filaments.
+    wp_enqueue_script(
+        'pm-omr-grid-lines',
+        $base_uri . '/engine/omr-grid-lines.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-filaments' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -438,7 +449,13 @@ function pianomode_omr_scanner_assets() {
     wp_enqueue_script(
         'pm-omr-engine',
         $base_uri . '/engine/omr-engine.js',
-        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-distance', 'pm-omr-filaments' ],
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-distance',
+            'pm-omr-filaments',
+            'pm-omr-grid-lines'
+        ],
         PIANOMODE_OMR_VER,
         false
     );
