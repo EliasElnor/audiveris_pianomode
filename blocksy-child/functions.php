@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.1.0' );
+    define( 'PIANOMODE_OMR_VER', '6.2.0' );
 }
 
 /**
@@ -401,12 +401,23 @@ function pianomode_omr_scanner_assets() {
         false  // load in <head> so it's ready before any later module
     );
 
-    // 2. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
-    //    MusicXMLWriter, MIDIWriter, Engine). Depends on pm-omr-core.
+    // 2. Phase 2: ScaleBuilder port (interline, mainFore, beamThickness).
+    wp_enqueue_script(
+        'pm-omr-scale',
+        $base_uri . '/engine/omr-scale.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
+    //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
+    //    new-phase modules so they are available from OMR.<ModuleName>
+    //    inside Engine.process().
     wp_enqueue_script(
         'pm-omr-engine',
         $base_uri . '/engine/omr-engine.js',
-        [ 'pm-omr-core' ],
+        [ 'pm-omr-core', 'pm-omr-scale' ],
         PIANOMODE_OMR_VER,
         false
     );
