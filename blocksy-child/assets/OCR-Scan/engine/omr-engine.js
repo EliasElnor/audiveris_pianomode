@@ -2096,8 +2096,8 @@ OMR.Engine = {
                         // we adapt the GridLines output to match.
                         ctx.staves = ctx.gridLines.staves;
                         ctx.staffSpacing = ctx.gridLines.staves[0].interline;
-                        // Primitive systems mapping: one system per staff
-                        // until Phase 5 BarsRetriever groups staves.
+                        // Provisional systems: one system per staff until
+                        // Phase 5 GridBars runs below and overwrites them.
                         ctx.systems = ctx.gridLines.staves.map(function (s, i) {
                             return { id: i + 1, staves: [s] };
                         });
@@ -2108,6 +2108,36 @@ OMR.Engine = {
                         ctx.staves = staffResult.staves;
                         ctx.staffSpacing = staffResult.staffSpacing;
                         ctx.systems = staffResult.systems;
+                    }
+
+                    // Phase 5: BarsRetriever + StaffProjector. Runs whenever
+                    // we have Phase 4 staves (which carry line filaments
+                    // with getYAtX, needed for the projection). The legacy
+                    // StaffDetector staves don't expose that shape, so we
+                    // gate the call on having ctx.gridLines set.
+                    if (OMR.GridBars
+                            && typeof OMR.GridBars.retrieveBarsAndSystems === 'function'
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.gridBars = OMR.GridBars.retrieveBarsAndSystems(
+                                ctx.bin, ctx.w, ctx.h,
+                                ctx.gridLines.staves, ctx.scale);
+                        } catch (gbErr) {
+                            console.error('[PianoModeOMR] GridBars.retrieveBarsAndSystems failed:', gbErr);
+                            ctx.gridBars = null;
+                        }
+                    }
+
+                    // If useNewBars is on AND we got systems back, swap
+                    // them into ctx.systems so downstream code sees the
+                    // Phase 5 grand-staff grouping.
+                    if (OMR.flags && OMR.flags.useNewBars
+                            && ctx.gridBars
+                            && ctx.gridBars.systems
+                            && ctx.gridBars.systems.length > 0) {
+                        ctx.systems = ctx.gridBars.systems;
                     }
                     return ctx;
                 });
@@ -2179,6 +2209,7 @@ OMR.Engine = {
                     systems: ctx.systems,
                     scale: ctx.scale || null,  // Phase 2 ScaleBuilder result
                     gridLines: ctx.gridLines || null,  // Phase 4 GridLines result
+                    gridBars: ctx.gridBars || null,  // Phase 5 GridBars result
                     version: VERSION
                 });
             }).catch(function(err) {
