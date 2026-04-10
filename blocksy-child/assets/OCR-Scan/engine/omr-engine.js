@@ -2069,11 +2069,46 @@ OMR.Engine = {
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
-                    var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
-                    report(2, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...', 35);
-                    ctx.staves = staffResult.staves;
-                    ctx.staffSpacing = staffResult.staffSpacing;
-                    ctx.systems = staffResult.systems;
+                    // Phase 4: run the new LinesRetriever + ClustersRetriever
+                    // port alongside the legacy StaffDetector. While
+                    // OMR.flags.useNewStaff is false the result is used only
+                    // for the debug overlay; once validated, flipping the
+                    // flag will replace the legacy path.
+                    if (OMR.GridLines && typeof OMR.GridLines.retrieveStaves === 'function'
+                            && ctx.scale && ctx.scale.valid) {
+                        try {
+                            ctx.gridLines = OMR.GridLines.retrieveStaves(
+                                ctx.bin, ctx.w, ctx.h, ctx.scale);
+                        } catch (glErr) {
+                            console.error('[PianoModeOMR] GridLines.retrieveStaves failed:', glErr);
+                            ctx.gridLines = null;
+                        }
+                    }
+
+                    var useNew = !!(OMR.flags && OMR.flags.useNewStaff
+                                    && ctx.gridLines
+                                    && ctx.gridLines.staves
+                                    && ctx.gridLines.staves.length > 0);
+
+                    if (useNew) {
+                        // Use Phase 4 staves. The legacy StaffDetector
+                        // output shape exposes staves + systems + spacing;
+                        // we adapt the GridLines output to match.
+                        ctx.staves = ctx.gridLines.staves;
+                        ctx.staffSpacing = ctx.gridLines.staves[0].interline;
+                        // Primitive systems mapping: one system per staff
+                        // until Phase 5 BarsRetriever groups staves.
+                        ctx.systems = ctx.gridLines.staves.map(function (s, i) {
+                            return { id: i + 1, staves: [s] };
+                        });
+                        report(2, 'Found ' + ctx.staves.length + ' staves (Phase 4 GridLines). Removing staff lines...', 35);
+                    } else {
+                        var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
+                        report(2, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...', 35);
+                        ctx.staves = staffResult.staves;
+                        ctx.staffSpacing = staffResult.staffSpacing;
+                        ctx.systems = staffResult.systems;
+                    }
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2143,6 +2178,7 @@ OMR.Engine = {
                     measures: ctx.detection.measures,
                     systems: ctx.systems,
                     scale: ctx.scale || null,  // Phase 2 ScaleBuilder result
+                    gridLines: ctx.gridLines || null,  // Phase 4 GridLines result
                     version: VERSION
                 });
             }).catch(function(err) {
