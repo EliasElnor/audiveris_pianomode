@@ -360,24 +360,55 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Single cache-buster version for all OMR scanner assets (CSS + JS).
  * BUMP THIS on every OMR change — user has no CDN cache access, so the
  * ?ver=X.Y.Z query string is the only way to invalidate client caches.
- * Referenced by page-omr-scanner.php inline <script> as well.
+ * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.0.1' );
+    define( 'PIANOMODE_OMR_VER', '6.1.0' );
 }
 
 /**
  * Enqueue OCR Scanner assets when the template is active
+ *
+ * The OMR engine is split into modules under /assets/OCR-Scan/engine/.
+ * Phase 1 ships two files:
+ *   - omr-core.js   : namespace bootstrap, VERSION, flags, debug
+ *   - omr-engine.js : legacy v6 ImageProcessor/Staff/Notes/MXL/MIDI/Engine
+ * Future phases (2..14) will progressively carve modules out of
+ * omr-engine.js and enqueue them here in dependency order. Each new
+ * script must declare its dependencies via the 3rd arg so wp_enqueue
+ * emits them in the correct order.
  */
 function pianomode_omr_scanner_assets() {
     if ( ! is_page_template( 'page-omr-scanner.php' ) ) {
         return;
     }
+
+    $base_uri = get_stylesheet_directory_uri() . '/assets/OCR-Scan';
+
     wp_enqueue_style(
         'pm-omr-scanner',
-        get_stylesheet_directory_uri() . '/assets/OCR-Scan/omr-scanner.css',
+        $base_uri . '/omr-scanner.css',
         [],
         PIANOMODE_OMR_VER
+    );
+
+    // 1. Core bootstrap — MUST load first.
+    wp_enqueue_script(
+        'pm-omr-core',
+        $base_uri . '/engine/omr-core.js',
+        [],
+        PIANOMODE_OMR_VER,
+        false  // load in <head> so it's ready before any later module
+    );
+
+    // 2. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
+    //    MusicXMLWriter, MIDIWriter, Engine). Depends on pm-omr-core.
+    wp_enqueue_script(
+        'pm-omr-engine',
+        $base_uri . '/engine/omr-engine.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
     );
 }
 add_action( 'wp_enqueue_scripts', 'pianomode_omr_scanner_assets', 25 );
