@@ -357,6 +357,16 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-scanner-api.php'
 require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
 
 /**
+ * Single cache-buster version for all OMR scanner assets (CSS + JS).
+ * BUMP THIS on every OMR change — user has no CDN cache access, so the
+ * ?ver=X.Y.Z query string is the only way to invalidate client caches.
+ * Referenced by page-omr-scanner.php inline <script> as well.
+ */
+if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
+    define( 'PIANOMODE_OMR_VER', '6.0.1' );
+}
+
+/**
  * Enqueue OCR Scanner assets when the template is active
  */
 function pianomode_omr_scanner_assets() {
@@ -367,7 +377,7 @@ function pianomode_omr_scanner_assets() {
         'pm-omr-scanner',
         get_stylesheet_directory_uri() . '/assets/OCR-Scan/omr-scanner.css',
         [],
-        '2.0.0'
+        PIANOMODE_OMR_VER
     );
 }
 add_action( 'wp_enqueue_scripts', 'pianomode_omr_scanner_assets', 25 );
