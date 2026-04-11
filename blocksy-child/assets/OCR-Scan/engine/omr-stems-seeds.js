@@ -40,7 +40,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-stems-seeds.js loaded before omr-core.js');
         return;
     }
 
@@ -177,10 +176,6 @@
             OMR.debug.push('stemSeeds', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] StemSeeds: ' + corridors.length
-                        + ' corridors, ' + dedup.length + ' seeds retained');
-        }
         return { seeds: dedup };
     }
 
@@ -280,8 +275,4 @@
         buildSeeds: buildSeeds
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-stems-seeds loaded '
-                    + '(Phase 6 StemSeedsBuilder port)');
-    }
 })();
