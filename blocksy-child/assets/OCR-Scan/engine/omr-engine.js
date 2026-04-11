@@ -2430,13 +2430,36 @@ OMR.Engine = {
                 report(4, 'Complete!', 100);
                 var noteCount = ctx.detection.noteHeads ? ctx.detection.noteHeads.length : 0;
 
+                // Phase 14 outputs are authoritative when present; the legacy
+                // v6 writers run only as fallback while we finish polishing.
+                // A "valid" new output requires BOTH a MusicXML string and a
+                // non-empty SIG so we don't ship an empty document.
+                var hasValidNew = !!(ctx.musicxmlNew
+                                     && ctx.musicxmlNewUrl
+                                     && ctx.sig
+                                     && ctx.sig.systems
+                                     && ctx.sig.systems.length > 0);
+
+                var outMusicXml  = hasValidNew ? ctx.musicxmlNew     : ctx.musicxml;
+                var outMxmlBlob  = hasValidNew ? ctx.musicxmlNewBlob : ctx.musicxmlBlob;
+                var outMxmlUrl   = hasValidNew ? ctx.musicxmlNewUrl  : ctx.musicxmlUrl;
+                var outMidiBytes = (hasValidNew && ctx.midiNew) ? ctx.midiNew.bytes   : ctx.midiData;
+                var outMidiUrl   = (hasValidNew && ctx.midiNew) ? ctx.midiNew.blobUrl : ctx.midiUrl;
+                var outMidiBlob  = (hasValidNew && ctx.midiNew && ctx.midiNew.bytes)
+                    ? new Blob([ctx.midiNew.bytes], { type: 'audio/midi' })
+                    : ctx.midiBlob;
+
                 resolve({
-                    musicxml: ctx.musicxml,
-                    musicxmlBlob: ctx.musicxmlBlob,
-                    musicxmlUrl: ctx.musicxmlUrl,
-                    midiData: ctx.midiData,
-                    midiBlob: ctx.midiBlob,
-                    midiUrl: ctx.midiUrl,
+                    // === Authoritative player-consumed fields ===
+                    musicxml:     outMusicXml,
+                    musicxmlBlob: outMxmlBlob,
+                    musicxmlUrl:  outMxmlUrl,
+                    midiData:     outMidiBytes,
+                    midiBlob:     outMidiBlob,
+                    midiUrl:      outMidiUrl,
+                    pipeline:     hasValidNew ? 'audiveris-port' : 'legacy-v6',
+
+                    // === Legacy diagnostics (kept for overlays/debug) ===
                     events: ctx.detection.events,
                     noteHeads: ctx.detection.noteHeads,
                     staves: ctx.staves,
@@ -2448,21 +2471,30 @@ OMR.Engine = {
                     timeSignature: ctx.detection.timeSignature,
                     measures: ctx.detection.measures,
                     systems: ctx.systems,
-                    scale: ctx.scale || null,  // Phase 2 ScaleBuilder result
-                    gridLines: ctx.gridLines || null,  // Phase 4 GridLines result
-                    gridBars: ctx.gridBars || null,  // Phase 5 GridBars result
-                    stemSeeds: ctx.stemSeeds || null, // Phase 6 StemSeeds result
-                    newBeams: ctx.beams || null,      // Phase 7 Beams result
-                    newHeads: ctx.heads || null,      // Phase 8 Heads result
-                    ledgers: ctx.ledgers || null,     // Phase 9 Ledgers result
-                    newStems: ctx.stems || null,      // Phase 10 Stems result
-                    headers: ctx.headers || null,     // Phase 11 Clef/Key/Time
-                    restsAlters: ctx.restsAlters || null, // Phase 12 Rests/Alters
-                    sig: ctx.sig || null,             // Phase 13 SIGraph
-                    musicxmlNew:     ctx.musicxmlNew     || null, // Phase 14a
+
+                    // === Phase 2..14 intermediates (for overlays/debug) ===
+                    scale: ctx.scale || null,
+                    gridLines: ctx.gridLines || null,
+                    gridBars: ctx.gridBars || null,
+                    stemSeeds: ctx.stemSeeds || null,
+                    newBeams: ctx.beams || null,
+                    newHeads: ctx.heads || null,
+                    ledgers: ctx.ledgers || null,
+                    newStems: ctx.stems || null,
+                    headers: ctx.headers || null,
+                    restsAlters: ctx.restsAlters || null,
+                    sig: ctx.sig || null,
+                    musicxmlNew:     ctx.musicxmlNew     || null,
                     musicxmlNewBlob: ctx.musicxmlNewBlob || null,
                     musicxmlNewUrl:  ctx.musicxmlNewUrl  || null,
-                    midiNew:         ctx.midiNew         || null, // Phase 14b
+                    midiNew:         ctx.midiNew         || null,
+
+                    // Expose the legacy URLs in case the caller wants to
+                    // compare both outputs for debugging.
+                    musicxmlLegacy:    ctx.musicxml,
+                    musicxmlLegacyUrl: ctx.musicxmlUrl,
+                    midiLegacyUrl:     ctx.midiUrl,
+
                     version: VERSION
                 });
             }).catch(function(err) {
