@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.10.0' );
+    define( 'PIANOMODE_OMR_VER', '6.11.0' );
 }
 
 /**
@@ -573,6 +573,30 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 13. Phase 13: SIGraph + Rhythm + voices — assembles all the
+    //     prior phase outputs into systems / measures / voices /
+    //     events, with pitch + duration + startBeat resolved.
+    //     This is what Phase 14 MusicXML / MIDI writers consume.
+    wp_enqueue_script(
+        'pm-omr-sig',
+        $base_uri . '/engine/omr-sig.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-grid-lines',
+            'pm-omr-grid-bars',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-heads',
+            'pm-omr-stems',
+            'pm-omr-clef-key-time',
+            'pm-omr-rests-alters',
+            'pm-omr-ledgers'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -594,7 +618,8 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-ledgers',
             'pm-omr-stems',
             'pm-omr-clef-key-time',
-            'pm-omr-rests-alters'
+            'pm-omr-rests-alters',
+            'pm-omr-sig'
         ],
         PIANOMODE_OMR_VER,
         false
