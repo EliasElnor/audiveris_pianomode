@@ -41,7 +41,7 @@
  *   - Beam-stem relation (happens in Phase 10 HeadLinker).
  *
  * @package PianoMode
- * @version 6.5.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -109,15 +109,33 @@
             var yMid = (y1 + y2) / 2;
             var ownerStaff = nearestStaff(staves, yMid);
 
+            // Estimate stack count: how many beams are stacked vertically?
+            // A single 8th beam has height ≈ beamThickness; 16th = 2x; 32nd = 3x.
+            var stackCount = Math.max(1, Math.round(bboxH / beamThickness));
+            if (stackCount > 4) stackCount = 4; // Audiveris caps at 64th notes.
+
+            // CUE vs STANDARD size — cue beams are thinner and shorter,
+            // matching scale.smallInterline. Only classify as CUE when the
+            // score actually has a detected cue interline.
+            var size = 'STANDARD';
+            if (scale.smallInterline && bboxW < (1.2 * scale.smallInterline * 4)
+                && bboxH <= Math.round(beamThickness * 0.7)) {
+                size = 'CUE';
+            }
+
             beams.push({
-                x1:     x1,
-                y1:     y1,
-                x2:     x2,
-                y2:     y2,
-                height: bboxH,
-                slope:  fit.slope,
-                kind:   isBeam ? 'BEAM' : 'HOOK',
-                staff:  ownerStaff
+                x1:         x1,
+                y1:         y1,
+                x2:         x2,
+                y2:         y2,
+                height:     bboxH,
+                width:      bboxW,
+                slope:      fit.slope,
+                kind:       isBeam ? 'BEAM' : 'HOOK',
+                stackCount: stackCount,
+                size:       size,
+                staff:      ownerStaff,
+                systemIdx:  ownerStaff ? ownerStaff.systemIdx : null
             });
         }
 
