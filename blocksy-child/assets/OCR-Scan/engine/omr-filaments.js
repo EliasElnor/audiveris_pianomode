@@ -34,7 +34,7 @@
  *   app/src/main/java/org/audiveris/omr/math/BasicLine.java
  *
  * @package PianoMode
- * @version 6.2.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -182,6 +182,14 @@
         // expected to be ~1-3 px tall at 300 DPI.
         return (this.yMax - this.yMin + 1);
     };
+    // Mean thickness = weight / length — how many ink pixels per x column,
+    // on average. For a straight 1-px staff line this is 1.0; for a fuzzy
+    // scan it rises to 2-3. Better separator than getThickness() because
+    // it ignores stray isolated ink bumps that inflate yMax/yMin.
+    Filament.prototype.getMeanThickness = function () {
+        var len = this.getLength();
+        return len > 0 ? (this.weight / len) : 0;
+    };
 
     Filament.prototype.getBounds = function () {
         return {
@@ -321,12 +329,166 @@
     }
 
     // -------------------------------------------------------------------
+    // VerticalFilament — mirror image of Filament for vertical features
+    // (barlines, stems, C-clef stems). A "run" here is a column-aligned
+    // strip { x, y, len } where len is the number of consecutive vertical
+    // foreground pixels starting at (x, y).
+    // -------------------------------------------------------------------
+    function VerticalFilament(id) {
+        this.id     = id || 0;
+        this.runs   = [];
+        this.line   = new BasicLine(); // fit x = a*y + b (swapped axes)
+        this.weight = 0;
+        this.xMin   = Infinity;
+        this.xMax   = -Infinity;
+        this.yMin   = Infinity;
+        this.yMax   = -Infinity;
+    }
+    VerticalFilament.prototype.addRun = function (x, y, len) {
+        this.runs.push({ x: x, y: y, len: len });
+        this.weight += len;
+        if (x < this.xMin) this.xMin = x;
+        if (x > this.xMax) this.xMax = x;
+        if (y < this.yMin) this.yMin = y;
+        if (y + len - 1 > this.yMax) this.yMax = y + len - 1;
+        // Fit x = f(y) by feeding includePoint(y_center, x, len).
+        var cy = y + (len - 1) / 2;
+        this.line.includePoint(cy, x, len);
+    };
+    VerticalFilament.prototype.getWeight = function () { return this.weight; };
+    VerticalFilament.prototype.getLength = function () {
+        return (this.yMax - this.yMin + 1);
+    };
+    VerticalFilament.prototype.getThickness = function () {
+        return (this.xMax - this.xMin + 1);
+    };
+    VerticalFilament.prototype.getMeanThickness = function () {
+        var len = this.getLength();
+        return len > 0 ? (this.weight / len) : 0;
+    };
+    VerticalFilament.prototype.getBounds = function () {
+        return {
+            x:      this.xMin,
+            y:      this.yMin,
+            width:  (this.xMax - this.xMin + 1),
+            height: (this.yMax - this.yMin + 1)
+        };
+    };
+    VerticalFilament.prototype.getSlope = function () {
+        // dx/dy — inverse of horizontal slope.
+        return this.line.getSlope();
+    };
+    VerticalFilament.prototype.getXAtY = function (y) {
+        return this.line.yAtX(y); // yAtX is our "predict" — axes swapped.
+    };
+    VerticalFilament.prototype.getMeanDistance = function () {
+        return this.line.getMeanDistance();
+    };
+    VerticalFilament.prototype.include = function (other) {
+        if (!other || other === this) return;
+        for (var i = 0; i < other.runs.length; i++) {
+            var r = other.runs[i];
+            this.runs.push(r);
+            this.weight += r.len;
+            if (r.x < this.xMin) this.xMin = r.x;
+            if (r.x > this.xMax) this.xMax = r.x;
+            if (r.y < this.yMin) this.yMin = r.y;
+            if (r.y + r.len - 1 > this.yMax) this.yMax = r.y + r.len - 1;
+            var cy = r.y + (r.len - 1) / 2;
+            this.line.includePoint(cy, r.x, r.len);
+        }
+    };
+
+    // -------------------------------------------------------------------
+    // Build vertical filaments by scanning each column, extracting runs
+    // of foreground pixels, and linking runs whose y-ranges overlap with
+    // runs of the immediately previous column.
+    //
+    // Used by Phase 5 BarsRetriever and Phase 6 StemSeedsBuilder to turn
+    // vertical ink blobs into polyline filaments that can be tested for
+    // length, slope deviation, and straightness.
+    // -------------------------------------------------------------------
+    function buildVerticalFilaments(bin, width, height, opts) {
+        opts = opts || {};
+        var minRunLength   = opts.minRunLength   || 3;
+        var maxHorizGap    = opts.maxHorizGap    || 1;
+
+        var filaments = [];
+        var prevColsByGap = [];
+        for (var g = 0; g < maxHorizGap; g++) prevColsByGap.push([]);
+
+        for (var x = 0; x < width; x++) {
+            var curRuns = [];
+            var y = 0;
+            while (y < height) {
+                if (bin[y * width + x]) {
+                    var start = y;
+                    while (y < height && bin[y * width + x]) y++;
+                    var len = y - start;
+                    if (len >= minRunLength) {
+                        curRuns.push({ x: x, y: start, len: len, filament: null });
+                    }
+                } else {
+                    y++;
+                }
+            }
+
+            for (var i = 0; i < curRuns.length; i++) {
+                var cur = curRuns[i];
+                var curT = cur.y;
+                var curB = cur.y + cur.len - 1;
+                var chosen = null;
+
+                for (var gap = 0; gap < maxHorizGap && !chosen; gap++) {
+                    var prev = prevColsByGap[gap];
+                    for (var j = 0; j < prev.length; j++) {
+                        var pr = prev[j];
+                        var prT = pr.y;
+                        var prB = pr.y + pr.len - 1;
+                        if (prB < curT || prT > curB) continue;
+                        chosen = pr.filament;
+                        for (var k = j + 1; k < prev.length; k++) {
+                            var pr2 = prev[k];
+                            var pr2T = pr2.y;
+                            var pr2B = pr2.y + pr2.len - 1;
+                            if (pr2B < curT || pr2T > curB) continue;
+                            if (pr2.filament && pr2.filament !== chosen) {
+                                chosen.include(pr2.filament);
+                                var idx = filaments.indexOf(pr2.filament);
+                                if (idx >= 0) filaments.splice(idx, 1);
+                                pr2.filament = chosen;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if (!chosen) {
+                    chosen = new VerticalFilament(filaments.length + 1);
+                    filaments.push(chosen);
+                }
+                chosen.addRun(cur.x, cur.y, cur.len);
+                cur.filament = chosen;
+            }
+
+            for (var s = prevColsByGap.length - 1; s > 0; s--) {
+                prevColsByGap[s] = prevColsByGap[s - 1];
+            }
+            prevColsByGap[0] = curRuns;
+        }
+
+        return filaments;
+    }
+
+    // -------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------
     OMR.Filaments = {
         BasicLine:                 BasicLine,
         Filament:                  Filament,
-        buildHorizontalFilaments:  buildHorizontalFilaments
+        VerticalFilament:          VerticalFilament,
+        buildHorizontalFilaments:  buildHorizontalFilaments,
+        buildVerticalFilaments:    buildVerticalFilaments
     };
 
 })();
