@@ -39,7 +39,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-musicxml.js loaded before omr-core.js');
         return;
     }
 
@@ -433,7 +432,4 @@
         buildMusicXml: buildMusicXml
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-musicxml loaded (Phase 14 PartwiseBuilder port)');
-    }
 })();
