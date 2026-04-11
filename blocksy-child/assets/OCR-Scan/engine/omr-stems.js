@@ -57,7 +57,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-stems.js loaded before omr-core.js');
         return;
     }
 
@@ -182,10 +181,6 @@
             OMR.debug.push('stems', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Stems: ' + stems.length
-                        + ' linked, ' + stemless.length + ' stemless');
-        }
         return { stems: stems, stemless: stemless };
     }
 
@@ -342,7 +337,4 @@
         buildStems: buildStems
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-stems loaded (Phase 10 StemsBuilder port)');
-    }
 })();
