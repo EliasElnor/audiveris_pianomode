@@ -45,10 +45,6 @@
 // so legacy code keeps working, but log a loud warning.
 var OMR = window.PianoModeOMR;
 if (!OMR) {
-    if (typeof console !== 'undefined' && console.warn) {
-        console.warn('[PianoModeOMR] omr-core.js was not loaded before omr-engine.js — '
-                     + 'falling back to inline namespace bootstrap.');
-    }
     OMR = window.PianoModeOMR = { VERSION: 'v6.1.0', flags: {}, debug: { enabled: false, last: {} } };
 }
 var VERSION = OMR.VERSION || 'v6.1.0';
@@ -360,7 +356,6 @@ OMR.StaffDetector = {
         }
 
         if (staves.length === 0) {
-            console.warn('[StaffDetector] No staves found');
             return { staves: [], staffSpacing: 12, systems: [] };
         }
 
@@ -372,7 +367,6 @@ OMR.StaffDetector = {
         this.detectClefs(bin, width, height, staves, systems);
         for (i = 0; i < staves.length; i++) staves[i].staffIndex = i;
 
-        console.log('[StaffDetector] Found ' + staves.length + ' staves in ' + systems.length + ' systems, spacing=' + Math.round(globalSpacing));
         return { staves: staves, staffSpacing: globalSpacing, systems: systems };
     },
 
@@ -1636,8 +1630,6 @@ OMR.NoteDetector = {
             }
         }
 
-        console.log('[NoteDetector] Detected ' + noteheads.length + ' noteheads, ' + rests.length + ' rests, ' + barlines.length + ' barlines, ' + measures.length + ' measures');
-
         return { noteHeads: noteheads, events: events, rests: rests, barLines: barlines, keySignature: globalKeySig, timeSignature: globalTimeSig, measures: measures };
     }
 };
@@ -2060,7 +2052,7 @@ OMR.Engine = {
                         try {
                             ctx.scale = OMR.Scale.build(ctx.bin, ctx.w, ctx.h);
                         } catch (scaleErr) {
-                            console.error('[PianoModeOMR] Scale.build failed:', scaleErr);
+                            // Scale build failure: fall back to legacy pipeline.
                             ctx.scale = null;
                         }
                     }
@@ -2080,7 +2072,7 @@ OMR.Engine = {
                             ctx.gridLines = OMR.GridLines.retrieveStaves(
                                 ctx.bin, ctx.w, ctx.h, ctx.scale);
                         } catch (glErr) {
-                            console.error('[PianoModeOMR] GridLines.retrieveStaves failed:', glErr);
+                            // GridLines retrieval failed: leave gridLines null.
                             ctx.gridLines = null;
                         }
                     }
@@ -2125,7 +2117,7 @@ OMR.Engine = {
                                 ctx.bin, ctx.w, ctx.h,
                                 ctx.gridLines.staves, ctx.scale);
                         } catch (gbErr) {
-                            console.error('[PianoModeOMR] GridBars.retrieveBarsAndSystems failed:', gbErr);
+                            // GridBars retrieval failed: leave gridBars null.
                             ctx.gridBars = null;
                         }
                     }
@@ -2166,7 +2158,7 @@ OMR.Engine = {
                                 ctx.cleanBin, ctx.w, ctx.h,
                                 ctx.scale, ctx.gridLines.staves);
                         } catch (ssErr) {
-                            console.error('[PianoModeOMR] StemSeeds.buildSeeds failed:', ssErr);
+                            // StemSeeds build failed: leave stemSeeds null.
                             ctx.stemSeeds = null;
                         }
                     }
@@ -2188,7 +2180,7 @@ OMR.Engine = {
                                 ctx.cleanBin, ctx.w, ctx.h,
                                 ctx.scale, ctx.gridLines.staves);
                         } catch (bmErr) {
-                            console.error('[PianoModeOMR] Beams.buildBeams failed:', bmErr);
+                            // Beams build failed: leave beams null.
                             ctx.beams = null;
                         }
                     }
@@ -2216,7 +2208,7 @@ OMR.Engine = {
                                 ctx.scale, ctx.gridLines.staves,
                                 seedsForHeads);
                         } catch (hdErr) {
-                            console.error('[PianoModeOMR] Heads.buildHeads failed:', hdErr);
+                            // Heads build failed: leave heads null.
                             ctx.heads = null;
                         }
                     }
@@ -2240,7 +2232,7 @@ OMR.Engine = {
                                 ctx.cleanBin, ctx.w, ctx.h,
                                 ctx.scale, ctx.gridLines.staves);
                         } catch (ldErr) {
-                            console.error('[PianoModeOMR] Ledgers.buildLedgers failed:', ldErr);
+                            // Ledgers build failed: leave ledgers null.
                             ctx.ledgers = null;
                         }
                     }
@@ -2270,7 +2262,7 @@ OMR.Engine = {
                                 seedArr,
                                 beamArr);
                         } catch (stErr) {
-                            console.error('[PianoModeOMR] Stems.buildStems failed:', stErr);
+                            // Stems build failed: leave stems null.
                             ctx.stems = null;
                         }
                     }
@@ -2291,7 +2283,7 @@ OMR.Engine = {
                                 ctx.cleanBin, ctx.w, ctx.h,
                                 ctx.scale, ctx.gridLines.staves);
                         } catch (hkErr) {
-                            console.error('[PianoModeOMR] ClefKeyTime.detectHeaders failed:', hkErr);
+                            // ClefKeyTime detection failed: leave headers null.
                             ctx.headers = null;
                         }
                     }
@@ -2319,7 +2311,7 @@ OMR.Engine = {
                                 raHeads, raSeeds, raBeams,
                                 ctx.headers || []);
                         } catch (raErr) {
-                            console.error('[PianoModeOMR] RestsAlters.buildRestsAndAlters failed:', raErr);
+                            // RestsAlters build failed: leave restsAlters null.
                             ctx.restsAlters = null;
                         }
                     }
@@ -2349,8 +2341,49 @@ OMR.Engine = {
                                 ctx.restsAlters || [],
                                 ctx.gridBars || null);
                         } catch (sgErr) {
-                            console.error('[PianoModeOMR] Sig.buildSig failed:', sgErr);
                             ctx.sig = null;
+                        }
+                    }
+
+                    // ------------------------------------------------
+                    // Phase 14a: MusicXML 3.1 partwise writer sidecar.
+                    // Consumes the Phase 13 SIG output and produces a
+                    // MusicXML string + Blob URL suitable for the
+                    // AlphaTab player and external editors.
+                    // ------------------------------------------------
+                    if (OMR.MusicXmlNew
+                            && typeof OMR.MusicXmlNew.buildMusicXml === 'function'
+                            && ctx.sig
+                            && ctx.scale && ctx.scale.valid) {
+                        try {
+                            var mxml = OMR.MusicXmlNew.buildMusicXml(
+                                ctx.sig, ctx.scale, { title: title });
+                            ctx.musicxmlNew = mxml;
+                            if (typeof Blob !== 'undefined'
+                                    && typeof URL !== 'undefined') {
+                                ctx.musicxmlNewBlob = new Blob(
+                                    [mxml], { type: 'application/xml' });
+                                ctx.musicxmlNewUrl = URL.createObjectURL(
+                                    ctx.musicxmlNewBlob);
+                            }
+                        } catch (mxErr) {
+                            ctx.musicxmlNew = null;
+                        }
+                    }
+
+                    // ------------------------------------------------
+                    // Phase 14b: Standard MIDI File writer sidecar.
+                    // Same Phase 13 SIG input, format-1 SMF output.
+                    // ------------------------------------------------
+                    if (OMR.MidiNew
+                            && typeof OMR.MidiNew.buildMidi === 'function'
+                            && ctx.sig
+                            && ctx.scale && ctx.scale.valid) {
+                        try {
+                            ctx.midiNew = OMR.MidiNew.buildMidi(
+                                ctx.sig, ctx.scale, { title: title });
+                        } catch (miErr) {
+                            ctx.midiNew = null;
                         }
                     }
 
@@ -2426,10 +2459,13 @@ OMR.Engine = {
                     headers: ctx.headers || null,     // Phase 11 Clef/Key/Time
                     restsAlters: ctx.restsAlters || null, // Phase 12 Rests/Alters
                     sig: ctx.sig || null,             // Phase 13 SIGraph
+                    musicxmlNew:     ctx.musicxmlNew     || null, // Phase 14a
+                    musicxmlNewBlob: ctx.musicxmlNewBlob || null,
+                    musicxmlNewUrl:  ctx.musicxmlNewUrl  || null,
+                    midiNew:         ctx.midiNew         || null, // Phase 14b
                     version: VERSION
                 });
             }).catch(function(err) {
-                console.error('[PianoModeOMR] Processing error:', err);
                 reject(err);
             });
         });
@@ -2447,7 +2483,5 @@ OMR.Engine = {
         });
     }
 };
-
-console.log('[PianoModeOMR] legacy engine ' + VERSION + ' loaded \u2014 all v6 modules ready');
 
 })();
