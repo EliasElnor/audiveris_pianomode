@@ -597,7 +597,6 @@ $theme_uri = get_stylesheet_directory_uri();
 
     function initAlphaTab(musicxmlUrl) {
         if (typeof alphaTab === 'undefined') {
-            console.error('[PianoMode] AlphaTab library failed to load from CDN');
             atProgress.textContent = 'Error: player library unavailable';
             atProgress.style.color = '#ff4444';
             return;
@@ -623,8 +622,7 @@ $theme_uri = get_stylesheet_directory_uri();
 
         // Watchdog: if after 45s we still have no playerReady, surface the problem
         atLoadTimeoutId = setTimeout(function() {
-            console.error('[PianoMode] AlphaTab player never became ready within 45s');
-            atProgress.textContent = 'Player timeout — check console';
+            atProgress.textContent = 'Player timeout';
             atProgress.style.color = '#ff4444';
         }, 45000);
 
@@ -669,15 +667,13 @@ $theme_uri = get_stylesheet_directory_uri();
             atApi = new alphaTab.AlphaTabApi(atMain, settings);
         } catch (initErr) {
             clearAtLoadTimeout();
-            console.error('[PianoMode] AlphaTabApi constructor threw:', initErr);
-            atProgress.textContent = 'Player init failed — check console';
+            atProgress.textContent = 'Player init failed';
             atProgress.style.color = '#ff4444';
             return;
         }
 
         atApi.error.on(function(e) {
             clearAtLoadTimeout();
-            console.error('[PianoMode] AlphaTab error event:', e);
             var msg = 'Error loading score';
             if (e && e.message) msg += ': ' + e.message;
             atProgress.textContent = msg;
@@ -731,7 +727,6 @@ $theme_uri = get_stylesheet_directory_uri();
             atPlay.disabled = false;
             atStop.disabled = false;
             atApi.masterVolume = atVolume.value / 100;
-            console.log('[PianoMode] AlphaTab player ready');
         });
 
         atPlay.onclick = function() { atApi.playPause(); };
