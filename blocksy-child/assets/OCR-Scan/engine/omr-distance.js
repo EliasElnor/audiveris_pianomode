@@ -48,7 +48,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-distance.js loaded before omr-core.js');
         return;
     }
 
@@ -231,9 +230,4 @@
         VALUE_UNKNOWN:        VALUE_UNKNOWN
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-distance loaded '
-                    + '(Phase 3 ChamferDistance port, default=chamfer3/norm='
-                    + DEFAULT_NORMALIZER + ')');
-    }
 })();
