@@ -2275,6 +2275,27 @@ OMR.Engine = {
                         }
                     }
 
+                    // ------------------------------------------------
+                    // Phase 11: ClefBuilder + KeyBuilder + TimeBuilder
+                    // sidecar. Reads the staff header zone and emits a
+                    // {clef, key, time} descriptor per staff.
+                    // ------------------------------------------------
+                    if (OMR.ClefKeyTime
+                            && typeof OMR.ClefKeyTime.detectHeaders === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.headers = OMR.ClefKeyTime.detectHeaders(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves);
+                        } catch (hkErr) {
+                            console.error('[PianoModeOMR] ClefKeyTime.detectHeaders failed:', hkErr);
+                            ctx.headers = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2344,6 +2365,7 @@ OMR.Engine = {
                     newHeads: ctx.heads || null,      // Phase 8 Heads result
                     ledgers: ctx.ledgers || null,     // Phase 9 Ledgers result
                     newStems: ctx.stems || null,      // Phase 10 Stems result
+                    headers: ctx.headers || null,     // Phase 11 Clef/Key/Time
                     version: VERSION
                 });
             }).catch(function(err) {
