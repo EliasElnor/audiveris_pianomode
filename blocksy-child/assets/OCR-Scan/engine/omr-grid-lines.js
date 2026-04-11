@@ -54,7 +54,7 @@
  *   app/src/main/java/org/audiveris/omr/sheet/grid/ClustersRetriever.java
  *
  * @package PianoMode
- * @version 6.3.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -85,7 +85,14 @@
                                          // of slices to be confirmed as a line
 
         // Filament building thresholds passed to FilamentFactory
-        minRunPerInterline:       0.25   // only count horizontal runs ≥ 0.25*int
+        minRunPerInterline:       0.25,  // only count horizontal runs ≥ 0.25*int
+
+        // Grand-staff pairing (PartsBuilder port). Audiveris pairs two
+        // adjacent staves into one Part when their vertical gap is below
+        // maxPartGap interlines. For piano grand staff the gap is typically
+        // ~2-3.5 interlines; between two systems it is 8+.
+        maxGrandStaffGapIL:       4.5,
+        minGrandStaffGapIL:       1.0
     };
 
     /**
@@ -154,16 +161,109 @@
         var staves = clusterFilamentsIntoStaves(
             filaments, width, height, interline);
 
+        // ---- step 6b: pair staves into grand-staff systems (PartsBuilder) ----
+        var systems = pairStavesIntoSystems(staves, interline);
+
         // ---- step 7: emit debug overlay ----
         if (OMR.debug && OMR.debug.push) {
-            OMR.debug.push('gridLines', renderStavesDebug(staves));
+            OMR.debug.push('gridLines', renderStavesDebug(staves, systems));
         }
 
         return {
             staves:        staves,
+            systems:       systems,
             slope:         sheetSlope,
             filamentCount: totalBuilt
         };
+    }
+
+    // -------------------------------------------------------------------
+    // Pair adjacent staves into grand-staff systems.
+    //
+    // Audiveris handles this via PartsBuilder + SystemManager which look
+    // at the vertical gap between consecutive staves; in sheet music for
+    // piano, two adjacent staves whose gap (yBottom[i] → yTop[i+1]) is
+    // below ~4 interlines form a grand staff (treble + bass).
+    //
+    // We also compute a dynamic threshold from the observed gap
+    // distribution: if the smallest gap is much smaller than the largest,
+    // we split at the midpoint — this gives robust pairing on pages that
+    // contain multiple grand staves.
+    //
+    // Outputs:
+    //   systems[] = [{ id, staves:[Staff, Staff?], grandStaff:bool }]
+    //   each Staff gets mutated with { staffIndex, partner?, systemIdx }
+    // -------------------------------------------------------------------
+    function pairStavesIntoSystems(staves, interline) {
+        if (staves.length === 0) return [];
+        if (staves.length === 1) {
+            staves[0].staffIndex = 0;
+            staves[0].systemIdx  = 0;
+            return [{ id: 1, staves: [staves[0]], grandStaff: false }];
+        }
+
+        // Compute gaps between consecutive staves.
+        var gaps = [];
+        for (var i = 0; i < staves.length - 1; i++) {
+            gaps.push(staves[i + 1].yTop - staves[i].yBottom);
+        }
+
+        // Dynamic threshold: if gap distribution is bimodal (clear split
+        // between small intra-system gaps and large inter-system gaps),
+        // use the midpoint; otherwise use the absolute IL-scaled cap.
+        var sorted = gaps.slice().sort(function (a, b) { return a - b; });
+        var minGap = sorted[0];
+        var maxGap = sorted[sorted.length - 1];
+
+        var maxGrandStaffGap = C.maxGrandStaffGapIL * interline;
+        var minGrandStaffGap = C.minGrandStaffGapIL * interline;
+
+        var threshold;
+        if (maxGap > 1.8 * minGap && minGap < maxGrandStaffGap) {
+            // Bimodal: split at midpoint between the smallest and largest.
+            threshold = Math.min(
+                maxGrandStaffGap,
+                (minGap + maxGap) / 2
+            );
+        } else {
+            threshold = maxGrandStaffGap;
+        }
+
+        // Greedy pairing walk.
+        var systems = [];
+        var k = 0;
+        while (k < staves.length) {
+            var sys;
+            if (k + 1 < staves.length) {
+                var gap = staves[k + 1].yTop - staves[k].yBottom;
+                if (gap >= minGrandStaffGap && gap < threshold) {
+                    sys = {
+                        id:         systems.length + 1,
+                        staves:     [staves[k], staves[k + 1]],
+                        grandStaff: true
+                    };
+                    staves[k].partner      = staves[k + 1];
+                    staves[k + 1].partner  = staves[k];
+                    staves[k].staffIndex   = 0; // upper (treble by default)
+                    staves[k + 1].staffIndex = 1; // lower (bass by default)
+                    staves[k].systemIdx    = systems.length;
+                    staves[k + 1].systemIdx = systems.length;
+                    systems.push(sys);
+                    k += 2;
+                    continue;
+                }
+            }
+            sys = {
+                id:         systems.length + 1,
+                staves:     [staves[k]],
+                grandStaff: false
+            };
+            staves[k].staffIndex = 0;
+            staves[k].systemIdx  = systems.length;
+            systems.push(sys);
+            k++;
+        }
+        return systems;
     }
 
     // -------------------------------------------------------------------
@@ -375,7 +475,7 @@
         return shapes;
     }
 
-    function renderStavesDebug(staves) {
+    function renderStavesDebug(staves, systems) {
         var colors = ['#D7BF81', '#81D7BF', '#BF81D7', '#D78181', '#81BFD7'];
         var shapes = [];
         for (var s = 0; s < staves.length; s++) {
@@ -390,13 +490,31 @@
                     color: c
                 });
             }
+            var labelText = 'S' + st.id;
+            if (st.partner) labelText += (st.staffIndex === 0 ? ' (G)' : ' (F)');
             shapes.push({
                 kind:  'label',
                 x:     Math.max(10, st.xLeft - 30),
                 y:     Math.round(st.yTop),
-                text:  'S' + st.id,
+                text:  labelText,
                 color: c
             });
+        }
+        // Draw grand-staff brackets.
+        if (systems) {
+            for (var ss = 0; ss < systems.length; ss++) {
+                var sys = systems[ss];
+                if (sys.grandStaff && sys.staves.length === 2) {
+                    var top = sys.staves[0];
+                    var bot = sys.staves[1];
+                    shapes.push({
+                        kind: 'line',
+                        x1:   top.xLeft - 6, y1: top.yTop,
+                        x2:   top.xLeft - 6, y2: bot.yBottom,
+                        color: '#FFD700'
+                    });
+                }
+            }
         }
         return shapes;
     }
@@ -407,7 +525,8 @@
     OMR.GridLines = {
         retrieveStaves:             retrieveStaves,
         _computeSheetSlope:         computeSheetSlope,
-        _clusterFilamentsIntoStaves: clusterFilamentsIntoStaves
+        _clusterFilamentsIntoStaves: clusterFilamentsIntoStaves,
+        _pairStavesIntoSystems:      pairStavesIntoSystems
     };
 
 })();
