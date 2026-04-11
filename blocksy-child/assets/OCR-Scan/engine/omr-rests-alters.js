@@ -60,7 +60,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-rests-alters.js loaded before omr-core.js');
         return;
     }
 
@@ -213,11 +212,6 @@
             OMR.debug.push('restsAndAlters', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] RestsAlters: '
-                        + allRests.length + ' rests, '
-                        + allAlters.length + ' alters');
-        }
         return { rests: allRests, alters: allAlters };
     }
 
@@ -444,8 +438,4 @@
         buildRestsAndAlters: buildRestsAndAlters
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-rests-alters loaded '
-                    + '(Phase 12 RestsBuilder + AltersBuilder port)');
-    }
 })();
