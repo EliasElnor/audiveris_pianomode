@@ -29,7 +29,7 @@
     // Shared version string. Every module reads OMR.VERSION for logging.
     // BUMP this on every Phase commit along with PIANOMODE_OMR_VER in
     // functions.php so the ?ver=X.Y.Z cache buster stays consistent.
-    OMR.VERSION = 'v6.11.0';
+    OMR.VERSION = 'v6.12.0';
 
     // Feature flags — each Phase flips the corresponding flag to true once
     // its replacement module is ready and validated against the legacy code.
@@ -81,11 +81,4 @@
         });
     };
 
-    // Single initialization log so we can tell from the browser console
-    // whether the Phase 1 multi-file enqueue chain is actually firing.
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] core bootstrap ' + OMR.VERSION
-                    + ' — flags=' + Object.keys(OMR.flags).length
-                    + ', debug=' + (OMR.debug.enabled ? 'on' : 'off'));
-    }
 })();
