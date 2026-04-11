@@ -60,12 +60,7 @@
     'use strict';
 
     var OMR = window.PianoModeOMR;
-    if (!OMR) {
-        console.error('[PianoModeOMR] omr-grid-lines.js loaded before omr-core.js');
-        return;
-    }
-    if (!OMR.Filaments) {
-        console.error('[PianoModeOMR] omr-grid-lines.js requires omr-filaments.js');
+    if (!OMR || !OMR.Filaments) {
         return;
     }
 
@@ -162,13 +157,6 @@
         // ---- step 7: emit debug overlay ----
         if (OMR.debug && OMR.debug.push) {
             OMR.debug.push('gridLines', renderStavesDebug(staves));
-        }
-
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Grid/Lines: ' + totalBuilt
-                        + ' filaments built, ' + filaments.length
-                        + ' retained, slope=' + sheetSlope.toFixed(4)
-                        + ' rad, ' + staves.length + ' staves');
         }
 
         return {
@@ -422,8 +410,4 @@
         _clusterFilamentsIntoStaves: clusterFilamentsIntoStaves
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-grid-lines loaded '
-                    + '(Phase 4 LinesRetriever + ClustersRetriever port)');
-    }
 })();
