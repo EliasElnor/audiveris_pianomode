@@ -41,7 +41,7 @@
  *   app/src/main/java/org/audiveris/omr/image/DistanceTable.java
  *
  * @package PianoMode
- * @version 6.2.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -215,6 +215,55 @@
         return computeFromReference(inv, width, height, mask);
     }
 
+    /**
+     * Bounded distance transform — only computes values inside the axis-
+     * aligned rectangle [xMin..xMax] × [yMin..yMax]. Used by Phase 8
+     * TemplateFactory so we don't allocate a sheet-sized DistanceTable
+     * just to process a 20×20 template.
+     *
+     * Reference pixels OUTSIDE the rectangle are ignored; pixels inside
+     * the rectangle that fall on background get their distance to the
+     * nearest reference pixel within the same rectangle.
+     */
+    function computeBounded(reference, width, height, xMin, xMax, yMin, yMax, mask) {
+        mask = mask || DEFAULT_MASK;
+        var normalizer = mask[0][2];
+        if (xMin < 0) xMin = 0;
+        if (yMin < 0) yMin = 0;
+        if (xMax >= width) xMax = width - 1;
+        if (yMax >= height) yMax = height - 1;
+        var w2 = xMax - xMin + 1;
+        var h2 = yMax - yMin + 1;
+        var sub = new Uint8Array(w2 * h2);
+        for (var y = yMin; y <= yMax; y++) {
+            for (var x = xMin; x <= xMax; x++) {
+                sub[(y - yMin) * w2 + (x - xMin)] = reference[y * width + x] ? 1 : 0;
+            }
+        }
+        return computeFromReference(sub, w2, h2, mask);
+    }
+
+    /**
+     * Convenience: per-pixel stroke thickness estimation. For every
+     * foreground pixel p in `bin`, thickness(p) ≈ 2 * distanceToBack(p).
+     * Returned as a Uint16Array in pixel units (rounded).
+     *
+     * StemSeedsBuilder uses this to discard stem candidates whose width
+     * at any row exceeds the expected line thickness.
+     */
+    function strokeThickness(bin, width, height) {
+        var dt = computeToBack(bin, width, height, DEFAULT_MASK);
+        var out = new Uint16Array(width * height);
+        var norm = dt.normalizer;
+        for (var i = 0; i < out.length; i++) {
+            if (!bin[i]) { out[i] = 0; continue; }
+            var v = dt.data[i];
+            if (v < 0) { out[i] = 0; continue; }
+            out[i] = Math.round((v * 2) / norm);
+        }
+        return out;
+    }
+
     // -------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------
@@ -222,6 +271,8 @@
         computeToFore:        computeToFore,
         computeToBack:        computeToBack,
         computeFromReference: computeFromReference,
+        computeBounded:       computeBounded,
+        strokeThickness:      strokeThickness,
         DistanceTable:        DistanceTable,
         MASKS:                MASKS,
         DEFAULT_MASK:         DEFAULT_MASK,
