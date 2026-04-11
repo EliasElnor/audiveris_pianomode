@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.5.0' );
+    define( 'PIANOMODE_OMR_VER', '6.6.0' );
 }
 
 /**
@@ -453,6 +453,58 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 6. Phase 6: StemSeedsBuilder — vertical stem ribbon detection from
+    //    the staff-removed clean binary. Depends on Phase 2 scale and
+    //    Phase 4 staves for owner assignment.
+    wp_enqueue_script(
+        'pm-omr-stems-seeds',
+        $base_uri . '/engine/omr-stems-seeds.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 7. Phase 7: BeamsBuilder — beam/hook detection via connected
+    //    components on the staff+stem-removed binary. Depends on
+    //    Phase 2 scale + Phase 4 staves.
+    wp_enqueue_script(
+        'pm-omr-beams',
+        $base_uri . '/engine/omr-beams.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 8a. Phase 8: TemplateFactory — procedural note-head templates
+    //     (NOTEHEAD_BLACK, NOTEHEAD_VOID, WHOLE_NOTE, BREVE). Consumed by
+    //     Phase 8b heads builder.
+    wp_enqueue_script(
+        'pm-omr-templates',
+        $base_uri . '/engine/omr-templates.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 8b. Phase 8: NoteHeadsBuilder — two-pass (seed-based + range-based)
+    //     note-head detection using distance-transform matching against
+    //     the TemplateFactory catalog. Depends on Phase 3 distance,
+    //     Phase 4 staves, Phase 6 seeds, and Phase 8a templates.
+    wp_enqueue_script(
+        'pm-omr-heads',
+        $base_uri . '/engine/omr-heads.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-distance',
+            'pm-omr-grid-lines',
+            'pm-omr-stems-seeds',
+            'pm-omr-templates'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -466,7 +518,11 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-distance',
             'pm-omr-filaments',
             'pm-omr-grid-lines',
-            'pm-omr-grid-bars'
+            'pm-omr-grid-bars',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-templates',
+            'pm-omr-heads'
         ],
         PIANOMODE_OMR_VER,
         false
