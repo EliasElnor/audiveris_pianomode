@@ -50,7 +50,7 @@
  * so downstream phases can query the header without re-scanning.
  *
  * @package PianoMode
- * @version 6.8.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -102,13 +102,29 @@
         var topLine = staff.lines[0];
         var botLine = staff.lines[staff.lines.length - 1];
 
-        // Helper: y at x for the top/bottom staff line.
-        function yTopAt(x) { return topLine.line && topLine.line.getYAtX
-            ? topLine.line.getYAtX(x) : staff.yTop; }
-        function yBotAt(x) { return botLine.line && botLine.line.getYAtX
-            ? botLine.line.getYAtX(x) : staff.yBottom; }
+        // Helper: y at x for the top/bottom staff line. The filament
+        // objects (Phase 3 Filaments) expose getYAtX directly — the
+        // older {line: Filament} wrapper only exists in legacy code.
+        function yTopAt(x) {
+            if (topLine && typeof topLine.getYAtX === 'function') {
+                return topLine.getYAtX(x);
+            }
+            if (topLine && topLine.line && typeof topLine.line.getYAtX === 'function') {
+                return topLine.line.getYAtX(x);
+            }
+            return staff.yTop;
+        }
+        function yBotAt(x) {
+            if (botLine && typeof botLine.getYAtX === 'function') {
+                return botLine.getYAtX(x);
+            }
+            if (botLine && botLine.line && typeof botLine.line.getYAtX === 'function') {
+                return botLine.line.getYAtX(x);
+            }
+            return staff.yBottom;
+        }
 
-        var clef = scanClef(bin, w, h, interline, xLeft, yTopAt, yBotAt);
+        var clef = scanClef(bin, w, h, interline, xLeft, yTopAt, yBotAt, staff);
         var key  = scanKey (bin, w, h, interline, xLeft, yTopAt, yBotAt);
         var time = scanTime(bin, w, h, interline, xLeft, yTopAt, yBotAt);
 
@@ -116,19 +132,41 @@
     }
 
     // -------------------------------------------------------------------
-    // Clef scan: ink y-centroid in the clef zone tells us TREBLE/BASS/ALTO.
-    // We compute the bounding box of the largest connected ink mass in
-    // the zone and use its center y relative to the staff mid-line.
+    // Clef scan: multi-cue detection combining the ink y-centroid and a
+    // full-height ink histogram within the clef zone. Uses the staff's
+    // grand-staff position (upper → treble by default, lower → bass) as
+    // the tie-breaker when geometric evidence is ambiguous — NO blind
+    // TREBLE fallback any more.
+    //
+    // Geometric cues used:
+    //   - cy   : y-centroid of ink mass (screen coords: y+ = down)
+    //   - hClef: total vertical extent of ink in zone
+    //   - topHeavy : ratio of ink above mid-line
+    //   - tall     : does the glyph extend well above the top line?
+    //                (G clef has a big loop below the staff;
+    //                 F clef sits wholly inside the upper half;
+    //                 ink ABOVE top-line → treble marker)
+    //   - deep     : does the glyph extend well below the bottom line?
+    //                (G clef tail hangs below bottom line; F clef does not)
     // -------------------------------------------------------------------
-    function scanClef(bin, w, h, interline, xLeft, yTopAt, yBotAt) {
+    function scanClef(bin, w, h, interline, xLeft, yTopAt, yBotAt, staff) {
         var x0 = Math.max(0, Math.round(xLeft + Z.clefStartIL * interline));
         var x1 = Math.min(w - 1, Math.round(xLeft + Z.clefEndIL * interline));
 
         var sumY = 0, sumX = 0, count = 0;
         var yMin = Infinity, yMax = -Infinity;
+        var inkAbove = 0; // ink strictly above staff top line
+        var inkBelow = 0; // ink strictly below staff bottom line
+        var inkInTop = 0; // ink in top half of the staff
+        var inkInBot = 0; // ink in bottom half of the staff
+
         for (var x = x0; x <= x1; x++) {
-            var yT = Math.round(yTopAt(x) - 1.5 * interline); // clefs extend above
-            var yB = Math.round(yBotAt(x) + 1.5 * interline); // and below the staff
+            var yTopLine = yTopAt(x);
+            var yBotLine = yBotAt(x);
+            var yMid     = (yTopLine + yBotLine) / 2;
+
+            var yT = Math.round(yTopLine - 3.0 * interline); // clefs extend well above
+            var yB = Math.round(yBotLine + 3.0 * interline); // and below the staff
             if (yT < 0) yT = 0;
             if (yB >= h) yB = h - 1;
             for (var y = yT; y <= yB; y++) {
@@ -138,39 +176,85 @@
                     if (y < yMin) yMin = y;
                     if (y > yMax) yMax = y;
                     count++;
+                    if (y < yTopLine - 0.3 * interline) inkAbove++;
+                    else if (y > yBotLine + 0.3 * interline) inkBelow++;
+                    else if (y < yMid) inkInTop++;
+                    else inkInBot++;
                 }
             }
         }
+
         if (count < interline * 2) {
             return { kind: 'NONE', x: x0, y: 0, ink: count };
         }
 
         var cx = sumX / count;
         var cy = sumY / count;
-        // Mid line of the staff at cx.
         var mid = (yTopAt(cx) + yBotAt(cx)) / 2;
         var rel = (cy - mid) / interline; // negative = above mid, positive = below mid
-
-        // Ink height proxy.
         var hClef = yMax - yMin;
-        var bigClef = (hClef > 4 * interline);
 
-        var kind;
-        if (rel > 0.30 && bigClef) {
-            // Centroid clearly below mid-line + tall: G clef (treble).
-            kind = 'TREBLE';
-        } else if (rel < -0.30 && bigClef) {
-            // Centroid above mid-line + tall: F clef (bass).
-            kind = 'BASS';
-        } else if (Math.abs(rel) <= 0.50 && bigClef) {
-            // Centroid near mid + still tall: C clef.
-            kind = 'ALTO';
-        } else {
-            // Default: assume treble (most common in piano).
-            kind = 'TREBLE';
+        // Per-shape evidence.
+        var trebleScore = 0;
+        var bassScore   = 0;
+        var altoScore   = 0;
+
+        // 1. Centroid position (strong cue).
+        if (rel > 0.15) trebleScore += 2;
+        else if (rel < -0.10) bassScore += 2;
+        else altoScore += 1;
+
+        // 2. Glyph height — G clef is typically ≥ 5 interlines tall.
+        if (hClef > 4.5 * interline) trebleScore += 2;
+        else if (hClef > 2.5 * interline && hClef < 3.8 * interline) bassScore += 2;
+        else if (hClef >= 3.8 * interline && hClef <= 4.5 * interline) altoScore += 1;
+
+        // 3. Ink above top line — G clef loops above; F clef & C clef do not.
+        if (inkAbove > 0.15 * count) trebleScore += 1;
+        else bassScore += 1;
+
+        // 4. Ink below bottom line — G clef tail hangs; F clef & C clef do not.
+        if (inkBelow > 0.10 * count) trebleScore += 1;
+
+        // 5. Top-half vs bottom-half ink — F clef is top-heavy, G clef is balanced.
+        var topHeavy = (count > 0) ? (inkInTop / (inkInTop + inkInBot + 1)) : 0;
+        if (topHeavy > 0.65) bassScore += 2;
+        else if (topHeavy > 0.40 && topHeavy < 0.60) trebleScore += 1;
+
+        // Grand-staff hint: in a paired system, the upper staff is TREBLE
+        // and the lower staff is BASS by default. Use as tie-breaker.
+        var grandStaffHint = null;
+        if (staff && staff.partner) {
+            grandStaffHint = (staff.staffIndex === 0) ? 'TREBLE' : 'BASS';
+            if (grandStaffHint === 'TREBLE') trebleScore += 1;
+            else bassScore += 1;
         }
 
-        return { kind: kind, x: cx, y: cy, ink: count };
+        var kind;
+        if (trebleScore >= bassScore && trebleScore >= altoScore) {
+            kind = 'TREBLE';
+        } else if (bassScore >= altoScore) {
+            kind = 'BASS';
+        } else {
+            kind = 'ALTO';
+        }
+
+        // Final safety net: if scores are all zero (unlikely), honor the
+        // grand-staff hint or fall back to TREBLE (single-staff case).
+        if (trebleScore === 0 && bassScore === 0 && altoScore === 0) {
+            kind = grandStaffHint || 'TREBLE';
+        }
+
+        return {
+            kind:    kind,
+            x:       cx,
+            y:       cy,
+            ink:     count,
+            height:  hClef,
+            rel:     rel,
+            scores:  { treble: trebleScore, bass: bassScore, alto: altoScore },
+            hint:    grandStaffHint
+        };
     }
 
     // -------------------------------------------------------------------
