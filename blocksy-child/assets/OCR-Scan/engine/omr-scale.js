@@ -48,7 +48,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-scale.js loaded before omr-core.js');
         return;
     }
 
@@ -266,13 +265,6 @@
             }]);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Scale: interline=' + interline
-                        + ' mainFore=' + blackPeak.index
-                        + ' beam=' + beamThickness + (beamIsGuess ? ' (guess)' : '')
-                        + (interline2 > 0 ? ' small=' + interline2 : ''));
-        }
-
         return result;
     }
 
@@ -318,7 +310,4 @@
         _bandAroundPeak: bandAroundPeak
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-scale loaded (Phase 2 ScaleBuilder port)');
-    }
 })();
