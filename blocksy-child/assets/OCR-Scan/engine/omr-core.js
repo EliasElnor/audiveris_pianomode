@@ -18,7 +18,7 @@
  *                  etc. in Phases 2..14)
  *
  * @package PianoMode
- * @version 6.1.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -29,24 +29,26 @@
     // Shared version string. Every module reads OMR.VERSION for logging.
     // BUMP this on every Phase commit along with PIANOMODE_OMR_VER in
     // functions.php so the ?ver=X.Y.Z cache buster stays consistent.
-    OMR.VERSION = 'v6.12.0';
+    OMR.VERSION = 'v6.13.0';
 
     // Feature flags — each Phase flips the corresponding flag to true once
     // its replacement module is ready and validated against the legacy code.
-    // While false, the legacy v6 path runs unchanged.
+    // v6.13.0: Wave 1 — ALL phases enabled by default. The new Audiveris-port
+    // pipeline is now authoritative; legacy v6 code paths only run as fallback
+    // when a new module fails to produce output.
     OMR.flags = OMR.flags || {
-        useNewScale:   false,  // Phase 3 ScaleBuilder
-        useNewStaff:   false,  // Phase 4 LinesRetriever + ClustersRetriever
-        useNewBars:    false,  // Phase 5 BarsRetriever
-        useNewSeeds:   false,  // Phase 6 StemSeedsBuilder
-        useNewBeams:   false,  // Phase 7 BeamsBuilder
-        useNewHeads:   false,  // Phase 8 TemplateFactory + NoteHeadsBuilder
-        useNewLedgers: false,  // Phase 9 LedgersBuilder
-        useNewStems:   false,  // Phase 10 StemsBuilder + HeadLinker
-        useNewHeader:  false,  // Phase 11 Clef/Key/Time
-        useNewRests:   false,  // Phase 12 RestsBuilder + Alters
-        useNewSig:     false,  // Phase 13 SIGraph + rhythm
-        useNewEmit:    false   // Phase 14 MusicXML + MIDI
+        useNewScale:   true,   // Phase 3 ScaleBuilder
+        useNewStaff:   true,   // Phase 4 LinesRetriever + ClustersRetriever
+        useNewBars:    true,   // Phase 5 BarsRetriever
+        useNewSeeds:   true,   // Phase 6 StemSeedsBuilder
+        useNewBeams:   true,   // Phase 7 BeamsBuilder
+        useNewHeads:   true,   // Phase 8 TemplateFactory + NoteHeadsBuilder
+        useNewLedgers: true,   // Phase 9 LedgersBuilder
+        useNewStems:   true,   // Phase 10 StemsBuilder + HeadLinker
+        useNewHeader:  true,   // Phase 11 Clef/Key/Time
+        useNewRests:   true,   // Phase 12 RestsBuilder + Alters
+        useNewSig:     true,   // Phase 13 SIGraph + rhythm
+        useNewEmit:    true    // Phase 14 MusicXML + MIDI
     };
 
     // Debug overlay bus. Any stage may call:
