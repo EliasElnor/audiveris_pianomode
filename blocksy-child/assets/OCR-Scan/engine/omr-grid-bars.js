@@ -46,7 +46,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-grid-bars.js loaded before omr-core.js');
         return;
     }
 
@@ -339,12 +338,6 @@
             OMR.debug.push('gridBars', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Grid/Bars: ' + barlines.length
-                        + ' peaks, ' + connections.length + ' connections, '
-                        + systems.length + ' system(s)');
-        }
-
         return {
             barlines:    barlines,
             systems:     systems,
@@ -384,8 +377,4 @@
         _findProjectionPeaks:   findProjectionPeaks
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-grid-bars loaded '
-                    + '(Phase 5 BarsRetriever + StaffProjector port)');
-    }
 })();
