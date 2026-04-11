@@ -41,7 +41,7 @@
  *   { kind: 'label', x, y, text: 'interline=XX mainFore=XX beam=XX' }
  *
  * @package PianoMode
- * @version 6.2.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -63,7 +63,8 @@
         beamMinCountRatio:    0.01,   // min count for real beam peak (quorum)
         minBlackRatio:        0.001,  // min foreground fraction for a real sheet
         minSecondRatio:       1.2,    // merge close combo peaks below this
-        maxSecondRatio:       1.9     // reject far combo peaks above this
+        maxSecondRatio:       1.9,    // reject far combo peaks above this
+        smallInterlineRatio:  0.70    // cue-staff interline / main interline
     };
 
     /**
@@ -84,6 +85,7 @@
         var maxCombo = maxBlack + maxWhite;
 
         var blackHist = new Uint32Array(maxBlack + 1);
+        var whiteHist = new Uint32Array(maxWhite + 1);
         var comboHist = new Uint32Array(maxCombo + 1);
 
         var totalBlackPixels = 0;
@@ -126,6 +128,7 @@
                     havePrevBlack = true;
                     pendingWhite  = 0;
                 } else if (curKind === 0) {
+                    if (curLen <= maxWhite) whiteHist[curLen]++;
                     pendingWhite = curLen;
                 }
 
@@ -239,17 +242,37 @@
             beamIsGuess   = false;
         }
 
+        // ---- whitePeak: reference for small/cue-staff detection ----
+        var whitePeak = argmax(whiteHist, 1, maxWhite);
+
+        // ---- smallInterline: optional cue staff interline ----
+        // Audiveris supports cue-size staves (small notes beside
+        // normal ones). If a second combo peak falls around 70% of
+        // the main interline, treat it as the cue interline.
+        var smallInterline = 0;
+        if (interline2 > 0
+            && interline2 < interline
+            && interline2 >= Math.round(C.smallInterlineRatio * interline * 0.85)
+            && interline2 <= Math.round(C.smallInterlineRatio * interline * 1.15)) {
+            smallInterline = interline2;
+        }
+
         var result = {
             valid: true,
             reason: 'ok',
-            interline:     interline,
-            interline2:    interline2,
-            mainFore:      blackPeak.index,
-            minFore:       blackBand.lo,
-            maxFore:       blackBand.hi,
-            beamThickness: beamThickness,
-            beamIsGuess:   beamIsGuess,
-            blackRatio:    blackRatio
+            interline:      interline,
+            interline2:     interline2,
+            smallInterline: smallInterline,
+            mainFore:       blackPeak.index,
+            minFore:        blackBand.lo,
+            maxFore:        blackBand.hi,
+            whitePeak:      whitePeak.index,
+            beamThickness:  beamThickness,
+            beamIsGuess:    beamIsGuess,
+            blackRatio:     blackRatio,
+            // Derived thresholds used by downstream phases.
+            lineThickness:    blackPeak.index,
+            maxLineThickness: Math.max(blackBand.hi, Math.round(blackPeak.index * 1.5))
         };
 
         // Emit debug label top-left so we can eyeball the numbers.
