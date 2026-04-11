@@ -2324,6 +2324,36 @@ OMR.Engine = {
                         }
                     }
 
+                    // ------------------------------------------------
+                    // Phase 13: SIGraph + Rhythm + voices sidecar.
+                    // Combines all prior phase outputs into systems /
+                    // measures / voices / events with pitch + duration
+                    // resolved. This is the input shape Phase 14
+                    // MusicXML / MIDI writers will consume.
+                    // ------------------------------------------------
+                    if (OMR.Sig
+                            && typeof OMR.Sig.buildSig === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.sig = OMR.Sig.buildSig(
+                                ctx.scale,
+                                ctx.gridLines.staves,
+                                ctx.headers || [],
+                                ctx.heads || [],
+                                ctx.stems || [],
+                                ctx.beams || [],
+                                ctx.ledgers || [],
+                                ctx.restsAlters || [],
+                                ctx.gridBars || null);
+                        } catch (sgErr) {
+                            console.error('[PianoModeOMR] Sig.buildSig failed:', sgErr);
+                            ctx.sig = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2395,6 +2425,7 @@ OMR.Engine = {
                     newStems: ctx.stems || null,      // Phase 10 Stems result
                     headers: ctx.headers || null,     // Phase 11 Clef/Key/Time
                     restsAlters: ctx.restsAlters || null, // Phase 12 Rests/Alters
+                    sig: ctx.sig || null,             // Phase 13 SIGraph
                     version: VERSION
                 });
             }).catch(function(err) {
