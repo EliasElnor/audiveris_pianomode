@@ -33,7 +33,7 @@
  * simpler algorithm misses too many stems on real scans.
  *
  * @package PianoMode
- * @version 6.5.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -44,15 +44,18 @@
     }
 
     // Thresholds — interline fractions from Audiveris StemSeedsBuilder
-    // $Parameters at profile 0.
+    // $Parameters at profile 0 (slightly loosened to match real scans).
     var C = {
-        minStemLengthRatio:   1.25,  // min length in interlines (≥ half-staff)
-        maxStemThicknessRatio: 0.25, // max px thickness vs interline
-        minBlackRatio:        0.5,   // black/(black+white) on seed path
-        maxSlope:             0.08,  // max absolute slope vs vertical
-        maxGapRows:           0,     // no gap allowed at profile 0
-        minCleanRatio:        0.5,   // rows whose left/right neighbors are empty
-        cleanMarginRatio:     0.15   // clean margin around the stem column (IL)
+        minStemLengthRatio:    1.25,  // min length in interlines (≥ half-staff)
+        maxStemThicknessRatio: 0.30,  // max px thickness vs interline
+        minBlackRatio:         0.40,  // black/(black+white) on seed path
+        maxSlope:              0.10,  // max absolute slope vs vertical
+        maxGapRows:            1,     // up to 1px gap allowed (scan noise)
+        minCleanRatio:         0.40,  // rows whose left/right neighbors are empty
+        cleanMarginRatio:      0.20,  // clean margin around the stem column (IL)
+        // Staff-proximity filter: only keep seeds within this many interlines
+        // of any staff (prevents margin ink from being treated as stems).
+        staffBandIL:           6.0
     };
 
     /**
@@ -74,10 +77,30 @@
         var minLen    = Math.max(4, Math.round(C.minStemLengthRatio * interline));
         var maxThick  = Math.max(1, Math.round(C.maxStemThicknessRatio * interline));
         var cleanMargin = Math.max(1, Math.round(C.cleanMarginRatio * interline));
+        var staffBand = Math.round(C.staffBandIL * interline);
 
-        // Step 1: column density map.
+        // Compute the y-band where staves live, so we can restrict seed
+        // search and ignore page-margin noise far from any staff.
+        var yBandMin = 0;
+        var yBandMax = height - 1;
+        if (staves && staves.length > 0) {
+            yBandMin = Infinity;
+            yBandMax = -Infinity;
+            for (var si = 0; si < staves.length; si++) {
+                if (staves[si].yTop - staffBand < yBandMin) {
+                    yBandMin = staves[si].yTop - staffBand;
+                }
+                if (staves[si].yBottom + staffBand > yBandMax) {
+                    yBandMax = staves[si].yBottom + staffBand;
+                }
+            }
+            yBandMin = Math.max(0, Math.round(yBandMin));
+            yBandMax = Math.min(height - 1, Math.round(yBandMax));
+        }
+
+        // Step 1: column density map (restricted to the staff y-band).
         var colCount = new Int32Array(width);
-        for (var y = 0; y < height; y++) {
+        for (var y = yBandMin; y <= yBandMax; y++) {
             var row = y * width;
             for (var x = 0; x < width; x++) {
                 if (cleanBin[row + x]) colCount[x]++;
@@ -181,6 +204,11 @@
 
     // Apply clean/slope/straight checks and return a seed object, or null
     // if the candidate fails. Ties the seed to the nearest staff if any.
+    //
+    // v6.13 tweak: instead of scoring the full [y1..y2] range with a
+    // single cleanness ratio, we find the LONGEST contiguous sub-range
+    // where the stem column has clear left+right margins. This matches
+    // how Audiveris's StemSeedsBuilder trims seeds around attached heads.
     function buildSeedIfClean(cleanBin, width, height, corridor,
                               y1, y2, blackCount, cleanMargin, staves) {
         // Recenter on the center-of-mass column of the corridor over [y1,y2].
@@ -197,19 +225,43 @@
         if (count === 0) return null;
         var cx = Math.round(sumX / count);
 
-        // Clean ratio: for every row [y1..y2], check that the pixels
-        // [cx-cleanMargin-1] and [cx+cleanMargin+1] are BACKGROUND, so the
-        // stem column isn't sitting flush against a beam or neighbor stem.
-        var cleanRows = 0;
-        var total = y2 - y1 + 1;
+        // Clean sub-range: for every row, test margin cleanness and find
+        // the longest run of consecutive clean rows. Trim the seed to
+        // that run so note-head-attached rows are excluded.
         var leftCol  = cx - cleanMargin - 1;
         var rightCol = cx + cleanMargin + 1;
+
+        var bestS = -1, bestE = -1;
+        var curS = -1;
         for (var yy = y1; yy <= y2; yy++) {
             var leftClean  = (leftCol  < 0)      || !cleanBin[yy * width + leftCol];
             var rightClean = (rightCol >= width) || !cleanBin[yy * width + rightCol];
-            if (leftClean && rightClean) cleanRows++;
+            var clean      = leftClean && rightClean;
+            if (clean) {
+                if (curS < 0) curS = yy;
+                if ((yy - curS) > (bestE - bestS)) {
+                    bestS = curS;
+                    bestE = yy;
+                }
+            } else {
+                curS = -1;
+            }
         }
-        if ((cleanRows / total) < C.minCleanRatio) return null;
+        if (bestS < 0) return null;
+
+        // Require the longest clean run to meet the min-length gate.
+        var minLen = Math.max(4, Math.round(1.25 * (staves && staves[0]
+                            ? staves[0].interline : 20)));
+        if ((bestE - bestS + 1) < minLen) return null;
+
+        // Also require the clean portion to cover at least minCleanRatio
+        // of the original candidate (prevents keeping a tiny clean tail).
+        var total = y2 - y1 + 1;
+        if (((bestE - bestS + 1) / total) < C.minCleanRatio) return null;
+
+        // Trim the seed to the longest clean run.
+        y1 = bestS;
+        y2 = bestE;
 
         // Slope: fit a simple line on the per-row center-of-mass and
         // reject if |dx/dy| > maxSlope. Audiveris uses BasicLine for
@@ -257,6 +309,13 @@
             }
         }
 
+        // Reject seeds that fall too far from any staff (margin ink).
+        if (!ownerStaff) return null;
+        var staffMidY = (ownerStaff.yTop + ownerStaff.yBottom) / 2;
+        if (Math.abs(yMid - staffMidY) > C.staffBandIL * (ownerStaff.interline || 20)) {
+            return null;
+        }
+
         return {
             x:         cx,
             y1:        y1,
@@ -264,7 +323,8 @@
             length:    (y2 - y1 + 1),
             thickness: thickness,
             slope:     slopeXY,
-            staff:     ownerStaff
+            staff:     ownerStaff,
+            systemIdx: ownerStaff.systemIdx
         };
     }
 
