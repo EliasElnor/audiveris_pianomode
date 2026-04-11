@@ -41,7 +41,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-filaments.js loaded before omr-core.js');
         return;
     }
 
@@ -330,8 +329,4 @@
         buildHorizontalFilaments:  buildHorizontalFilaments
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-filaments loaded '
-                    + '(Phase 3 Filament + BasicLine primitives)');
-    }
 })();
