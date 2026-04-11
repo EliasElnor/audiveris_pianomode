@@ -2146,6 +2146,81 @@ OMR.Engine = {
                     var cleanBin = OMR.StaffDetector.removeStaffLines(ctx.bin, ctx.w, ctx.h, ctx.staves);
                     report(3, 'Computing distance transform...', 45);
                     ctx.cleanBin = cleanBin;
+
+                    // ------------------------------------------------
+                    // Phase 6: StemSeedsBuilder sidecar. Needs the
+                    // Phase 4 gridLines.staves (with filament getYAtX)
+                    // to tag each seed with its owning staff. Result
+                    // is stored on ctx.stemSeeds regardless of the
+                    // useNewSeeds flag; flag gating happens in the
+                    // downstream phases that would consume it.
+                    // ------------------------------------------------
+                    if (OMR.StemSeeds
+                            && typeof OMR.StemSeeds.buildSeeds === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.stemSeeds = OMR.StemSeeds.buildSeeds(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves);
+                        } catch (ssErr) {
+                            console.error('[PianoModeOMR] StemSeeds.buildSeeds failed:', ssErr);
+                            ctx.stemSeeds = null;
+                        }
+                    }
+
+                    // ------------------------------------------------
+                    // Phase 7: BeamsBuilder sidecar. We feed it the
+                    // clean binary directly (morphological closing is
+                    // deferred — see omr-beams.js header). Gated on
+                    // Phase 4 staves being available.
+                    // ------------------------------------------------
+                    if (OMR.Beams
+                            && typeof OMR.Beams.buildBeams === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.beams = OMR.Beams.buildBeams(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves);
+                        } catch (bmErr) {
+                            console.error('[PianoModeOMR] Beams.buildBeams failed:', bmErr);
+                            ctx.beams = null;
+                        }
+                    }
+
+                    // ------------------------------------------------
+                    // Phase 8: TemplateFactory + NoteHeadsBuilder
+                    // sidecar. Two-pass head detection using the
+                    // distance-to-fore map. Consumes Phase 6 stem
+                    // seeds (Pass 1) and Phase 4 staves (both passes).
+                    // Heavy — only run when useNewHeads is on OR when
+                    // the legacy note detector will not be used.
+                    // ------------------------------------------------
+                    if (OMR.Heads
+                            && typeof OMR.Heads.buildHeads === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            var seedsForHeads = (ctx.stemSeeds && ctx.stemSeeds.seeds)
+                                ? ctx.stemSeeds.seeds
+                                : [];
+                            ctx.heads = OMR.Heads.buildHeads(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves,
+                                seedsForHeads);
+                        } catch (hdErr) {
+                            console.error('[PianoModeOMR] Heads.buildHeads failed:', hdErr);
+                            ctx.heads = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2210,6 +2285,9 @@ OMR.Engine = {
                     scale: ctx.scale || null,  // Phase 2 ScaleBuilder result
                     gridLines: ctx.gridLines || null,  // Phase 4 GridLines result
                     gridBars: ctx.gridBars || null,  // Phase 5 GridBars result
+                    stemSeeds: ctx.stemSeeds || null, // Phase 6 StemSeeds result
+                    newBeams: ctx.beams || null,      // Phase 7 Beams result
+                    newHeads: ctx.heads || null,      // Phase 8 Heads result
                     version: VERSION
                 });
             }).catch(function(err) {
