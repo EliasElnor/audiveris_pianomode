@@ -402,9 +402,4 @@
 
     OMR.MidiNew = OMR.MidiNew || {};
     OMR.MidiNew.buildMidi = buildMidi;
-
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-midi.js loaded — '
-                    + (OMR.VERSION || '?'));
-    }
 })();
