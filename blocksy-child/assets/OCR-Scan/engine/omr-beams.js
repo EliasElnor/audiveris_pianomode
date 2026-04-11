@@ -48,7 +48,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-beams.js loaded before omr-core.js');
         return;
     }
 
@@ -137,10 +136,6 @@
             OMR.debug.push('beams', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Beams: ' + components.length
-                        + ' components, ' + beams.length + ' beams retained');
-        }
         return { beams: beams };
     }
 
@@ -302,7 +297,4 @@
         _rowCentroidFit:     leastSquaresRowCentroid
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-beams loaded (Phase 7 BeamsBuilder port)');
-    }
 })();
