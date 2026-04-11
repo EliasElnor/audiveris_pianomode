@@ -2296,6 +2296,34 @@ OMR.Engine = {
                         }
                     }
 
+                    // ------------------------------------------------
+                    // Phase 12: RestsBuilder + AltersBuilder sidecar.
+                    // Looks at all CC in the staff y band that aren't
+                    // claimed by Phase 6/7/8 and labels them as rests
+                    // or accidentals; mutates each linked head with
+                    // head.alter.
+                    // ------------------------------------------------
+                    if (OMR.RestsAlters
+                            && typeof OMR.RestsAlters.buildRestsAndAlters === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            var raHeads = (ctx.heads && ctx.heads.heads) ? ctx.heads.heads : [];
+                            var raSeeds = (ctx.stemSeeds && ctx.stemSeeds.seeds) ? ctx.stemSeeds.seeds : [];
+                            var raBeams = (ctx.beams && ctx.beams.beams) ? ctx.beams.beams : [];
+                            ctx.restsAlters = OMR.RestsAlters.buildRestsAndAlters(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves,
+                                raHeads, raSeeds, raBeams,
+                                ctx.headers || []);
+                        } catch (raErr) {
+                            console.error('[PianoModeOMR] RestsAlters.buildRestsAndAlters failed:', raErr);
+                            ctx.restsAlters = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2366,6 +2394,7 @@ OMR.Engine = {
                     ledgers: ctx.ledgers || null,     // Phase 9 Ledgers result
                     newStems: ctx.stems || null,      // Phase 10 Stems result
                     headers: ctx.headers || null,     // Phase 11 Clef/Key/Time
+                    restsAlters: ctx.restsAlters || null, // Phase 12 Rests/Alters
                     version: VERSION
                 });
             }).catch(function(err) {
