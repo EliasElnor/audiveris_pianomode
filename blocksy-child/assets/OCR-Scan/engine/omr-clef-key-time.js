@@ -57,7 +57,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-clef-key-time.js loaded before omr-core.js');
         return;
     }
 
@@ -92,18 +91,6 @@
             results.push(hdr);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Headers: ' + results.length
-                        + ' staves, clefs=['
-                        + results.map(function (r) { return r.clef.kind; }).join(',')
-                        + '] keys=['
-                        + results.map(function (r) { return r.key.fifths; }).join(',')
-                        + '] times=['
-                        + results.map(function (r) {
-                            return r.time.beats + '/' + r.time.beatType;
-                        }).join(',')
-                        + ']');
-        }
         return results;
     }
 
@@ -423,8 +410,4 @@
         detectHeaders: detectHeaders
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-clef-key-time loaded '
-                    + '(Phase 11 Clef/Key/Time builders port)');
-    }
 })();
