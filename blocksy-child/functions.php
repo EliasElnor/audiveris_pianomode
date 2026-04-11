@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.6.0' );
+    define( 'PIANOMODE_OMR_VER', '6.7.0' );
 }
 
 /**
@@ -505,6 +505,22 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 9. Phase 9: LedgersBuilder — short horizontal strokes above and
+    //    below each staff. Depends on Phase 3 filaments (candidate
+    //    source) and Phase 4 staves (walking virtual line indices).
+    wp_enqueue_script(
+        'pm-omr-ledgers',
+        $base_uri . '/engine/omr-ledgers.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-filaments',
+            'pm-omr-grid-lines'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -522,7 +538,8 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-stems-seeds',
             'pm-omr-beams',
             'pm-omr-templates',
-            'pm-omr-heads'
+            'pm-omr-heads',
+            'pm-omr-ledgers'
         ],
         PIANOMODE_OMR_VER,
         false
