@@ -53,7 +53,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-templates.js loaded before omr-core.js');
         return;
     }
 
@@ -292,8 +291,4 @@
         WEIGHT_HOLE:          WEIGHT_HOLE
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-templates loaded '
-                    + '(Phase 8a TemplateFactory port)');
-    }
 })();
