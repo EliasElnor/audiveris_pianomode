@@ -46,7 +46,7 @@
  *   app/src/main/java/org/audiveris/omr/image/AnchoredTemplate.java
  *
  * @package PianoMode
- * @version 6.5.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -87,7 +87,7 @@
      * @returns {object} { NOTEHEAD_BLACK, NOTEHEAD_VOID, WHOLE_NOTE, BREVE }
      */
     function buildCatalog(interline) {
-        return {
+        var catalog = {
             NOTEHEAD_BLACK: buildEllipseTemplate('NOTEHEAD_BLACK',
                 Math.round(1.15 * interline),
                 Math.round(1.00 * interline),
@@ -104,6 +104,23 @@
                 Math.round(1.85 * interline),
                 Math.round(1.00 * interline))
         };
+        catalog.interline = interline;
+        return catalog;
+    }
+
+    /**
+     * Build the full template set a sheet needs, including cue-size
+     * variants when a smallInterline was detected by ScaleBuilder.
+     * Returns { standard: catalog, cue: catalog|null }.
+     */
+    function buildSheetCatalog(scale) {
+        var out = { standard: null, cue: null };
+        if (!scale || !scale.valid) return out;
+        out.standard = buildCatalog(scale.interline);
+        if (scale.smallInterline && scale.smallInterline >= 8) {
+            out.cue = buildCatalog(scale.smallInterline);
+        }
+        return out;
     }
 
     // -------------------------------------------------------------------
@@ -199,13 +216,29 @@
     // Finalize a template: attach anchors and evaluate method.
     // -------------------------------------------------------------------
     function buildTemplateObject(shape, width, height, points) {
+        // Anchor semantics (Audiveris Anchored.Anchor):
+        //
+        //   CENTER       — geometric center of the template.
+        //   MIDDLE_LEFT  — horizontal midpoint of the left edge.
+        //   MIDDLE_RIGHT — horizontal midpoint of the right edge.
+        //   LEFT_STEM    — point on the template that touches the left
+        //                  side of an attached stem (roughly at
+        //                  (0..1, midY), because stems are at the upper-
+        //                  left of down-stem heads).
+        //   RIGHT_STEM   — mirror of LEFT_STEM on the right edge.
+        //   TOP_LEFT     — upper-left corner, used by the full-rectangle
+        //                  evaluate loop during coarse scanning.
+        //
+        // v6.13: LEFT_STEM / RIGHT_STEM moved from the corners to the
+        // vertical midpoint of the left/right edges, matching where a
+        // stem actually attaches on a real engraved note.
         var anchors = {};
-        anchors[ANCHORS.TOP_LEFT]     = { dx: 0,                dy: 0 };
-        anchors[ANCHORS.CENTER]       = { dx: width / 2,        dy: height / 2 };
-        anchors[ANCHORS.MIDDLE_LEFT]  = { dx: 0,                dy: height / 2 };
-        anchors[ANCHORS.MIDDLE_RIGHT] = { dx: width,            dy: height / 2 };
-        anchors[ANCHORS.LEFT_STEM]    = { dx: 1,                dy: height - 1 };
-        anchors[ANCHORS.RIGHT_STEM]   = { dx: width - 1,        dy: 0 };
+        anchors[ANCHORS.TOP_LEFT]     = { dx: 0,           dy: 0 };
+        anchors[ANCHORS.CENTER]       = { dx: width / 2,   dy: height / 2 };
+        anchors[ANCHORS.MIDDLE_LEFT]  = { dx: 0,           dy: height / 2 };
+        anchors[ANCHORS.MIDDLE_RIGHT] = { dx: width,       dy: height / 2 };
+        anchors[ANCHORS.LEFT_STEM]    = { dx: 1,           dy: height / 2 };
+        anchors[ANCHORS.RIGHT_STEM]   = { dx: width - 1,   dy: height / 2 };
 
         var tpl = {
             shape:   shape,
@@ -284,6 +317,7 @@
     OMR.Templates = {
         ANCHORS:              ANCHORS,
         buildCatalog:         buildCatalog,
+        buildSheetCatalog:    buildSheetCatalog,
         buildEllipseTemplate: buildEllipseTemplate,
         buildBreveTemplate:   buildBreveTemplate,
         WEIGHT_FG:            WEIGHT_FG,
