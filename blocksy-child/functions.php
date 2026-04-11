@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.9.0' );
+    define( 'PIANOMODE_OMR_VER', '6.10.0' );
 }
 
 /**
@@ -554,6 +554,25 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 12. Phase 12: RestsBuilder + AltersBuilder — connected-component
+    //     scan in the staff y band, classifying each component as a
+    //     rest (whole/half/quarter/eighth/sixteenth) or accidental
+    //     (sharp/flat/natural/double). Depends on Phase 6/7/8/11.
+    wp_enqueue_script(
+        'pm-omr-rests-alters',
+        $base_uri . '/engine/omr-rests-alters.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-grid-lines',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-heads'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -574,7 +593,8 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-heads',
             'pm-omr-ledgers',
             'pm-omr-stems',
-            'pm-omr-clef-key-time'
+            'pm-omr-clef-key-time',
+            'pm-omr-rests-alters'
         ],
         PIANOMODE_OMR_VER,
         false
