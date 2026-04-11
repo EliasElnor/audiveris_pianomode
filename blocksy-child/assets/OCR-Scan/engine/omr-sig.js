@@ -80,7 +80,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-sig.js loaded before omr-core.js');
         return;
     }
 
@@ -197,19 +196,6 @@
             }
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            var nVoices = 0, nEvents = 0;
-            for (var x = 0; x < systems.length; x++) {
-                for (var y = 0; y < systems[x].measures.length; y++) {
-                    nVoices += systems[x].measures[y].voices.length;
-                    for (var v = 0; v < systems[x].measures[y].voices.length; v++) {
-                        nEvents += systems[x].measures[y].voices[v].events.length;
-                    }
-                }
-            }
-            console.log('[PianoModeOMR] SIG: ' + systems.length + ' systems, '
-                        + nVoices + ' voices, ' + nEvents + ' events');
-        }
         return { systems: systems };
     }
 
@@ -501,7 +487,4 @@
         buildSig: buildSig
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-sig loaded (Phase 13 SIGraph + Rhythm + Voices port)');
-    }
 })();
