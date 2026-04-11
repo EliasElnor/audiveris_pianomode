@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.11.0' );
+    define( 'PIANOMODE_OMR_VER', '6.12.0' );
 }
 
 /**
@@ -597,6 +597,34 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 14a. Phase 14 part 1: MusicXML 3.1 partwise writer. Consumes the
+    //      Phase 13 SIG output and produces a MusicXML string the player
+    //      and external editors (MuseScore, Finale) can load.
+    wp_enqueue_script(
+        'pm-omr-musicxml',
+        $base_uri . '/engine/omr-musicxml.js',
+        [
+            'pm-omr-core',
+            'pm-omr-sig'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 14b. Phase 14 part 2: Standard MIDI File (format 1) writer. Consumes
+    //      the same Phase 13 SIG output and produces a MIDI byte stream
+    //      + Blob URL for the AlphaTab player.
+    wp_enqueue_script(
+        'pm-omr-midi',
+        $base_uri . '/engine/omr-midi.js',
+        [
+            'pm-omr-core',
+            'pm-omr-sig'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -619,7 +647,9 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-stems',
             'pm-omr-clef-key-time',
             'pm-omr-rests-alters',
-            'pm-omr-sig'
+            'pm-omr-sig',
+            'pm-omr-musicxml',
+            'pm-omr-midi'
         ],
         PIANOMODE_OMR_VER,
         false
