@@ -39,7 +39,7 @@
  * still runs so we can render its output in the debug overlay.
  *
  * @package PianoMode
- * @version 6.4.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -154,8 +154,15 @@
 
     // -------------------------------------------------------------------
     // BarsRetriever — cross-staff peak alignment, system grouping, output.
+    //
+    // In v6.13 this module defers system-grouping to the Phase 4
+    // LinesRetriever pairing result (seeded from `staff.partner` +
+    // `staff.systemIdx`). It runs its own connection check as a
+    // sanity verification but NO LONGER overrides the Phase 4 grouping
+    // — having two competing staff→system maps was causing measures
+    // in the bass clef to end up orphaned from their treble partner.
     // -------------------------------------------------------------------
-    function retrieveBarsAndSystems(bin, width, height, staves, scale) {
+    function retrieveBarsAndSystems(bin, width, height, staves, scale, priorSystems) {
         if (!staves || staves.length === 0) {
             return { barlines: [], systems: [], peaks: [] };
         }
@@ -170,32 +177,27 @@
             perStaff.push({ staff: staves[s], projection: projection, peaks: peaks });
         }
 
-        // 2. Align peaks between adjacent staves + test vertical ink.
+        // 2. Align peaks between adjacent staves (within the same system
+        //    from Phase 4 — we do NOT pair across system boundaries).
         var maxDx = Math.max(3, Math.round(C.maxAlignmentDxInterlines * interline));
-        var parent = [];
-        for (var k = 0; k < staves.length; k++) parent.push(k);
-        function find(a) {
-            while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; }
-            return a;
-        }
-        function union(a, b) {
-            var ra = find(a), rb = find(b);
-            if (ra !== rb) parent[ra] = rb;
-        }
 
         var connections = [];
         for (var si = 0; si < perStaff.length - 1; si++) {
             var upper = perStaff[si];
             var lower = perStaff[si + 1];
-            // Deskew the lower peaks using slope difference. For a nearly
-            // horizontal sheet this is a no-op.
+            // Only attempt connection if the two staves already belong to
+            // the same Phase 4 system (partner relationship from grid-lines).
+            if (upper.staff.systemIdx !== undefined
+                && lower.staff.systemIdx !== undefined
+                && upper.staff.systemIdx !== lower.staff.systemIdx) {
+                continue;
+            }
             var slope = (upper.staff.slope + lower.staff.slope) / 2;
 
             for (var pu = 0; pu < upper.peaks.length; pu++) {
                 var up = upper.peaks[pu];
                 for (var pl = 0; pl < lower.peaks.length; pl++) {
                     var lp = lower.peaks[pl];
-                    // Skew-corrected dx: project upper peak down by slope.
                     var yMidUpper = (up.staff.yTop + up.staff.yBottom) / 2;
                     var yMidLower = (lp.staff.yTop + lp.staff.yBottom) / 2;
                     var dySpan = yMidLower - yMidUpper;
@@ -206,33 +208,40 @@
                             Math.round(up.staff.yBottom),
                             Math.round(lp.staff.yTop))) {
                         connections.push({ upper: up, lower: lp });
-                        union(si, si + 1);
                     }
                 }
             }
         }
 
-        // 3. Build systems via DSU buckets.
-        var systemMap = {};
-        for (var ss = 0; ss < staves.length; ss++) {
-            var root = find(ss);
-            if (!systemMap[root]) systemMap[root] = [];
-            systemMap[root].push(staves[ss]);
-        }
+        // 3. Systems: reuse Phase 4 pairing when provided, otherwise
+        //    fall back to one-system-per-staff.
         var systems = [];
-        Object.keys(systemMap).sort(function (a, b) {
-            return systemMap[a][0].yTop - systemMap[b][0].yTop;
-        }).forEach(function (rootKey, idx) {
-            var group = systemMap[rootKey];
-            systems.push({
-                id:     idx + 1,
-                staves: group,
-                top:    group[0].yTop,
-                bottom: group[group.length - 1].yBottom
-            });
-        });
+        if (priorSystems && priorSystems.length > 0) {
+            for (var psi = 0; psi < priorSystems.length; psi++) {
+                var ps = priorSystems[psi];
+                systems.push({
+                    id:         psi + 1,
+                    staves:     ps.staves,
+                    top:        ps.staves[0].yTop,
+                    bottom:     ps.staves[ps.staves.length - 1].yBottom,
+                    grandStaff: !!ps.grandStaff
+                });
+            }
+        } else {
+            for (var ss = 0; ss < staves.length; ss++) {
+                systems.push({
+                    id:     ss + 1,
+                    staves: [staves[ss]],
+                    top:    staves[ss].yTop,
+                    bottom: staves[ss].yBottom,
+                    grandStaff: false
+                });
+            }
+        }
 
         // 4. Classify peak widths: THIN vs THICK via median split.
+        // Also detect LIGHT_HEAVY / HEAVY_LIGHT / LIGHT_LIGHT / HEAVY_HEAVY
+        // composite barlines by looking for adjacent peak pairs.
         var allPeaks = [];
         for (var j = 0; j < perStaff.length; j++) {
             for (var q = 0; q < perStaff[j].peaks.length; q++) {
@@ -248,6 +257,31 @@
                     ? 'THICK'
                     : 'THIN';
             }
+            // Mark composite barlines (close pairs of peaks inside one staff).
+            var doubleDx = Math.round(0.8 * interline);
+            for (var pi = 0; pi < perStaff.length; pi++) {
+                var staffPeaks = perStaff[pi].peaks;
+                staffPeaks.sort(function (a, b) { return a.x - b.x; });
+                for (var pk = 0; pk < staffPeaks.length - 1; pk++) {
+                    var a = staffPeaks[pk];
+                    var b = staffPeaks[pk + 1];
+                    if (b.x - a.x > doubleDx) continue;
+                    // Compose style into Audiveris BarlineShape enum naming.
+                    if (a.kind === 'THIN' && b.kind === 'THIN') {
+                        a.composite = 'LIGHT_LIGHT';
+                        b.composite = 'LIGHT_LIGHT';
+                    } else if (a.kind === 'THIN' && b.kind === 'THICK') {
+                        a.composite = 'LIGHT_HEAVY';
+                        b.composite = 'LIGHT_HEAVY';
+                    } else if (a.kind === 'THICK' && b.kind === 'THIN') {
+                        a.composite = 'HEAVY_LIGHT';
+                        b.composite = 'HEAVY_LIGHT';
+                    } else {
+                        a.composite = 'HEAVY_HEAVY';
+                        b.composite = 'HEAVY_HEAVY';
+                    }
+                }
+            }
         }
 
         // 5. Convert peaks to Barline objects and attach per-staff.
@@ -255,14 +289,15 @@
         for (var pp = 0; pp < allPeaks.length; pp++) {
             var pk = allPeaks[pp];
             var bl = {
-                x:      pk.x,
-                xLeft:  pk.xLeft,
-                xRight: pk.xRight,
-                top:    pk.staff.yTop,
-                bottom: pk.staff.yBottom,
-                width:  pk.width,
-                kind:   pk.kind || 'THIN',
-                staff:  pk.staff
+                x:         pk.x,
+                xLeft:     pk.xLeft,
+                xRight:    pk.xRight,
+                top:       pk.staff.yTop,
+                bottom:    pk.staff.yBottom,
+                width:     pk.width,
+                kind:      pk.kind || 'THIN',
+                composite: pk.composite || null,
+                staff:     pk.staff
             };
             barlines.push(bl);
         }
