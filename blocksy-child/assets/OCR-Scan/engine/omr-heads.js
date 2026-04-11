@@ -58,16 +58,7 @@
     'use strict';
 
     var OMR = window.PianoModeOMR;
-    if (!OMR) {
-        console.error('[PianoModeOMR] omr-heads.js loaded before omr-core.js');
-        return;
-    }
-    if (!OMR.Templates) {
-        console.error('[PianoModeOMR] omr-heads.js requires omr-templates.js');
-        return;
-    }
-    if (!OMR.Distance) {
-        console.error('[PianoModeOMR] omr-heads.js requires omr-distance.js');
+    if (!OMR || !OMR.Templates || !OMR.Distance) {
         return;
     }
 
@@ -226,11 +217,6 @@
                 });
             }
             OMR.debug.push('heads', shapes);
-        }
-
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Heads: ' + heads.length
-                        + ' raw matches, ' + deduped.length + ' after dedup');
         }
 
         return { heads: deduped, distanceTable: distTable };
@@ -403,8 +389,4 @@
         _distanceToGrade: distanceToGrade
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-heads loaded '
-                    + '(Phase 8b NoteHeadsBuilder port)');
-    }
 })();
