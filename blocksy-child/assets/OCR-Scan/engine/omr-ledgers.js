@@ -61,7 +61,6 @@
 
     var OMR = window.PianoModeOMR;
     if (!OMR) {
-        console.error('[PianoModeOMR] omr-ledgers.js loaded before omr-core.js');
         return;
     }
 
@@ -152,12 +151,6 @@
             OMR.debug.push('ledgers', shapes);
         }
 
-        if (typeof console !== 'undefined' && console.log) {
-            console.log('[PianoModeOMR] Ledgers: '
-                        + filaments.length + ' filaments, '
-                        + candidates.length + ' pre-filter passes, '
-                        + ledgers.length + ' ledgers accepted');
-        }
         return { ledgers: ledgers };
     }
 
@@ -321,7 +314,4 @@
         buildLedgers: buildLedgers
     };
 
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('[PianoModeOMR] omr-ledgers loaded (Phase 9 LedgersBuilder port)');
-    }
 })();
