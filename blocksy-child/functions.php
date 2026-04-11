@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.7.0' );
+    define( 'PIANOMODE_OMR_VER', '6.8.0' );
 }
 
 /**
@@ -521,6 +521,23 @@ function pianomode_omr_scanner_assets() {
         false
     );
 
+    // 10. Phase 10: StemsBuilder + HeadLinker — links each Phase 8 head
+    //     to its best Phase 6 seed, extends the stem in cleanBin, and
+    //     attaches a Phase 7 beam at the far endpoint if present.
+    wp_enqueue_script(
+        'pm-omr-stems',
+        $base_uri . '/engine/omr-stems.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-stems-seeds',
+            'pm-omr-heads',
+            'pm-omr-beams'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
     // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
     //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
     //    new-phase modules so they are available from OMR.<ModuleName>
@@ -539,7 +556,8 @@ function pianomode_omr_scanner_assets() {
             'pm-omr-beams',
             'pm-omr-templates',
             'pm-omr-heads',
-            'pm-omr-ledgers'
+            'pm-omr-ledgers',
+            'pm-omr-stems'
         ],
         PIANOMODE_OMR_VER,
         false
