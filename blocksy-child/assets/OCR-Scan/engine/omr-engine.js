@@ -2245,6 +2245,36 @@ OMR.Engine = {
                         }
                     }
 
+                    // ------------------------------------------------
+                    // Phase 10: StemsBuilder + HeadLinker sidecar.
+                    // Links every Phase 8 head to its best Phase 6
+                    // seed, extends the stem in cleanBin, and attaches
+                    // a Phase 7 beam at the far endpoint if present.
+                    // ------------------------------------------------
+                    if (OMR.Stems
+                            && typeof OMR.Stems.buildStems === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.heads
+                            && ctx.heads.heads
+                            && ctx.heads.heads.length > 0) {
+                        try {
+                            var seedArr = (ctx.stemSeeds && ctx.stemSeeds.seeds)
+                                ? ctx.stemSeeds.seeds : [];
+                            var beamArr = (ctx.beams && ctx.beams.beams)
+                                ? ctx.beams.beams : [];
+                            ctx.stems = OMR.Stems.buildStems(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale,
+                                (ctx.gridLines && ctx.gridLines.staves) || [],
+                                ctx.heads.heads,
+                                seedArr,
+                                beamArr);
+                        } catch (stErr) {
+                            console.error('[PianoModeOMR] Stems.buildStems failed:', stErr);
+                            ctx.stems = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2313,6 +2343,7 @@ OMR.Engine = {
                     newBeams: ctx.beams || null,      // Phase 7 Beams result
                     newHeads: ctx.heads || null,      // Phase 8 Heads result
                     ledgers: ctx.ledgers || null,     // Phase 9 Ledgers result
+                    newStems: ctx.stems || null,      // Phase 10 Stems result
                     version: VERSION
                 });
             }).catch(function(err) {
