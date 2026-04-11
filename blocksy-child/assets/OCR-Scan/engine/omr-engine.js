@@ -2221,6 +2221,30 @@ OMR.Engine = {
                         }
                     }
 
+                    // ------------------------------------------------
+                    // Phase 9: LedgersBuilder sidecar. Scans horizontal
+                    // filaments above / below each Phase 4 staff and
+                    // accepts those that pitch-align to virtual line
+                    // positions -1..-6 and +1..+6. Results are attached
+                    // to staff.ledgers[index] for downstream octave
+                    // disambiguation of heads.
+                    // ------------------------------------------------
+                    if (OMR.Ledgers
+                            && typeof OMR.Ledgers.buildLedgers === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.ledgers = OMR.Ledgers.buildLedgers(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves);
+                        } catch (ldErr) {
+                            console.error('[PianoModeOMR] Ledgers.buildLedgers failed:', ldErr);
+                            ctx.ledgers = null;
+                        }
+                    }
+
                     return ctx;
                 });
             }).then(function(ctx) {
@@ -2288,6 +2312,7 @@ OMR.Engine = {
                     stemSeeds: ctx.stemSeeds || null, // Phase 6 StemSeeds result
                     newBeams: ctx.beams || null,      // Phase 7 Beams result
                     newHeads: ctx.heads || null,      // Phase 8 Heads result
+                    ledgers: ctx.ledgers || null,     // Phase 9 Ledgers result
                     version: VERSION
                 });
             }).catch(function(err) {
