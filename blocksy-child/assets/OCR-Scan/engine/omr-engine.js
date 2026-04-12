@@ -2088,11 +2088,17 @@ OMR.Engine = {
                         // we adapt the GridLines output to match.
                         ctx.staves = ctx.gridLines.staves;
                         ctx.staffSpacing = ctx.gridLines.staves[0].interline;
-                        // Provisional systems: one system per staff until
-                        // Phase 5 GridBars runs below and overwrites them.
-                        ctx.systems = ctx.gridLines.staves.map(function (s, i) {
-                            return { id: i + 1, staves: [s] };
-                        });
+                        // Use Phase 4 grand-staff systems if available.
+                        // GridLines.pairStavesIntoSystems already detects
+                        // grand-staff pairs, sets staff.partner / staffIndex
+                        // / systemIdx. Only fall back to one-per-staff if
+                        // the Phase 4 module didn't return systems.
+                        ctx.systems = (ctx.gridLines.systems
+                                       && ctx.gridLines.systems.length > 0)
+                            ? ctx.gridLines.systems
+                            : ctx.gridLines.staves.map(function (s, i) {
+                                return { id: i + 1, staves: [s] };
+                            });
                         report(2, 'Found ' + ctx.staves.length + ' staves (Phase 4 GridLines). Removing staff lines...', 35);
                     } else {
                         var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
@@ -2115,7 +2121,8 @@ OMR.Engine = {
                         try {
                             ctx.gridBars = OMR.GridBars.retrieveBarsAndSystems(
                                 ctx.bin, ctx.w, ctx.h,
-                                ctx.gridLines.staves, ctx.scale);
+                                ctx.gridLines.staves, ctx.scale,
+                                ctx.systems);
                         } catch (gbErr) {
                             // GridBars retrieval failed: leave gridBars null.
                             ctx.gridBars = null;
