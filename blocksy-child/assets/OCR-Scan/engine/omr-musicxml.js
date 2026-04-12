@@ -31,8 +31,23 @@
  *   - composer: composer name (default "")
  *   - divisions: divisions per quarter note (default 480)
  *
+ * v6.13 upgrades (2026-04-11):
+ *   - Consume Phase 13 ev.notes[] / ev.voiceId / ev.staffNumber when
+ *     present so chord members keep their true diatonic spelling
+ *     (step/octave/alter) instead of going through enharmonic
+ *     midiToPitch fallback.
+ *   - Measure duration derived from the actual time signature of
+ *     the part's first staff header (falls back to 4/4).
+ *   - Voice backup amount derived from the actual duration sum of
+ *     the voice just written instead of a flat measure length.
+ *   - Per-note <accidental> tag only emitted when the note carries
+ *     an explicit accidental, not on every key-sig alteration (the
+ *     key sig already implies it for ungraded notes).
+ *   - <voice> tag uses the Phase 13 MusicXML-convention ID when
+ *     available: treble → 1/2, bass → 5/6, etc.
+ *
  * @package PianoMode
- * @version 6.11.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -202,7 +217,7 @@
             out.push('    <measure number="1">');
             writeFirstAttributes(out, part, DIV);
             out.push('      <note><rest measure="yes"/><duration>'
-                     + (DIV * 4) + '</duration></note>');
+                     + measureDur(part, DIV) + '</duration></note>');
             out.push('    </measure>');
         }
     }
@@ -263,35 +278,49 @@
             voicesByStaff[idx].push(v);
         }
 
-        var voiceCounter = 1;
-        var firstStaffWritten = false;
+        var partMeasureDur = measureDur(part, DIV);
+        var fallbackVoiceBase = 1;
+        var firstVoiceWritten = false;
+        var lastVoiceDur = 0;
+
         for (var staffIdx2 = 0; staffIdx2 < part.staves; staffIdx2++) {
             var voices = voicesByStaff[staffIdx2] || [];
             if (voices.length === 0) {
                 // Emit a measure-rest for this staff if none provided.
-                if (firstStaffWritten) {
-                    out.push('      <backup><duration>' + measureDur(meas, DIV)
+                if (firstVoiceWritten) {
+                    out.push('      <backup><duration>' + lastVoiceDur
                              + '</duration></backup>');
                 }
+                var emptyVoiceId = staffIdx2 * 4 + 1;
                 out.push('      <note>');
                 out.push('        <rest measure="yes"/>');
-                out.push('        <duration>' + measureDur(meas, DIV) + '</duration>');
-                out.push('        <voice>' + (voiceCounter++) + '</voice>');
+                out.push('        <duration>' + partMeasureDur + '</duration>');
+                out.push('        <voice>' + emptyVoiceId + '</voice>');
                 if (part.staves === 2) {
                     out.push('        <staff>' + (staffIdx2 + 1) + '</staff>');
                 }
                 out.push('      </note>');
-                firstStaffWritten = true;
+                lastVoiceDur = partMeasureDur;
+                firstVoiceWritten = true;
                 continue;
             }
             for (var vi = 0; vi < voices.length; vi++) {
-                if (firstStaffWritten || vi > 0) {
-                    out.push('      <backup><duration>' + measureDur(meas, DIV)
+                if (firstVoiceWritten) {
+                    out.push('      <backup><duration>' + lastVoiceDur
                              + '</duration></backup>');
                 }
-                writeVoice(out, voices[vi], voiceCounter++, staffIdx2 + 1,
-                           part.staves === 2, DIV);
-                firstStaffWritten = true;
+                var voiceId = voices[vi].id
+                    || (staffIdx2 * 4 + vi + 1)
+                    || fallbackVoiceBase++;
+                lastVoiceDur = writeVoice(
+                    out,
+                    voices[vi],
+                    voiceId,
+                    staffIdx2 + 1,
+                    part.staves === 2,
+                    DIV
+                );
+                firstVoiceWritten = true;
             }
         }
     }
@@ -303,17 +332,27 @@
         return -1;
     }
 
-    function measureDur(meas, DIV) {
-        // Best effort: 4 beats = DIV*4. If a time signature carries
-        // through, this could be refined; for now we use a fixed value.
-        return DIV * 4;
+    function measureDur(part, DIV) {
+        // Derive from the first staff header's time signature, default 4/4.
+        var beats = 4, beatType = 4;
+        var firstStaff = part && part.staffMap ? part.staffMap[0] : null;
+        if (firstStaff && firstStaff.header && firstStaff.header.time) {
+            beats    = firstStaff.header.time.beats    || 4;
+            beatType = firstStaff.header.time.beatType || 4;
+        }
+        // Quarter-note count = beats * (4 / beatType)
+        var quarters = beats * (4 / beatType);
+        return Math.max(1, Math.round(quarters * DIV));
     }
 
     // -------------------------------------------------------------------
-    // Write all notes / chords / rests of a single voice.
+    // Write all notes / chords / rests of a single voice. Returns the
+    // total duration in MusicXML divisions so the caller can emit a
+    // matching <backup> when switching to another voice.
     // -------------------------------------------------------------------
     function writeVoice(out, voice, voiceId, staffId, multiStaff, DIV) {
         var events = voice.events || [];
+        var totalDiv = 0;
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
             if (ev.kind === 'REST') {
@@ -323,7 +362,9 @@
             } else {
                 writeSingleNote(out, ev, voiceId, staffId, multiStaff, DIV);
             }
+            totalDiv += quarterToDivisions(ev.duration, DIV);
         }
+        return totalDiv;
     }
 
     function writeRestNote(out, ev, voiceId, staffId, multiStaff, DIV) {
@@ -339,13 +380,21 @@
 
     function writeSingleNote(out, ev, voiceId, staffId, multiStaff, DIV) {
         var dur = quarterToDivisions(ev.duration, DIV);
+        // Prefer ev.notes[0] (Phase 13 spelling) over flat ev.pitchStep.
+        var n = (ev.notes && ev.notes[0]) ? ev.notes[0] : {
+            step:          ev.pitchStep,
+            octave:        ev.octave,
+            alter:         ev.alter || 0,
+            explicitAlter: ev.explicitAlter,
+            keyAlter:      ev.keyAlter || 0
+        };
         out.push('      <note>');
-        writePitch(out, ev.pitchStep, ev.alter || 0, ev.octave);
+        writePitch(out, n.step, n.alter || 0, n.octave);
         out.push('        <duration>' + dur + '</duration>');
         out.push('        <voice>' + voiceId + '</voice>');
         out.push('        <type>' + durationType(ev.duration) + '</type>');
-        if (ev.alter !== 0) {
-            out.push('        <accidental>' + alterToName(ev.alter) + '</accidental>');
+        if (shouldEmitAccidental(n)) {
+            out.push('        <accidental>' + alterToName(n.alter) + '</accidental>');
         }
         if (multiStaff) out.push('        <staff>' + staffId + '</staff>');
         out.push('      </note>');
@@ -353,20 +402,43 @@
 
     function writeChordNotes(out, ev, voiceId, staffId, multiStaff, DIV) {
         var dur = quarterToDivisions(ev.duration, DIV);
-        // The first note is the "main" note; subsequent notes carry
-        // the <chord/> tag.
-        for (var i = 0; i < ev.midi.length; i++) {
-            var midiVal = ev.midi[i];
-            var pitch = midiToPitch(midiVal);
+        // Prefer ev.notes[] (Phase 13 true diatonic spelling) and fall
+        // back to enharmonic midiToPitch for legacy inputs.
+        var count = (ev.notes && ev.notes.length > 0)
+            ? ev.notes.length
+            : (ev.midi ? ev.midi.length : 0);
+        for (var i = 0; i < count; i++) {
+            var n;
+            if (ev.notes && ev.notes[i]) {
+                n = ev.notes[i];
+            } else {
+                n = midiToPitch(ev.midi[i]);
+                n.explicitAlter = false;
+                n.keyAlter      = 0;
+            }
             out.push('      <note>');
             if (i > 0) out.push('        <chord/>');
-            writePitch(out, pitch.step, pitch.alter, pitch.octave);
+            writePitch(out, n.step, n.alter || 0, n.octave);
             out.push('        <duration>' + dur + '</duration>');
             out.push('        <voice>' + voiceId + '</voice>');
             out.push('        <type>' + durationType(ev.duration) + '</type>');
+            if (shouldEmitAccidental(n)) {
+                out.push('        <accidental>' + alterToName(n.alter) + '</accidental>');
+            }
             if (multiStaff) out.push('        <staff>' + staffId + '</staff>');
             out.push('      </note>');
         }
+    }
+
+    // Emit <accidental> only when the note carries an explicit
+    // accidental (either scanner-detected Phase 12 alter or an
+    // in-measure carry from propagateMeasureAccidentals). Key-sig
+    // implied alters are NOT displayed.
+    function shouldEmitAccidental(note) {
+        if (!note) return false;
+        if (note.explicitAlter) return true;
+        if (note.keyAlter !== undefined && note.alter !== note.keyAlter) return true;
+        return false;
     }
 
     function writePitch(out, step, alter, octave) {
