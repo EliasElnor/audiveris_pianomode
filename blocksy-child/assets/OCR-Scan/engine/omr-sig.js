@@ -72,8 +72,22 @@
  *       ]
  *   }
  *
+ * v6.13 upgrades (2026-04-11):
+ *   - Fix broken topLine.line.getYAtX path: Phase 4 stores Filament
+ *     objects directly in staff.lines, so .getYAtX is the accessor.
+ *   - Use beam.stackCount (Phase 7 v6.13) to drive beamed-note
+ *     duration instead of eyeballing beam.height.
+ *   - Consume stem.heads (Phase 10 chord siblings) when merging
+ *     events into chord events, so a two-note chord on a shared
+ *     stem becomes a single CHORD with both midi pitches.
+ *   - Voice IDs now match MusicXML conventions per grand-staff
+ *     staff index: staff 1 → voices 1 & 2, staff 2 → voices 5 & 6.
+ *   - Key-signature accidentals are stored on each note as
+ *     `alter`; in-measure explicit accidentals propagate to later
+ *     notes on the same (step, octave) pair (measure-accidental).
+ *
  * @package PianoMode
- * @version 6.10.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -133,18 +147,20 @@
             var dur = headDuration(head, beams);
 
             events.push({
-                kind:      'NOTE',
-                head:      head,
-                rest:      null,
-                staff:     staff,
-                x:         head.x,
-                y:         head.y,
-                midi:      [pitchInfo.midi],
-                pitchStep: pitchInfo.step,
-                octave:    pitchInfo.octave,
-                alter:     pitchInfo.alter,
-                duration:  dur,
-                startBeat: 0
+                kind:           'NOTE',
+                head:           head,
+                rest:           null,
+                staff:          staff,
+                x:              head.x,
+                y:              head.y,
+                midi:           [pitchInfo.midi],
+                pitchStep:      pitchInfo.step,
+                octave:         pitchInfo.octave,
+                alter:          pitchInfo.alter,
+                keyAlter:       pitchInfo.keyAlter,
+                explicitAlter:  pitchInfo.explicitAlter,
+                duration:       dur,
+                startBeat:      0
             });
         }
         for (var r = 0; r < rests.length; r++) {
@@ -185,18 +201,30 @@
             measure._raw.push(ev);
         }
 
-        // Step 5: split each measure into voices, assign startBeat.
+        // Step 5: split each measure into voices, propagate in-measure
+        // accidentals, assign startBeat.
         for (var si = 0; si < systems.length; si++) {
             var system = systems[si];
             for (var mi = 0; mi < system.measures.length; mi++) {
                 var m = system.measures[mi];
-                m.voices = assignVoices(m._raw || [], interline);
+                var rawEvents = m._raw || [];
+                propagateMeasureAccidentals(rawEvents);
+                m.voices = assignVoices(rawEvents, interline, system);
                 computeStartBeats(m);
                 delete m._raw;
             }
         }
 
         return { systems: systems };
+    }
+
+    // Robust staff-line y accessor (handles Filament or wrapped).
+    function lineYAtX(line, x, fallback) {
+        if (line && typeof line.getYAtX === 'function') return line.getYAtX(x);
+        if (line && line.line && typeof line.line.getYAtX === 'function') {
+            return line.line.getYAtX(x);
+        }
+        return fallback;
     }
 
     // -------------------------------------------------------------------
@@ -207,9 +235,7 @@
     // -------------------------------------------------------------------
     function positionToPitch(head, staff, interline, clef, keyFifths) {
         var topLine = staff.lines[0];
-        var topY = (topLine.line && topLine.line.getYAtX)
-            ? topLine.line.getYAtX(head.x)
-            : staff.yTop;
+        var topY = lineYAtX(topLine, head.x, staff.yTop);
         var halfStep = (head.y - topY) / (interline / 2); // half-line offset
         var hi = Math.round(halfStep); // 0 = top line, +2 = next line down
 
@@ -223,15 +249,25 @@
         var step = STEP_NAMES[stepIdx];
 
         // Apply key signature alteration to this step.
-        var alter = keyAlter(step, keyFifths);
+        var kAlter = keyAlter(step, keyFifths);
+        var alter = kAlter;
+        var explicit = false;
 
         // Apply explicit accidental on the head (overrides key sig).
         if (head.alter) {
             alter = head.alter.semitones;
+            explicit = true;
         }
 
         var midi = stepToMidi(step, octave) + alter;
-        return { step: step, octave: octave, alter: alter, midi: midi };
+        return {
+            step:           step,
+            octave:         octave,
+            alter:          alter,
+            keyAlter:       kAlter,
+            explicitAlter:  explicit,
+            midi:           midi
+        };
     }
 
     function stepToMidi(step, octave) {
@@ -278,52 +314,82 @@
             return 1;
         }
 
-        // Beam attached. Use beam height vs scale.beamThickness to
-        // estimate flag count: 1=eighth, 2=16th, 3=32nd.
+        // Beam attached. Phase 7 v6.13 sets beam.stackCount based on
+        // (bboxH / beamThickness). Use it directly: 1 beam = 8th,
+        // 2 = 16th, 3 = 32nd, 4 = 64th. Fall back to height heuristic.
         var flagCount = 1;
-        if (beam.height) {
-            // Beam group height: each beam is ~beamThickness thick. We
-            // approximate via height/typical thickness ratio.
-            var typical = 4; // default if scale info isn't available here
+        if (typeof beam.stackCount === 'number' && beam.stackCount > 0) {
+            flagCount = beam.stackCount;
+        } else if (beam.height) {
+            var typical = 4;
             var ratio = beam.height / typical;
-            if (ratio > 2.4)      flagCount = 3;
+            if (ratio > 3.2)      flagCount = 4;
+            else if (ratio > 2.4) flagCount = 3;
             else if (ratio > 1.6) flagCount = 2;
         }
         // Map flag count to fractional duration.
-        if (flagCount === 1) return 0.5;
-        if (flagCount === 2) return 0.25;
+        if (flagCount >= 4) return 0.0625;
         if (flagCount === 3) return 0.125;
+        if (flagCount === 2) return 0.25;
         return 0.5;
     }
 
     // -------------------------------------------------------------------
     // Merge events that sit at almost the same x and same staff into a
-    // single chord event. Rests are passed through untouched.
+    // single chord event. First-pass uses Phase 10 stem.heads (chord
+    // siblings already linked by shared stem); second-pass falls back to
+    // x-proximity merging for heads without stems. Rests pass through.
     // -------------------------------------------------------------------
     function mergeChords(events, tol) {
         events.sort(function (a, b) {
             if (a.staff !== b.staff) return staffOrder(a.staff) - staffOrder(b.staff);
             return a.x - b.x;
         });
-        var out = [];
+
+        // Pass 1: collapse events that share the same stem.
+        var seenStems = {};
+        var afterPass1 = [];
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
+            var head = ev.head;
+            if (head && head.stem && head.stem.heads && head.stem.heads.length > 1) {
+                var stemKey = stemIdOf(head.stem);
+                if (seenStems[stemKey]) {
+                    var ref = seenStems[stemKey];
+                    if (ref.kind === 'NOTE') ref.kind = 'CHORD';
+                    ref.midi.push(ev.midi[0]);
+                    if (ev.duration < ref.duration) ref.duration = ev.duration;
+                    continue;
+                }
+                seenStems[stemKey] = ev;
+            }
+            afterPass1.push(ev);
+        }
+
+        // Pass 2: x-proximity merge (for stemless heads or heads whose
+        // stems failed to cluster).
+        var out = [];
+        for (var j = 0; j < afterPass1.length; j++) {
+            var e2 = afterPass1[j];
             var last = out[out.length - 1];
-            if (ev.kind === 'NOTE'
+            if (e2.kind === 'NOTE'
                 && last && last.kind !== 'REST'
-                && last.staff === ev.staff
-                && Math.abs(last.x - ev.x) <= tol) {
-                // Merge.
+                && last.staff === e2.staff
+                && Math.abs(last.x - e2.x) <= tol) {
                 if (last.kind === 'NOTE') last.kind = 'CHORD';
-                last.midi.push(ev.midi[0]);
-                // Smallest duration wins (we want the rhythmic
-                // resolution of the fastest member).
-                if (ev.duration < last.duration) last.duration = ev.duration;
+                last.midi.push(e2.midi[0]);
+                if (e2.duration < last.duration) last.duration = e2.duration;
             } else {
-                out.push(ev);
+                out.push(e2);
             }
         }
         return out;
+    }
+
+    var _stemKeyCounter = 0;
+    function stemIdOf(stem) {
+        if (!stem.__sigKey) stem.__sigKey = 'st' + (++_stemKeyCounter);
+        return stem.__sigKey;
     }
 
     function staffOrder(staff) {
@@ -424,44 +490,130 @@
     }
 
     // -------------------------------------------------------------------
-    // Voice assignment: simple piano-style top/bottom split. For each
-    // staff inside the measure, sort events by x; events with stem dir
-    // UP go to voice 1, dir DOWN to voice 2. Rests go to voice 1.
+    // Voice assignment: piano-style top/bottom split per staff. For a
+    // grand staff, MusicXML convention uses voices 1 & 2 for the top
+    // staff (treble) and 5 & 6 for the bottom staff (bass). Within each
+    // staff, stem-UP events go to the "upper" voice and stem-DOWN
+    // events go to the "lower" voice. Rests stick to the upper voice.
     // -------------------------------------------------------------------
-    function assignVoices(events, interline) {
+    function assignVoices(events, interline, system) {
         if (events.length === 0) return [];
-        // Bucket by staff.
+
+        // Map each staff to its index inside the system (0 = top,
+        // 1 = second, etc.). Fallback on yTop ordering if system absent.
+        var sysStaves = (system && system.staves) ? system.staves.slice() : null;
+        if (!sysStaves) {
+            sysStaves = [];
+            for (var e = 0; e < events.length; e++) {
+                var st = events[e].staff;
+                if (st && sysStaves.indexOf(st) === -1) sysStaves.push(st);
+            }
+            sysStaves.sort(function (a, b) {
+                return (a.yTop || 0) - (b.yTop || 0);
+            });
+        }
+
+        function staffSlotIdx(staff) {
+            var idx = sysStaves.indexOf(staff);
+            return idx < 0 ? 0 : idx;
+        }
+
+        // Bucket events by staff slot inside the system.
         var byStaff = {};
         for (var i = 0; i < events.length; i++) {
-            var key = staffOrder(events[i].staff);
-            if (!byStaff[key]) byStaff[key] = [];
-            byStaff[key].push(events[i]);
+            var slot = staffSlotIdx(events[i].staff);
+            if (!byStaff[slot]) byStaff[slot] = [];
+            byStaff[slot].push(events[i]);
         }
 
         var voices = [];
-        var voiceId = 1;
-        Object.keys(byStaff).forEach(function (k) {
-            var bucket = byStaff[k];
+        var slots = Object.keys(byStaff)
+            .map(function (k) { return parseInt(k, 10); })
+            .sort(function (a, b) { return a - b; });
+
+        for (var sIdx = 0; sIdx < slots.length; sIdx++) {
+            var slotKey = slots[sIdx];
+            var bucket = byStaff[slotKey];
             bucket.sort(function (a, b) { return a.x - b.x; });
-            var v1 = { id: voiceId++, staff: bucket[0].staff, events: [] };
-            var v2 = { id: voiceId++, staff: bucket[0].staff, events: [] };
+
+            // MusicXML grand-staff voice IDs: top staff → 1,2 ;
+            // second staff → 5,6 ; third → 9,10 ; etc.
+            var baseVoiceId = slotKey * 4 + 1;
+            var v1 = {
+                id:          baseVoiceId,
+                staff:       bucket[0].staff,
+                staffNumber: slotKey + 1,
+                events:      []
+            };
+            var v2 = {
+                id:          baseVoiceId + 1,
+                staff:       bucket[0].staff,
+                staffNumber: slotKey + 1,
+                events:      []
+            };
+
             for (var j = 0; j < bucket.length; j++) {
                 var ev = bucket[j];
+                ev.staffNumber = slotKey + 1;
                 var dir = (ev.head && ev.head.stem && ev.head.stem.dir)
                     ? ev.head.stem.dir
-                    : 'UP';
+                    : null;
                 if (ev.kind === 'REST') {
                     v1.events.push(ev);
-                } else if (dir === 'UP') {
-                    v1.events.push(ev);
-                } else {
+                } else if (dir === 'DOWN') {
                     v2.events.push(ev);
+                } else {
+                    v1.events.push(ev);
                 }
+                ev.voiceId = (dir === 'DOWN' && ev.kind !== 'REST')
+                    ? v2.id
+                    : v1.id;
             }
             if (v1.events.length > 0) voices.push(v1);
             if (v2.events.length > 0) voices.push(v2);
-        });
+        }
         return voices;
+    }
+
+    // -------------------------------------------------------------------
+    // In-measure accidental propagation. Audiveris handles this inside
+    // the SIGraph via AccidNoteRelation; we just walk events in x order
+    // per staff and carry explicit alters forward on the same
+    // (step, octave) pair until the end of the measure.
+    // -------------------------------------------------------------------
+    function propagateMeasureAccidentals(events) {
+        if (!events || events.length === 0) return;
+        // Bucket by staff.
+        var byStaff = {};
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (ev.kind === 'REST') continue;
+            var k = staffOrder(ev.staff);
+            if (!byStaff[k]) byStaff[k] = [];
+            byStaff[k].push(ev);
+        }
+        Object.keys(byStaff).forEach(function (k) {
+            var bucket = byStaff[k];
+            bucket.sort(function (a, b) { return a.x - b.x; });
+            var carry = {}; // "STEP+OCTAVE" → alter
+            for (var j = 0; j < bucket.length; j++) {
+                var ev = bucket[j];
+                if (!ev.pitchStep) continue;
+                var key = ev.pitchStep + ev.octave;
+                if (ev.explicitAlter) {
+                    carry[key] = ev.alter;
+                } else if (Object.prototype.hasOwnProperty.call(carry, key)) {
+                    var newAlter = carry[key];
+                    if (newAlter !== ev.alter) {
+                        var deltaMidi = newAlter - ev.alter;
+                        ev.alter = newAlter;
+                        for (var mi = 0; mi < ev.midi.length; mi++) {
+                            ev.midi[mi] += deltaMidi;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     // -------------------------------------------------------------------
