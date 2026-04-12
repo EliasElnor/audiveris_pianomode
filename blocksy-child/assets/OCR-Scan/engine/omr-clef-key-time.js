@@ -199,9 +199,10 @@
         var bassScore   = 0;
         var altoScore   = 0;
 
-        // 1. Centroid position (strong cue).
-        if (rel > 0.15) trebleScore += 2;
-        else if (rel < -0.10) bassScore += 2;
+        // 1. Centroid position (strong cue). Symmetric thresholds so
+        // treble and bass have equal opportunity to score.
+        if (rel > 0.12) trebleScore += 2;
+        else if (rel < -0.12) bassScore += 2;
         else altoScore += 1;
 
         // 2. Glyph height — G clef is typically ≥ 5 interlines tall.
@@ -222,12 +223,14 @@
         else if (topHeavy > 0.40 && topHeavy < 0.60) trebleScore += 1;
 
         // Grand-staff hint: in a paired system, the upper staff is TREBLE
-        // and the lower staff is BASS by default. Use as tie-breaker.
+        // and the lower staff is BASS by convention. For piano music this
+        // is the strongest signal — override ambiguous geometric cues.
+        // Weight +4 makes position authoritative (max other cues ≈ 6).
         var grandStaffHint = null;
         if (staff && staff.partner) {
             grandStaffHint = (staff.staffIndex === 0) ? 'TREBLE' : 'BASS';
-            if (grandStaffHint === 'TREBLE') trebleScore += 1;
-            else bassScore += 1;
+            if (grandStaffHint === 'TREBLE') trebleScore += 4;
+            else bassScore += 4;
         }
 
         var kind;
