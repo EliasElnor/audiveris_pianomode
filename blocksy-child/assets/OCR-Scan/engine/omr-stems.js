@@ -49,8 +49,24 @@
  * Also mutates each linked head with {stem, stemSide, stemDir, beam}
  * so downstream phases can look up stem info from the head directly.
  *
+ * v6.13 upgrades (2026-04-11):
+ *   - Fast path for heads created from a Pass-1 seed match
+ *     (head.fromSeed + head.side): we reuse the already-known side
+ *     and skip the dual-side pick.
+ *   - Chord sharing: once every head has a tentative stem, we scan
+ *     the stems list and merge every head that sits within ±0.3 IL
+ *     of an existing stem and whose y is inside the stem's y1..y2
+ *     range. The merged head inherits the shared stem and becomes
+ *     a chord sibling.
+ *   - Beam attach is loosened to include the beam's bbox (beam
+ *     thickness / 2) so stems that terminate slightly short of the
+ *     fit line still snap on.
+ *   - Per-stem best-beam selection: among all beams that pass the
+ *     attach test, we pick the one whose bbox contains the far
+ *     endpoint first, then the one whose fit line is closest.
+ *
  * @package PianoMode
- * @version 6.7.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -114,18 +130,36 @@
             var staff = head.staff;
             var staffSeeds = staff ? (seedsByStaff[staffId(staff)] || []) : seeds;
 
-            // Search best seed on LEFT side (seed x <= head x)
-            // and RIGHT side (seed x >= head x).
-            var leftSeed  = pickSideSeed(head, staffSeeds, 'LEFT',  maxDxOut, maxDxIn, maxDy);
-            var rightSeed = pickSideSeed(head, staffSeeds, 'RIGHT', maxDxOut, maxDxIn, maxDy);
-
-            // Pick the side whose seed extends furthest in the natural
-            // stem direction. For a head above staff mid-line, stem
-            // points DOWN (y increases). For a head below, stem points UP.
+            // Natural stem direction: DOWN for heads above staff mid,
+            // UP for heads below. (Piano voice-2 may violate this but we
+            // don't have voice info yet.)
             var midY = staff ? ((staff.yTop + staff.yBottom) / 2) : (head.y);
             var naturalDir = (head.y < midY) ? 'DOWN' : 'UP';
 
-            var chosen = chooseBetter(head, leftSeed, rightSeed, naturalDir);
+            var chosen;
+            // Fast path: if Phase 8 Pass 1 already identified the seed
+            // side via a LEFT_STEM/RIGHT_STEM anchor match, just look
+            // up that side directly — skip the dual-side search.
+            if (head.fromSeed && head.side === 'LEFT') {
+                var knownL = pickSideSeed(head, staffSeeds, 'LEFT',
+                                          maxDxOut, maxDxIn, maxDy);
+                chosen = knownL
+                    ? { seed: knownL, side: 'LEFT',  dir: naturalDir }
+                    : null;
+            } else if (head.fromSeed && head.side === 'RIGHT') {
+                var knownR = pickSideSeed(head, staffSeeds, 'RIGHT',
+                                          maxDxOut, maxDxIn, maxDy);
+                chosen = knownR
+                    ? { seed: knownR, side: 'RIGHT', dir: naturalDir }
+                    : null;
+            } else {
+                var leftSeed  = pickSideSeed(head, staffSeeds, 'LEFT',
+                                             maxDxOut, maxDxIn, maxDy);
+                var rightSeed = pickSideSeed(head, staffSeeds, 'RIGHT',
+                                             maxDxOut, maxDxIn, maxDy);
+                chosen = chooseBetter(head, leftSeed, rightSeed, naturalDir);
+            }
+
             if (!chosen) {
                 stemless.push(head);
                 continue;
@@ -147,15 +181,16 @@
             var attached = findAttachedBeam(beams, farX, farY, beamAttachPx);
 
             var stem = {
-                head:   head,
-                seed:   chosen.seed,
-                x:      chosen.seed.x,
-                y1:     extended.y1,
-                y2:     extended.y2,
-                dir:    chosen.dir,
-                length: extended.length,
-                side:   chosen.side,
-                beam:   attached
+                head:    head,
+                seed:    chosen.seed,
+                x:       chosen.seed.x,
+                y1:      extended.y1,
+                y2:      extended.y2,
+                dir:     chosen.dir,
+                length:  extended.length,
+                side:    chosen.side,
+                beam:    attached,
+                heads:   [head]   // chord siblings (populated below)
             };
             stems.push(stem);
 
@@ -164,6 +199,43 @@
             head.stemSide = chosen.side;
             head.stemDir  = chosen.dir;
             head.beam     = attached;
+        }
+
+        // Chord sharing: a stem can be shared by multiple heads. After
+        // a first pass we look at every stem-less head and check whether
+        // it sits on the x column of an existing stem inside its y range.
+        // If so, attach the head to that stem as a chord sibling.
+        var chordJoinedIdx = {};
+        var maxSharedDx = Math.max(1, Math.round(0.30 * interline));
+        for (var k = 0; k < stemless.length; k++) {
+            var orphan = stemless[k];
+            if (orphan.shape === 'WHOLE_NOTE' || orphan.shape === 'BREVE') continue;
+            var sibling = null;
+            for (var m = 0; m < stems.length; m++) {
+                var st = stems[m];
+                if (Math.abs(st.x - orphan.x) > maxSharedDx) continue;
+                // y must sit inside stem's range (with half interline margin).
+                if (orphan.y < st.y1 - interline * 0.5) continue;
+                if (orphan.y > st.y2 + interline * 0.5) continue;
+                sibling = st;
+                break;
+            }
+            if (sibling) {
+                sibling.heads.push(orphan);
+                orphan.stem     = sibling;
+                orphan.stemSide = sibling.side;
+                orphan.stemDir  = sibling.dir;
+                orphan.beam     = sibling.beam;
+                chordJoinedIdx[k] = true;
+            }
+        }
+        // Remove the joined orphans from stemless.
+        if (Object.keys(chordJoinedIdx).length > 0) {
+            var kept = [];
+            for (var kk = 0; kk < stemless.length; kk++) {
+                if (!chordJoinedIdx[kk]) kept.push(stemless[kk]);
+            }
+            stemless = kept;
         }
 
         // Debug overlay.
@@ -295,19 +367,27 @@
     }
 
     // -------------------------------------------------------------------
-    // Helper: find a beam whose fitted line passes near (farX, farY).
+    // Helper: find the Phase 7 beam closest to (farX, farY). Accepts a
+    // beam when farX is inside its x span (+/-2 px) and farY is within
+    // beamAttachPx + beam.height/2 of the beam's fit line. Among
+    // candidates, picks whichever has the smallest |yAt - farY|.
     // -------------------------------------------------------------------
     function findAttachedBeam(beams, farX, farY, beamAttachPx) {
+        var best = null;
+        var bestDy = Infinity;
         for (var i = 0; i < beams.length; i++) {
             var b = beams[i];
             if (farX < b.x1 - 2 || farX > b.x2 + 2) continue;
             var t = (b.x2 === b.x1) ? 0 : (farX - b.x1) / (b.x2 - b.x1);
             var yAt = b.y1 + t * (b.y2 - b.y1);
-            if (Math.abs(yAt - farY) <= beamAttachPx) {
-                return b;
+            var tol = beamAttachPx + ((b.height || 4) / 2);
+            var dy = Math.abs(yAt - farY);
+            if (dy <= tol && dy < bestDy) {
+                bestDy = dy;
+                best   = b;
             }
         }
-        return null;
+        return best;
     }
 
     // -------------------------------------------------------------------
