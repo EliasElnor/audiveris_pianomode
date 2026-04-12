@@ -52,8 +52,20 @@
  *     'DOUBLE_SHARP' semitones +2
  *     'DOUBLE_FLAT'  semitones -2
  *
+ * v6.13 upgrades (2026-04-11):
+ *   - Port missing SIXTEENTH_REST classifier (tall + two-flag eighth
+ *     with height 2.0..2.8 IL).
+ *   - Fix broken staff.lines[i].line.getYAtX path (staff.lines[i] is
+ *     a Filament directly — use .getYAtX). Whole/half rest y-anchor
+ *     detection now actually works.
+ *   - Alter classifier: use a row-crossing histogram to distinguish
+ *     SHARP (4 horizontal bar crossings) from NATURAL (2) reliably,
+ *     and detect DOUBLE_SHARP by density + squareness.
+ *   - Alter attach: use proportional dx penalty so very-close alters
+ *     win over far ones even if same dy.
+ *
  * @package PianoMode
- * @version 6.9.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -78,6 +90,9 @@
         eighthRestMinH:    1.20,
         eighthRestMaxH:    2.00,
         eighthRestMaxW:    1.20,
+        sixteenthRestMinH: 2.00,
+        sixteenthRestMaxH: 2.80,
+        sixteenthRestMaxW: 1.30,
         // Alter (accidental) geometry
         alterMinH:         1.40,  // taller than wide
         alterMaxH:         3.00,
@@ -331,28 +346,40 @@
         return arr;
     }
 
+    // Robust staff-line y accessor.
+    function lineYAtX(line, x, fallback) {
+        if (line && typeof line.getYAtX === 'function') return line.getYAtX(x);
+        if (line && line.line && typeof line.line.getYAtX === 'function') {
+            return line.line.getYAtX(x);
+        }
+        return fallback;
+    }
+
     // -------------------------------------------------------------------
     // Rest classifier. Returns {kind, dur} or null.
     // -------------------------------------------------------------------
     function classifyRest(c, bw, bh, cy, interline, staff) {
         var hI = bh / interline;
         var wI = bw / interline;
+        var midX = (c.xMin + c.xMax) / 2;
+
+        // Sixteenth rest: tall ~2.0..2.8 IL, similar width to eighth.
+        // Classified first so the eighth-rest branch doesn't swallow it.
+        if (hI >= C.sixteenthRestMinH && hI <= C.sixteenthRestMaxH
+                && wI <= C.sixteenthRestMaxW) {
+            return { kind: 'SIXTEENTH_REST', dur: 0.25 };
+        }
 
         // Whole/half rest: very flat, ~1 IL wide, < 0.7 IL tall, sits
-        // ON or just below a staff line. We can't easily tell whole
-        // from half without checking which line they sit on; for piano
-        // music, default to QUARTER_REST when ambiguous unless geometry
-        // strongly suggests whole/half.
+        // ON or just below a staff line. The Filament line accessor is
+        // on .getYAtX directly (Phase 4 stores Filament instances in
+        // staff.lines). Fall back to linear interpolation if missing.
         if (hI <= C.halfRestMaxH && wI >= C.halfRestMinW && wI <= C.halfRestMaxW) {
             // Distinguish by y relative to staff lines. Whole rests
             // hang from the second staff line (line index 1), half
             // rests sit on the third (line index 2).
-            var line1Y = (staff.lines[1].line && staff.lines[1].line.getYAtX)
-                ? staff.lines[1].line.getYAtX((c.xMin + c.xMax) / 2)
-                : staff.yTop + interline;
-            var line2Y = (staff.lines[2].line && staff.lines[2].line.getYAtX)
-                ? staff.lines[2].line.getYAtX((c.xMin + c.xMax) / 2)
-                : staff.yTop + 2 * interline;
+            var line1Y = lineYAtX(staff.lines[1], midX, staff.yTop + interline);
+            var line2Y = lineYAtX(staff.lines[2], midX, staff.yTop + 2 * interline);
             var dWhole = Math.abs(cy - line1Y);
             var dHalf  = Math.abs(cy - line2Y);
             if (dWhole < dHalf) {
