@@ -154,6 +154,14 @@
                 x:              head.x,
                 y:              head.y,
                 midi:           [pitchInfo.midi],
+                notes:          [{
+                    step:          pitchInfo.step,
+                    octave:        pitchInfo.octave,
+                    alter:         pitchInfo.alter,
+                    keyAlter:      pitchInfo.keyAlter,
+                    explicitAlter: pitchInfo.explicitAlter,
+                    midi:          pitchInfo.midi
+                }],
                 pitchStep:      pitchInfo.step,
                 octave:         pitchInfo.octave,
                 alter:          pitchInfo.alter,
@@ -358,6 +366,7 @@
                     var ref = seenStems[stemKey];
                     if (ref.kind === 'NOTE') ref.kind = 'CHORD';
                     ref.midi.push(ev.midi[0]);
+                    if (ev.notes && ev.notes[0]) ref.notes.push(ev.notes[0]);
                     if (ev.duration < ref.duration) ref.duration = ev.duration;
                     continue;
                 }
@@ -378,9 +387,22 @@
                 && Math.abs(last.x - e2.x) <= tol) {
                 if (last.kind === 'NOTE') last.kind = 'CHORD';
                 last.midi.push(e2.midi[0]);
+                if (e2.notes && e2.notes[0]) last.notes.push(e2.notes[0]);
                 if (e2.duration < last.duration) last.duration = e2.duration;
             } else {
                 out.push(e2);
+            }
+        }
+        // Sort chord notes lowest-to-highest midi so MusicXML <chord/>
+        // siblings follow the conventional bottom-up order.
+        for (var k = 0; k < out.length; k++) {
+            var oev = out[k];
+            if (oev.kind === 'CHORD' && oev.notes && oev.notes.length > 1) {
+                oev.notes.sort(function (a, b) { return a.midi - b.midi; });
+                oev.midi = oev.notes.map(function (n) { return n.midi; });
+                oev.pitchStep = oev.notes[0].step;
+                oev.octave    = oev.notes[0].octave;
+                oev.alter     = oev.notes[0].alter;
             }
         }
         return out;
@@ -598,17 +620,25 @@
             var carry = {}; // "STEP+OCTAVE" → alter
             for (var j = 0; j < bucket.length; j++) {
                 var ev = bucket[j];
-                if (!ev.pitchStep) continue;
-                var key = ev.pitchStep + ev.octave;
-                if (ev.explicitAlter) {
-                    carry[key] = ev.alter;
-                } else if (Object.prototype.hasOwnProperty.call(carry, key)) {
-                    var newAlter = carry[key];
-                    if (newAlter !== ev.alter) {
-                        var deltaMidi = newAlter - ev.alter;
-                        ev.alter = newAlter;
-                        for (var mi = 0; mi < ev.midi.length; mi++) {
-                            ev.midi[mi] += deltaMidi;
+                if (!ev.notes || ev.notes.length === 0) continue;
+                for (var ni = 0; ni < ev.notes.length; ni++) {
+                    var note = ev.notes[ni];
+                    if (!note.step) continue;
+                    var key = note.step + note.octave;
+                    if (note.explicitAlter) {
+                        carry[key] = note.alter;
+                    } else if (Object.prototype.hasOwnProperty.call(carry, key)) {
+                        var newAlter = carry[key];
+                        if (newAlter !== note.alter) {
+                            var deltaMidi = newAlter - note.alter;
+                            note.alter = newAlter;
+                            note.midi += deltaMidi;
+                            if (ev.midi && ev.midi[ni] !== undefined) {
+                                ev.midi[ni] += deltaMidi;
+                            }
+                            if (ni === 0) {
+                                ev.alter = newAlter;
+                            }
                         }
                     }
                 }
