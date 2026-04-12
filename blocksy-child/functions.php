@@ -363,7 +363,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.13.1' );
+    define( 'PIANOMODE_OMR_VER', '6.14.0' );
 }
 
 /**
@@ -377,11 +377,20 @@ if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
  * omr-engine.js and enqueue them here in dependency order. Each new
  * script must declare its dependencies via the 3rd arg so wp_enqueue
  * emits them in the correct order.
+ *
+ * pianomode_enqueue_omr_scripts() is extracted as a standalone function
+ * so it can also be called from page-omr-scanner.php as a safety net
+ * (handles Blocksy/child-theme quirks where is_page_template() misses).
  */
-function pianomode_omr_scanner_assets() {
-    if ( ! is_page_template( 'page-omr-scanner.php' ) ) {
-        return;
-    }
+
+/**
+ * Actually enqueue all OMR engine scripts + CSS. Idempotent — safe to
+ * call more than once thanks to the static $loaded guard.
+ */
+function pianomode_enqueue_omr_scripts() {
+    static $loaded = false;
+    if ( $loaded ) return;
+    $loaded = true;
 
     $base_uri = get_stylesheet_directory_uri() . '/assets/OCR-Scan';
 
@@ -654,6 +663,37 @@ function pianomode_omr_scanner_assets() {
         PIANOMODE_OMR_VER,
         false
     );
+}
+
+/**
+ * Hook wrapper: detect whether the current page uses the OMR scanner
+ * template and, if so, enqueue scripts. Multiple detection methods are
+ * used because Blocksy + child-theme combos can break is_page_template().
+ */
+function pianomode_omr_scanner_assets() {
+    if ( ! is_page() ) return;
+
+    // Method 1: standard WP template meta check.
+    if ( is_page_template( 'page-omr-scanner.php' ) ) {
+        pianomode_enqueue_omr_scripts();
+        return;
+    }
+
+    // Method 2: direct post-meta check (handles child-theme path quirks
+    // and the Template Name rename to "Sheet to Sound").
+    global $post;
+    if ( $post ) {
+        $tpl = get_post_meta( $post->ID, '_wp_page_template', true );
+        if ( $tpl && strpos( $tpl, 'omr-scanner' ) !== false ) {
+            pianomode_enqueue_omr_scripts();
+            return;
+        }
+    }
+
+    // Method 3: scripts were already loaded by the template safety-net
+    // (page-omr-scanner.php calls pianomode_enqueue_omr_scripts directly).
+    // This branch is a no-op but documents why the check above may seem
+    // incomplete.
 }
 add_action( 'wp_enqueue_scripts', 'pianomode_omr_scanner_assets', 25 );
 
