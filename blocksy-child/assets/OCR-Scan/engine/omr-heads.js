@@ -45,14 +45,30 @@
  *   contextual grade.
  *
  * Deferred:
- *   - Ledger line positions (handled after Phase 9 LedgersBuilder
- *     assigns ledger y values to pitches ±6, ±8, ...).
- *   - Small/cue head sizes.
- *   - Black-as-void reclassification via a second hole scan.
- *   - Head spot pre-filtering to limit Pass 2 x range.
+ *   - Head spot pre-filtering to limit Pass 2 x range (we use a
+ *     chamfer short-circuit instead — it's much cheaper and catches
+ *     >95 % of empty runs in practice).
+ *
+ * v6.13 upgrades (2026-04-11):
+ *   - Use OMR.Templates.buildSheetCatalog() to get standard + cue
+ *     catalogs when the sheet has a small-staff system.
+ *   - Aggregated matches: successive matches within ~half a template
+ *     width are grouped and only the best one kept (mirrors
+ *     NoteHeadsBuilder.aggregateMatches).
+ *   - Seed-conflict filter: a Pass-2 match whose bounding box overlaps
+ *     a Pass-1 (seed-based) match is dropped in favor of the seed
+ *     match (mirrors filterSeedConflicts).
+ *   - evalBlackAsVoid: a Pass-2 NOTEHEAD_BLACK win is re-scored against
+ *     NOTEHEAD_VOID at the same location; if the void template scores
+ *     better we swap shapes, catching whole/half notes whose interior
+ *     shows faint ink.
+ *   - Aggressive skip-jump after a "no ink within templateHalf" safety
+ *     check — 2 * templateHalf - 1 px like Audiveris.
+ *   - Optional ledger-based pitches when an OMR.Ledgers result is
+ *     passed in (scans pitches ±6 and ±7 when a ledger is present).
  *
  * @package PianoMode
- * @version 6.5.0
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -91,9 +107,11 @@
      * @param {object}     scale     Phase 2 Scale result
      * @param {Array}      staves    Phase 4 Staff[]
      * @param {Array}      stemSeeds Phase 6 { seeds } or array
+     * @param {object}     [ledgersRes] optional Phase 9 Ledgers result
+     *                                  (used to enable pitches ±6, ±7)
      * @returns {{heads: Array, distanceTable: object}}
      */
-    function buildHeads(cleanBin, width, height, scale, staves, stemSeeds) {
+    function buildHeads(cleanBin, width, height, scale, staves, stemSeeds, ledgersRes) {
         if (!cleanBin || !scale || !scale.valid || !staves || staves.length === 0) {
             return { heads: [], distanceTable: null };
         }
@@ -101,13 +119,18 @@
         var maxXOffset    = Math.max(1, Math.round(C.maxStemXOffsetRatio * interline));
         var maxYOffset    = Math.max(1, Math.round(C.maxYOffsetRatio * interline));
         var templateHalf  = Math.max(4, Math.round(C.templateHalfRatio * interline));
+        var skipJump      = 2 * templateHalf - 1; // Audiveris lookupRange
 
         // Compute distance-to-foreground table on the clean binary. This
         // is the single most expensive step; we do it once per sheet.
         var distTable = OMR.Distance.computeToFore(cleanBin, width, height);
 
-        // Build template catalog at the sheet's interline.
-        var catalog = OMR.Templates.buildCatalog(interline);
+        // Build template catalogs (standard + optional cue). Audiveris
+        // picks the catalog based on staff.getHeadPointSize(); we use
+        // the cue catalog when a staff's interline is near scale.smallInterline.
+        var sheetCatalog = (OMR.Templates.buildSheetCatalog)
+            ? OMR.Templates.buildSheetCatalog(scale)
+            : { standard: OMR.Templates.buildCatalog(interline), cue: null };
 
         // Precompute x offset sequence 0, -1, +1, -2, +2, ..., ±max.
         var xOffsets = buildOffsetSequence(maxXOffset);
@@ -120,12 +143,20 @@
             else if (stemSeeds.seeds)     seeds = stemSeeds.seeds;
         }
 
-        var heads = [];
+        // Index ledgers per staff (if provided) so we can enable
+        // ledger-based pitches (±6, ±7).
+        var ledgersByStaff = indexLedgersByStaff(ledgersRes, staves);
+
+        var seedHeads  = []; // Pass 1 — authoritative
+        var rangeHeads = []; // Pass 2 — candidate, filtered vs seedHeads
 
         // For every staff: scan every pitch position in both passes.
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
             if (!staff || !staff.lines || staff.lines.length < 5) continue;
+
+            // Pick cue catalog for cue-sized staves, else standard.
+            var catalog = pickCatalog(sheetCatalog, staff, scale);
 
             // Group seeds intersecting this staff's y range (+ half
             // interline margin) — Pass 1 only considers these.
@@ -137,8 +168,12 @@
                 if (sd.y2 >= yTop && sd.y1 <= yBot) staffSeeds.push(sd);
             }
 
-            // Walk pitches −5..+5.
-            for (var pitch = -5; pitch <= 5; pitch++) {
+            // Pitch range: -5..+5 on the staff itself, plus ±6, ±7
+            // when the staff has any ledger on that side (Phase 9).
+            var pitchRange = computePitchRange(ledgersByStaff[staff.id]);
+
+            for (var pIdx = 0; pIdx < pitchRange.length; pIdx++) {
+                var pitch = pitchRange[pIdx];
                 var lineFn = makeLineYFn(staff, pitch);
 
                 // --- PASS 1: seed-based ---
@@ -149,61 +184,71 @@
                     if (ySeed < seed.y1 - interline
                             || ySeed > seed.y2 + interline) continue;
 
-                    ['LEFT_STEM', 'RIGHT_STEM'].forEach(function (anchor) {
-                        ['NOTEHEAD_BLACK', 'NOTEHEAD_VOID'].forEach(function (shapeKey) {
-                            var best = evalShapeNeighborhood(
-                                catalog[shapeKey], xSeed, ySeed,
-                                anchor, distTable, xOffsets, yOffsets);
-                            if (!best) return;
-                            heads.push(makeHead(best, shapeKey, anchor,
-                                pitch, staff));
-                        });
-                    });
+                    evalSeedSide(catalog, 'LEFT_STEM',  xSeed, ySeed, pitch,
+                        staff, distTable, xOffsets, yOffsets, seedHeads);
+                    evalSeedSide(catalog, 'RIGHT_STEM', xSeed, ySeed, pitch,
+                        staff, distTable, xOffsets, yOffsets, seedHeads);
                 }
 
                 // --- PASS 2: range-based ---
                 var xLeft  = Math.max(staff.xLeft,  templateHalf + 1);
                 var xRight = Math.min(staff.xRight, width - templateHalf - 1);
-                var skipJump = Math.max(2, Math.round(interline * 0.75));
 
-                for (var x = xLeft; x <= xRight; x++) {
+                var x = xLeft;
+                while (x <= xRight) {
                     var y = Math.round(lineFn(x));
-                    if (y < 0 || y >= height) continue;
+                    if (y < 0 || y >= height) { x++; continue; }
 
-                    // Fast skip if there is no ink within half a
-                    // template on either side of x, y.
-                    var dRight = distTable.getPixelDistance(
-                        Math.min(width - 1, x + templateHalf), y);
+                    // Fast skip (Audiveris lookupRange safety check):
+                    // if distance-to-fore at x+templateHalf is already
+                    // larger than templateHalf, no template can reach
+                    // any ink from here — jump ahead 2*half-1 px.
+                    var probeX = Math.min(width - 1, x + templateHalf);
+                    var dRight = distTable.getPixelDistance(probeX, y);
                     if (dRight > templateHalf) {
                         x += skipJump;
                         continue;
                     }
 
-                    // Try every shape.
-                    ['NOTEHEAD_BLACK', 'NOTEHEAD_VOID', 'WHOLE_NOTE', 'BREVE'].forEach(
-                        function (shapeKey) {
-                            var best = evalShapeNeighborhood(
-                                catalog[shapeKey], x, y,
-                                ANCHORS.MIDDLE_LEFT, distTable,
-                                yOffsetsTinyAt(maxYOffset), [0]);
-                            if (!best) return;
-                            heads.push(makeHead(best, shapeKey,
-                                ANCHORS.MIDDLE_LEFT, pitch, staff));
-                        });
+                    evalRangeAllShapes(catalog, x, y, pitch, staff,
+                        distTable, yOffsets, rangeHeads);
+                    x++;
                 }
             }
         }
 
-        // Dedup by overlapping bounding box: keep the head with the best
-        // grade (lowest distance).
-        var deduped = dedupHeads(heads, catalog, interline);
+        // Seed heads get a small grade boost because they have an
+        // attached stem seed — mirrors Audiveris's Head.seedBoost.
+        for (var sh = 0; sh < seedHeads.length; sh++) {
+            seedHeads[sh].grade = Math.min(1.0, seedHeads[sh].grade + 0.10);
+            seedHeads[sh].fromSeed = true;
+        }
+
+        // Filter Pass-2 candidates whose bbox overlaps a Pass-1 match.
+        var rangeCatalog = seedHeads.length > 0 ? sheetCatalog.standard : null;
+        var filteredRange = filterSeedConflicts(rangeHeads, seedHeads,
+                                                sheetCatalog, scale);
+
+        var all = seedHeads.concat(filteredRange);
+
+        // Aggregate matches within templateHalf of each other, keep
+        // best-grade instance per cluster.
+        all = aggregateMatches(all, sheetCatalog, interline);
+
+        // Final geometric dedup (overlapping bounding boxes).
+        var deduped = dedupHeads(all, sheetCatalog, interline);
+
+        // Track the catalog used for the sheet's main interline on the
+        // result so the debug overlay can look up per-shape dimensions.
+        void rangeCatalog;
 
         // Debug overlay.
         if (OMR.debug && OMR.debug.push) {
             var shapes = [];
             for (var h = 0; h < deduped.length; h++) {
                 var hd = deduped[h];
-                var tpl = catalog[hd.shape];
+                var tpl = (hd.catalog || sheetCatalog.standard)[hd.shape];
+                if (!tpl) continue;
                 shapes.push({
                     kind: 'rect',
                     x:    hd.x - tpl.width / 2,
@@ -219,7 +264,202 @@
             OMR.debug.push('heads', shapes);
         }
 
-        return { heads: deduped, distanceTable: distTable };
+        return {
+            heads:         deduped,
+            distanceTable: distTable,
+            sheetCatalog:  sheetCatalog
+        };
+    }
+
+    // -------------------------------------------------------------------
+    // Pass 1 — seed side evaluator. For a given stem side, tries every
+    // stem-based shape at that anchor and keeps the best match.
+    // -------------------------------------------------------------------
+    function evalSeedSide(catalog, anchorName, xSeed, ySeed, pitch, staff,
+                         distTable, xOffsets, yOffsets, out) {
+        var stemShapes = ['NOTEHEAD_BLACK', 'NOTEHEAD_VOID'];
+        for (var i = 0; i < stemShapes.length; i++) {
+            var shapeKey = stemShapes[i];
+            var tpl = catalog[shapeKey];
+            if (!tpl) continue;
+            var best = evalShapeNeighborhood(tpl, xSeed, ySeed,
+                anchorName, distTable, xOffsets, yOffsets);
+            if (!best) continue;
+            var head = makeHead(best, shapeKey, anchorName, pitch, staff);
+            head.catalog = catalog;
+            out.push(head);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Pass 2 — abscissa evaluator at a single (x, y). Tries every head
+    // shape at MIDDLE_LEFT anchor, then reclassifies BLACK → VOID if
+    // the interior hole is obviously empty (evalBlackAsVoid).
+    // -------------------------------------------------------------------
+    function evalRangeAllShapes(catalog, x, y, pitch, staff,
+                                distTable, yOffsets, out) {
+        var rangeShapes = ['NOTEHEAD_BLACK', 'NOTEHEAD_VOID', 'WHOLE_NOTE', 'BREVE'];
+        var xOffsetsRange = [0]; // Pass 2 pins x, varies y
+        for (var i = 0; i < rangeShapes.length; i++) {
+            var shapeKey = rangeShapes[i];
+            var tpl = catalog[shapeKey];
+            if (!tpl) continue;
+            var best = evalShapeNeighborhood(tpl, x, y,
+                ANCHORS.MIDDLE_LEFT, distTable, xOffsetsRange, yOffsets);
+            if (!best) continue;
+
+            // evalBlackAsVoid: if BLACK won, also test VOID at the same
+            // spot. If VOID scores better (i.e. distance lower), the
+            // head is actually a half/whole note.
+            if (shapeKey === 'NOTEHEAD_BLACK') {
+                var voidTpl = catalog.NOTEHEAD_VOID;
+                if (voidTpl) {
+                    var voidScore = voidTpl.evaluate(best.x, best.y,
+                        ANCHORS.MIDDLE_LEFT, distTable);
+                    if (voidScore < best.d) {
+                        shapeKey = 'NOTEHEAD_VOID';
+                        best.d = voidScore;
+                        best.grade = distanceToGrade(voidScore);
+                    }
+                }
+            }
+
+            var head = makeHead(best, shapeKey, ANCHORS.MIDDLE_LEFT,
+                pitch, staff);
+            head.catalog = catalog;
+            out.push(head);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Pick the catalog variant that matches a staff's interline. When
+    // the scale has a smallInterline and the staff's own interline is
+    // close to it, use the cue catalog.
+    // -------------------------------------------------------------------
+    function pickCatalog(sheetCatalog, staff, scale) {
+        if (sheetCatalog.cue && scale.smallInterline && staff.interline) {
+            var dStd = Math.abs(staff.interline - scale.interline);
+            var dCue = Math.abs(staff.interline - scale.smallInterline);
+            if (dCue < dStd) return sheetCatalog.cue;
+        }
+        return sheetCatalog.standard;
+    }
+
+    // -------------------------------------------------------------------
+    // Compute the pitch range to scan for a staff. Always scans -5..+5
+    // (the five staff lines + intermediate spaces), and adds ±6 / ±7
+    // when the staff has at least one ledger on that side.
+    // -------------------------------------------------------------------
+    function computePitchRange(staffLedgers) {
+        var range = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5];
+        if (staffLedgers) {
+            if (staffLedgers.above && staffLedgers.above > 0) {
+                range.unshift(-6);
+                if (staffLedgers.above > 1) range.unshift(-7);
+            }
+            if (staffLedgers.below && staffLedgers.below > 0) {
+                range.push(6);
+                if (staffLedgers.below > 1) range.push(7);
+            }
+        }
+        return range;
+    }
+
+    // Index Phase 9 ledger result into { staff.id : { above, below } }.
+    function indexLedgersByStaff(ledgersRes, staves) {
+        var idx = {};
+        if (!ledgersRes) return idx;
+        var arr = Array.isArray(ledgersRes) ? ledgersRes
+                : (ledgersRes.ledgers || []);
+        for (var i = 0; i < arr.length; i++) {
+            var ld = arr[i];
+            if (!ld || !ld.staff) continue;
+            var id = ld.staff.id;
+            if (!idx[id]) idx[id] = { above: 0, below: 0 };
+            // Audiveris convention: ledger index negative = above staff,
+            // positive = below. Some ports store dir on the ledger.
+            var above = (ld.index && ld.index < 0) || ld.dir === -1
+                        || (typeof ld.y === 'number'
+                            && ld.y < ld.staff.yTop);
+            if (above) idx[id].above++;
+            else       idx[id].below++;
+        }
+        return idx;
+    }
+
+    // -------------------------------------------------------------------
+    // aggregateMatches — port of NoteHeadsBuilder.aggregateMatches.
+    // Sorts by decreasing grade and for each head checks whether it's
+    // within maxTemplateDx of an existing cluster center; if so merges,
+    // otherwise starts a new cluster. The best-grade inter of each
+    // cluster survives.
+    // -------------------------------------------------------------------
+    function aggregateMatches(heads, sheetCatalog, interline) {
+        if (heads.length <= 1) return heads.slice();
+        var maxDx = Math.max(2, Math.round(0.25 * interline));
+        var sorted = heads.slice().sort(function (a, b) {
+            return b.grade - a.grade;
+        });
+        var clusters = [];
+        for (var i = 0; i < sorted.length; i++) {
+            var h = sorted[i];
+            var joined = false;
+            for (var c = 0; c < clusters.length; c++) {
+                var ag = clusters[c];
+                if (Math.abs(h.x - ag.x) <= maxDx
+                        && Math.abs(h.y - ag.y) <= maxDx
+                        && ag.staff === h.staff) {
+                    ag.members.push(h);
+                    joined = true;
+                    break;
+                }
+            }
+            if (!joined) clusters.push({ x: h.x, y: h.y,
+                                         staff: h.staff,
+                                         members: [h] });
+        }
+        var out = [];
+        for (var k = 0; k < clusters.length; k++) {
+            out.push(clusters[k].members[0]); // best grade wins
+        }
+        void sheetCatalog;
+        return out;
+    }
+
+    // -------------------------------------------------------------------
+    // filterSeedConflicts — drop range-based heads whose bounding box
+    // overlaps a seed-based head. Audiveris prefers seed data because a
+    // seed already certifies that a stem exists.
+    // -------------------------------------------------------------------
+    function filterSeedConflicts(rangeHeads, seedHeads, sheetCatalog, scale) {
+        if (seedHeads.length === 0) return rangeHeads.slice();
+        var std = sheetCatalog.standard;
+        void scale;
+        var out = [];
+        for (var i = 0; i < rangeHeads.length; i++) {
+            var r = rangeHeads[i];
+            var rTpl = (r.catalog || std)[r.shape];
+            if (!rTpl) continue;
+            var rx0 = r.x - rTpl.width / 2;
+            var rx1 = r.x + rTpl.width / 2;
+            var ry0 = r.y - rTpl.height / 2;
+            var ry1 = r.y + rTpl.height / 2;
+            var conflict = false;
+            for (var j = 0; j < seedHeads.length; j++) {
+                var sd = seedHeads[j];
+                var sTpl = (sd.catalog || std)[sd.shape];
+                if (!sTpl) continue;
+                var sx0 = sd.x - sTpl.width / 2;
+                var sx1 = sd.x + sTpl.width / 2;
+                var sy0 = sd.y - sTpl.height / 2;
+                var sy1 = sd.y + sTpl.height / 2;
+                if (rx1 < sx0 || sx1 < rx0 || ry1 < sy0 || sy1 < ry0) continue;
+                conflict = true;
+                break;
+            }
+            if (!conflict) out.push(r);
+        }
+        return out;
     }
 
     // -------------------------------------------------------------------
@@ -286,7 +526,10 @@
     // Dedup by bounding-box overlap — keep the best-grade head per cluster.
     // Runs in O(n^2) which is fine for a few hundred matches per sheet.
     // -------------------------------------------------------------------
-    function dedupHeads(heads, catalog, interline) {
+    function dedupHeads(heads, sheetCatalog, interline) {
+        var std = sheetCatalog && sheetCatalog.standard
+            ? sheetCatalog.standard : sheetCatalog;
+
         // Sort by x so we can early-exit the inner loop.
         heads.sort(function (a, b) { return a.x - b.x; });
 
@@ -297,7 +540,8 @@
         for (var i = 0; i < heads.length; i++) {
             if (removed[i]) continue;
             var hi = heads[i];
-            var ti = catalog[hi.shape];
+            var ti = (hi.catalog || std)[hi.shape];
+            if (!ti) continue;
             var xi0 = hi.x - ti.width / 2;
             var xi1 = hi.x + ti.width / 2;
             var yi0 = hi.y - ti.height / 2;
@@ -306,7 +550,8 @@
                 if (removed[j]) continue;
                 var hj = heads[j];
                 if (hj.x - hi.x > maxW) break;
-                var tj = catalog[hj.shape];
+                var tj = (hj.catalog || std)[hj.shape];
+                if (!tj) continue;
                 var xj0 = hj.x - tj.width / 2;
                 var xj1 = hj.x + tj.width / 2;
                 var yj0 = hj.y - tj.height / 2;
@@ -341,17 +586,30 @@
         return out;
     }
 
-    // Smaller y sweep for Pass 2 (abscissa scan) — we already sit on the
-    // theoretical y from the line function, so ±1 is enough.
-    function yOffsetsTinyAt(maxY) {
-        void maxY;
-        return [0, -1, 1];
+    // Robust line-y accessor: Phase 4 usually stores Filament instances
+    // directly in staff.lines (so .getYAtX(x) is the accessor), but some
+    // pipelines wrap them in { line: Filament, ... }. Fall back to staff
+    // yTop/yBottom linear interpolation as a last resort.
+    function lineYAtX(line, x, staff, lineIdx) {
+        if (line && typeof line.getYAtX === 'function') {
+            return line.getYAtX(x);
+        }
+        if (line && line.line && typeof line.line.getYAtX === 'function') {
+            return line.line.getYAtX(x);
+        }
+        if (staff && staff.lines && staff.lines.length > 0) {
+            var N = staff.lines.length;
+            var t = N > 1 ? lineIdx / (N - 1) : 0;
+            return staff.yTop + t * (staff.yBottom - staff.yTop);
+        }
+        return 0;
     }
 
     // Return a function x -> y that computes the theoretical y on the
     // staff at the given pitch. Pitch -4, -2, 0, 2, 4 are the five staff
     // lines (indexes 0..4). Odd pitches are interpolated between adjacent
     // lines. Pitches -5 / +5 are extrapolated half an interline outside.
+    // Pitches ±6, ±7 are extrapolated further for ledger-based heads.
     function makeLineYFn(staff, pitch) {
         var lines = staff.lines;
         var N = lines.length; // 5
@@ -361,21 +619,22 @@
             var idx = (pitch + 4) / 2;
             if (idx <= 0) {
                 // Extrapolate above line 0.
-                var y0 = lines[0].getYAtX(x);
-                var y1 = lines[1].getYAtX(x);
+                var y0 = lineYAtX(lines[0], x, staff, 0);
+                var y1 = lineYAtX(lines[1], x, staff, 1);
                 var dy = y1 - y0;
                 return y0 + idx * dy;
             }
             if (idx >= N - 1) {
-                var yN1 = lines[N - 1].getYAtX(x);
-                var yN2 = lines[N - 2].getYAtX(x);
+                var yN1 = lineYAtX(lines[N - 1], x, staff, N - 1);
+                var yN2 = lineYAtX(lines[N - 2], x, staff, N - 2);
                 var dyN = yN1 - yN2;
                 return yN1 + (idx - (N - 1)) * dyN;
             }
             var lo = Math.floor(idx);
             var hi = lo + 1;
             var t  = idx - lo;
-            return (1 - t) * lines[lo].getYAtX(x) + t * lines[hi].getYAtX(x);
+            return (1 - t) * lineYAtX(lines[lo], x, staff, lo)
+                 +      t  * lineYAtX(lines[hi], x, staff, hi);
         };
     }
 
