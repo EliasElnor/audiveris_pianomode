@@ -2186,6 +2186,33 @@ OMR.Engine = {
                     }
 
                     // ------------------------------------------------
+                    // Phase 9: LedgersBuilder sidecar. Scans horizontal
+                    // filaments above / below each Phase 4 staff and
+                    // accepts those that pitch-align to virtual line
+                    // positions -1..-6 and +1..+6. Results are attached
+                    // to staff.ledgers[index] for downstream octave
+                    // disambiguation of heads.
+                    // NOTE: runs BEFORE Phase 8 heads so heads can use
+                    // ledger positions for pitch +-6/+-7.
+                    // ------------------------------------------------
+                    if (OMR.Ledgers
+                            && typeof OMR.Ledgers.buildLedgers === 'function'
+                            && ctx.scale && ctx.scale.valid
+                            && ctx.gridLines
+                            && ctx.gridLines.staves
+                            && ctx.gridLines.staves.length > 0) {
+                        try {
+                            ctx.ledgers = OMR.Ledgers.buildLedgers(
+                                ctx.cleanBin, ctx.w, ctx.h,
+                                ctx.scale, ctx.gridLines.staves,
+                                ctx.beams || null);
+                        } catch (ldErr) {
+                            // Ledgers build failed: leave ledgers null.
+                            ctx.ledgers = null;
+                        }
+                    }
+
+                    // ------------------------------------------------
                     // Phase 8: TemplateFactory + NoteHeadsBuilder
                     // sidecar. Two-pass head detection using the
                     // distance-to-fore map. Consumes Phase 6 stem
@@ -2206,34 +2233,11 @@ OMR.Engine = {
                             ctx.heads = OMR.Heads.buildHeads(
                                 ctx.cleanBin, ctx.w, ctx.h,
                                 ctx.scale, ctx.gridLines.staves,
-                                seedsForHeads);
+                                seedsForHeads,
+                                ctx.ledgers || null);
                         } catch (hdErr) {
                             // Heads build failed: leave heads null.
                             ctx.heads = null;
-                        }
-                    }
-
-                    // ------------------------------------------------
-                    // Phase 9: LedgersBuilder sidecar. Scans horizontal
-                    // filaments above / below each Phase 4 staff and
-                    // accepts those that pitch-align to virtual line
-                    // positions -1..-6 and +1..+6. Results are attached
-                    // to staff.ledgers[index] for downstream octave
-                    // disambiguation of heads.
-                    // ------------------------------------------------
-                    if (OMR.Ledgers
-                            && typeof OMR.Ledgers.buildLedgers === 'function'
-                            && ctx.scale && ctx.scale.valid
-                            && ctx.gridLines
-                            && ctx.gridLines.staves
-                            && ctx.gridLines.staves.length > 0) {
-                        try {
-                            ctx.ledgers = OMR.Ledgers.buildLedgers(
-                                ctx.cleanBin, ctx.w, ctx.h,
-                                ctx.scale, ctx.gridLines.staves);
-                        } catch (ldErr) {
-                            // Ledgers build failed: leave ledgers null.
-                            ctx.ledgers = null;
                         }
                     }
 
