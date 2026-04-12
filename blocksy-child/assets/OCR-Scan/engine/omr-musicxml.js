@@ -327,7 +327,20 @@
 
     function staffIndexInPart(part, staff) {
         for (var i = 0; i < part.staffMap.length; i++) {
+            // Primary: same object reference.
             if (part.staffMap[i] === staff) return i;
+            // Fallback: match by staff id (survives object cloning /
+            // different system references across systems).
+            if (staff && part.staffMap[i]
+                && part.staffMap[i].id !== undefined
+                && part.staffMap[i].id === staff.id) return i;
+        }
+        // Last resort: match by staffIndex (0=upper, 1=lower in grand staff).
+        if (staff && staff.staffIndex !== undefined) {
+            for (var j = 0; j < part.staffMap.length; j++) {
+                if (part.staffMap[j]
+                    && part.staffMap[j].staffIndex === staff.staffIndex) return j;
+            }
         }
         return -1;
     }
