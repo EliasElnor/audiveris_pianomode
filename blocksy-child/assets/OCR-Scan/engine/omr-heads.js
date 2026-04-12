@@ -86,13 +86,13 @@
     var C = {
         // Grade 0 ↔ distance == params.maxDistance
         // Grade 1 ↔ distance == 0
-        maxDistanceLow:      2.0,   // acceptable head match distance
-        maxDistanceHigh:     3.5,   // "reallyBad" cutoff; abandon template
-        minGrade:            0.35,  // min acceptable grade (0..1)
+        maxDistanceLow:      2.5,   // acceptable head match distance (relaxed from 2.0)
+        maxDistanceHigh:     4.0,   // "reallyBad" cutoff; abandon template (relaxed from 3.5)
+        minGrade:            0.25,  // min acceptable grade (0..1) (lowered from 0.35 to catch more heads)
 
         // x offsets tried around a seed (centered, grows outward)
         maxStemXOffsetRatio: 0.15,  // fraction of interline
-        maxYOffsetRatio:     0.20,  // fraction of interline
+        maxYOffsetRatio:     0.25,  // fraction of interline (widened from 0.20)
 
         // Distance skip in Pass 2
         templateHalfRatio:   1.0    // templateHalf = interline * this
@@ -119,7 +119,7 @@
         var maxXOffset    = Math.max(1, Math.round(C.maxStemXOffsetRatio * interline));
         var maxYOffset    = Math.max(1, Math.round(C.maxYOffsetRatio * interline));
         var templateHalf  = Math.max(4, Math.round(C.templateHalfRatio * interline));
-        var skipJump      = 2 * templateHalf - 1; // Audiveris lookupRange
+        var skipJump      = templateHalf; // half of Audiveris lookupRange — scan more densely
 
         // Compute distance-to-foreground table on the clean binary. This
         // is the single most expensive step; we do it once per sheet.
