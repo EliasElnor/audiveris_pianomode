@@ -22,9 +22,11 @@
  * each note On at (measureStartTicks + event.startBeat * DIV) and
  * Off at (start + event.duration * DIV). Rests advance time only.
  *
- * Channel assignment:
- *   - Part 0 (grand staff or first staff)  -> channel 0 (piano)
- *   - Part 1 / extra staves                 -> channel 1 (piano)
+ * Channel assignment (grand staff):
+ *   - Treble (staff 1) -> channel 0 (piano)
+ *   - Bass   (staff 2) -> channel 1 (piano)
+ *
+ * For non-grand-staff scores each staff gets its own track on channel i.
  *
  * Velocity is fixed (80) — Audiveris does not infer dynamics.
  *
@@ -32,7 +34,21 @@
  * the SMF default; we still emit the meta event explicitly so the player
  * doesn't have to assume.
  *
+ * v6.13 upgrades:
+ *   - For piano grand staff, treble and bass are emitted as two
+ *     separate MIDI tracks on channels 0 and 1 so the player can
+ *     control them independently (and so bass doesn't collide with
+ *     treble when both voices hit the same pitch at the same tick).
+ *   - Measure duration derived from the first staff's time signature
+ *     (falls back to 4/4) rather than "longest event end" heuristic
+ *     which was unstable across sparse measures.
+ *   - Pre-computed cumulative measure tick offsets — O(n) instead
+ *     of the O(n²) fall-back in ticksAtMeasure.
+ *   - Staff filtering fixed: compare staff slot (Phase 13
+ *     staffNumber) instead of comparing a staff object to an int.
+ *
  * @package PianoMode
+ * @version 6.13.0
  */
 (function () {
     'use strict';
@@ -107,39 +123,34 @@
     };
 
     // ---------------------------------------------------------------------
-    // Part collection — same logic as MusicXmlNew, kept inline so the two
-    // writers don't import each other (load order is unspecified).
+    // Part collection — expose one MIDI track per staff slot so treble and
+    // bass of a piano grand staff get their own channel. MusicXML groups
+    // them into a single <part> with <staves>2</staves>, but MIDI tracks
+    // are per-channel so splitting gives a cleaner player experience.
     // ---------------------------------------------------------------------
     function collectParts(sig) {
         var parts = [];
         if (!sig || !sig.systems) return parts;
 
         var systems = sig.systems;
-        var grandStaff = (systems.length > 0
-                          && systems[0].staves
-                          && systems[0].staves.length === 2);
+        var maxStaves = 0;
+        for (var s = 0; s < systems.length; s++) {
+            if (systems[s].staves && systems[s].staves.length > maxStaves) {
+                maxStaves = systems[s].staves.length;
+            }
+        }
+        if (maxStaves === 0) return parts;
 
-        if (grandStaff) {
-            // Single piano part containing both staves of every system.
-            var p = { id: 'P1', name: 'Piano', staffCount: 2, systems: systems };
-            parts.push(p);
-        } else {
-            // One part per staff, distributed across systems by index.
-            var maxStaves = 0;
-            for (var s = 0; s < systems.length; s++) {
-                if (systems[s].staves && systems[s].staves.length > maxStaves) {
-                    maxStaves = systems[s].staves.length;
-                }
-            }
-            for (var i = 0; i < maxStaves; i++) {
-                parts.push({
-                    id: 'P' + (i + 1),
-                    name: 'Staff ' + (i + 1),
-                    staffCount: 1,
-                    systems: systems,
-                    staffFilter: i
-                });
-            }
+        // Piano grand staff default naming.
+        var names = (maxStaves === 2) ? ['Piano RH', 'Piano LH'] : null;
+        for (var i = 0; i < maxStaves; i++) {
+            parts.push({
+                id:          'P' + (i + 1),
+                name:        names ? names[i] : ('Staff ' + (i + 1)),
+                staffCount:  1,
+                systems:     systems,
+                staffSlot:   i  // 0 = top, 1 = second, ...
+            });
         }
         return parts;
     }
@@ -152,9 +163,17 @@
     // For chord events we put every member into the on/off lists at the
     // same tick — the player gets simultaneous polyphony "for free" since
     // SMF allows multiple events at the same delta=0.
+    //
+    // Staff filtering uses the Phase 13 voice.staffNumber / ev.staffNumber
+    // integer (1-based) to decide which voice belongs to this part's
+    // staffSlot (0-based). This replaces the old voice.staff object
+    // comparison which never matched an integer.
     // ---------------------------------------------------------------------
     function flattenPartEvents(part) {
         var events = [];   // { tick, type:'on'|'off', midi:[...] }
+
+        // Pre-compute measure tick offsets once (O(n)).
+        var measTickLookup = buildMeasureTickLookup(part);
 
         for (var sIdx = 0; sIdx < part.systems.length; sIdx++) {
             var sys = part.systems[sIdx];
@@ -164,19 +183,19 @@
                 var measure = sys.measures[mIdx];
                 if (!measure.voices) continue;
 
-                // Per-measure absolute tick origin. Audiveris computes
-                // measure durations from the time signature, but at this
-                // stage we don't have a guaranteed time sig per system, so
-                // we approximate the measure length as the max
-                // (startBeat + duration) seen in any of its voices.
-                var measureLen = measureDuration(measure);
-                var measureTick = ticksAtMeasure(part, sys, mIdx);
+                var measureTick = measTickLookup[sIdx + ':' + mIdx] || 0;
 
                 for (var vIdx = 0; vIdx < measure.voices.length; vIdx++) {
                     var voice = measure.voices[vIdx];
                     if (!voice.events) continue;
-                    if (part.staffFilter != null
-                        && voice.staff !== part.staffFilter) continue;
+
+                    // Filter: keep only voices belonging to this part's
+                    // staff slot. Phase 13 tags voice.staffNumber (1-based);
+                    // part.staffSlot is 0-based.
+                    var voiceStaffSlot = (voice.staffNumber != null)
+                        ? voice.staffNumber - 1
+                        : staffSlotFromVoice(voice, sys);
+                    if (voiceStaffSlot !== part.staffSlot) continue;
 
                     for (var eIdx = 0; eIdx < voice.events.length; eIdx++) {
                         var ev = voice.events[eIdx];
@@ -195,10 +214,6 @@
                         events.push({ tick: offT, type: 'off', midi: midi.slice() });
                     }
                 }
-
-                // Cache the measure length on the part for ticksAtMeasure.
-                if (!part._mLens) part._mLens = {};
-                part._mLens[sIdx + ':' + mIdx] = measureLen;
             }
         }
 
@@ -213,37 +228,46 @@
         return events;
     }
 
-    function measureDuration(measure) {
-        var maxEnd = 0;
-        var voices = measure.voices || [];
-        for (var i = 0; i < voices.length; i++) {
-            var evs = voices[i].events || [];
-            for (var j = 0; j < evs.length; j++) {
-                var e = evs[j];
-                var end = (e.startBeat || 0) + (e.duration || 1);
-                if (end > maxEnd) maxEnd = end;
-            }
+    // Fallback: guess the staff slot of a voice from its staff object's
+    // position in the system's staves array.
+    function staffSlotFromVoice(voice, sys) {
+        if (!voice.staff || !sys.staves) return 0;
+        for (var i = 0; i < sys.staves.length; i++) {
+            if (sys.staves[i] === voice.staff) return i;
         }
-        if (maxEnd <= 0) maxEnd = 4; // fallback to one whole measure
-        return maxEnd;
+        return 0;
     }
 
-    function ticksAtMeasure(part, currentSystem, measureIndex) {
-        // Sum measure durations of every preceding measure of the part.
+    // Derive the measure length in quarter notes from the first staff's
+    // time signature, falling back to 4/4.
+    function timeSigQuarters(sig) {
+        if (!sig || !sig.systems || !sig.systems[0]) return 4;
+        var staves = sig.systems[0].staves;
+        if (!staves || !staves[0]) return 4;
+        var hdr = staves[0].header;
+        if (!hdr || !hdr.time) return 4;
+        var beats    = hdr.time.beats    || 4;
+        var beatType = hdr.time.beatType || 4;
+        return beats * (4 / beatType);
+    }
+
+    // Pre-compute cumulative measure tick offsets across all systems so
+    // flattenPartEvents doesn't have to walk every preceding measure on
+    // each lookup (O(n²) → O(n)).
+    function buildMeasureTickLookup(part) {
+        var lookup = {};
         var ticks = 0;
+        var quartersPerMeasure = timeSigQuarters({ systems: part.systems });
+        var ticksPerMeasure = Math.round(quartersPerMeasure * DIVISION);
         for (var sIdx = 0; sIdx < part.systems.length; sIdx++) {
             var sys = part.systems[sIdx];
             var measures = sys.measures || [];
             for (var mIdx = 0; mIdx < measures.length; mIdx++) {
-                if (sys === currentSystem && mIdx === measureIndex) {
-                    return ticks;
-                }
-                var len = (part._mLens && part._mLens[sIdx + ':' + mIdx])
-                          || measureDuration(measures[mIdx]);
-                ticks += Math.round(len * DIVISION);
+                lookup[sIdx + ':' + mIdx] = ticks;
+                ticks += ticksPerMeasure;
             }
         }
-        return ticks;
+        return lookup;
     }
 
     // ---------------------------------------------------------------------
@@ -265,19 +289,22 @@
                  (DEFAULT_TEMPO >>> 8)  & 0xFF,
                  DEFAULT_TEMPO & 0xFF]);
 
-        // Time signature (best effort: read first measure's first voice
-        // duration if present, else default 4/4).
+        // Time signature — read from the first system's first staff header
+        // (Phase 11 stores time sig on staff.header.time).
         var num = 4, den = 4;
-        if (sig && sig.systems && sig.systems[0]) {
-            var hdr = (sig.systems[0].headers || {});
-            var t   = hdr.time;
-            if (t && t.kind === 'NUMERIC' && t.numerator && t.denominator) {
-                num = t.numerator;
-                den = t.denominator;
-            } else if (t && t.kind === 'COMMON') {
-                num = 4; den = 4;
-            } else if (t && t.kind === 'CUT') {
-                num = 2; den = 2;
+        if (sig && sig.systems && sig.systems[0] && sig.systems[0].staves) {
+            var firstStaff = sig.systems[0].staves[0];
+            var staffHdr = firstStaff ? firstStaff.header : null;
+            var t = staffHdr ? staffHdr.time : null;
+            if (t) {
+                if (t.beats && t.beatType) {
+                    num = t.beats;
+                    den = t.beatType;
+                } else if (t.kind === 'COMMON') {
+                    num = 4; den = 4;
+                } else if (t.kind === 'CUT') {
+                    num = 2; den = 2;
+                }
             }
         }
         var denExp = Math.round(Math.log(den) / Math.log(2)); // 4 -> 2
@@ -345,10 +372,14 @@
         // Conductor track.
         trackBlobs.push(encodeConductorTrack(sig));
 
-        // Part tracks.
+        // Part tracks — each staff gets its own channel. For piano grand
+        // staff: treble (staffSlot 0) → channel 0, bass (staffSlot 1) →
+        // channel 1. Non-grand-staff layouts continue sequentially. MIDI
+        // channel 9 is reserved (GM drums), so we skip it.
         for (var i = 0; i < parts.length; i++) {
-            var ch = (i === 0) ? 0 : 1;
-            trackBlobs.push(encodePartTrack(parts[i], ch));
+            var ch = parts[i].staffSlot || i;
+            if (ch >= 9) ch++;  // skip GM percussion channel
+            trackBlobs.push(encodePartTrack(parts[i], ch & 0x0F));
         }
 
         // Header chunk.
