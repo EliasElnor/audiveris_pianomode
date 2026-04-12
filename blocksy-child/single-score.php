@@ -29,6 +29,9 @@ while (have_posts()) : the_post();
     $vsm_url = $score_data['vsm_url'] ?? ''; // Virtual Sheet Music
     $smp_url = $score_data['smp_url'] ?? ''; // Sheet Music Plus
     
+    // Copyright status
+    $copyright_status = !empty($score_data['copyright'] ?? '') ? $score_data['copyright'] : 'Public Domain';
+
     $difficulty = $score_data['difficulty'] ?? ['reading' => 3, 'left_hand' => 3, 'rhythm' => 3, 'dynamics' => 3];
     
     // Taxonomies
@@ -402,6 +405,14 @@ body.single-score {
     color: #999;
     font-family: var(--pm-font);
     font-size: 0.85rem;
+}
+
+.pm-score-copyright-notice {
+    margin: 4px 0 0 0 !important;
+    font-size: 0.75rem !important;
+    color: rgba(255, 255, 255, 0.5) !important;
+    font-style: italic;
+    letter-spacing: 0.02em;
 }
 
 .pm-score-download-btn {
@@ -1685,8 +1696,11 @@ body.single-score {
                     <?php echo esc_html($level_name); ?> Level
                 </a>
             <?php endif; ?>
+
+            <span>&middot;</span>
+            <?php if (function_exists('pianomode_render_share_hero')) { pianomode_render_share_hero(); } ?>
         </div>
-        
+
     </div>
 </div>
 
@@ -1707,7 +1721,8 @@ body.single-score {
                     </div>
                     <div class="pm-score-download-text">
                         <h4>Download Sheet Music</h4>
-                        <p>Free PDF ready to print<?php if ($pdf_size) : ?> • <?php echo esc_html($pdf_size); ?><?php endif; ?></p>
+                        <p>Free PDF ready to print<?php if ($pdf_size) : ?> &bull; <?php echo esc_html($pdf_size); ?><?php endif; ?></p>
+                        <p class="pm-score-copyright-notice">&copy; <?php echo esc_html($copyright_status); ?></p>
                     </div>
                 </div>
                 <a href="<?php echo esc_url($pdf_url); ?>"
@@ -1911,6 +1926,10 @@ body.single-score {
 
             const settings = {
                 file: '<?php echo esc_js($musicxml_url); ?>',
+                core: {
+                    engine: 'svg',
+                    enableLazyLoading: true
+                },
                 player: {
                     enablePlayer: true,
                     enableCursor: true,
@@ -1921,13 +1940,30 @@ body.single-score {
                 },
                 display: {
                     layoutMode: 0,
-                    staveProfile: 0, // Score mode (0) au lieu de Tab mode (1)
-                    stretchForce: 0.8,
-                    scale: 1.0,
-                    barsPerRow: -1
+                    // staveProfile = 2 (Score-only) — forces AlphaTab to
+                    // render the standard treble + bass staves even for
+                    // files that AlphaTab would otherwise default to a
+                    // TAB or mixed layout (guitar-track MusicXML). This
+                    // eliminates the empty "boxes" that appeared on top
+                    // of the staff for some scores.
+                    staveProfile: 2,
+                    stretchForce: 1.2,
+                    scale: 1.2,
+                    barsPerRow: -1,
+                    padding: [15, 40, 15, 40],
+                    systemsLayout: 0,
+                    // Professional dark ink — bold enough for readability
+                    // on both light and dark backgrounds.
+                    resources: {
+                        staffLineColor:      '#1a0e03',
+                        barSeparatorColor:   '#1a0e03',
+                        mainGlyphColor:      '#0c0604',
+                        secondaryGlyphColor: '#3a2106',
+                        scoreInfoColor:      '#1a0e03'
+                    }
                 },
                 notation: {
-                    notationMode: 1, // SongBook mode pour piano
+                    notationMode: 1,
                     elements: {
                         scoreTitle: false,
                         scoreSubTitle: false,
@@ -1937,7 +1973,6 @@ body.single-score {
                         scoreMusic: false,
                         trackNames: false
                     },
-                    // Désactiver les symboles qui s'ajoutent automatiquement
                     rhythmMode: 0,
                     rhythmHeight: 0,
                     smallGraceTabNotes: false,
@@ -2233,6 +2268,8 @@ body.single-score {
                 </svg>
                 Last update: <?php echo get_the_modified_date('F j, Y'); ?>
             </div>
+
+            <?php if (function_exists('pianomode_render_share_bottom')) { pianomode_render_share_bottom(); } ?>
 
             <!-- Author Badge -->
             <?php if (function_exists('pianomode_render_author_badge')) {
