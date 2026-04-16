@@ -51,7 +51,7 @@ function pianomode_security_headers() {
     $permissions[] = 'geolocation=()';
 
     // Autoriser le microphone uniquement sur le Virtual Piano Studio
-    $request_uri = isset($_SERVER['REQUEST_URI']) ? strtolower($_SERVER['REQUEST_URI']) : '';
+    $request_uri = isset($_SERVER['REQUEST_URI']) ? strtolower(sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI']))) : '';
     if (strpos($request_uri, '/virtual-piano') !== false || strpos($request_uri, '/pianomode-studio') !== false) {
         $permissions[] = 'microphone=(self)';
     } else {
@@ -61,7 +61,9 @@ function pianomode_security_headers() {
     header('Permissions-Policy: ' . implode(', ', $permissions));
 
     // Content Security Policy (CSP) - Adaptée pour Tone.js, Three.js, AlphaTab, Amazon Kindle
-    // Note: 'unsafe-inline' nécessaire pour les styles inline WordPress
+    // 'unsafe-inline': Required for WordPress/Blocksy inline styles and wp_add_inline_style()
+    // 'unsafe-eval': Required by Three.js r128 shader compilation (internal eval usage)
+    // TODO (long-term): Migrate to CSP nonces for inline scripts to remove unsafe-inline/eval
     $csp = "default-src 'self'; ";
     $csp .= "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://tonejs.github.io https://threejs.org https://www.googletagmanager.com https://www.google-analytics.com https://*.amazon.com https://*.amazon.fr https://*.amazon.de https://*.amazon.co.uk https://*.amazon.it https://*.amazon.es https://*.ssl-images-amazon.com blob:; ";
     $csp .= "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://*.amazon.com https://*.amazon.fr; ";
@@ -77,7 +79,7 @@ function pianomode_security_headers() {
     // Cache-Control pour les ressources statiques
     // Note: Pour un contrôle plus fin, configurer dans .htaccess ou Siteground
     if (isset($_SERVER['REQUEST_URI'])) {
-        $uri = $_SERVER['REQUEST_URI'];
+        $uri = sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI']));
         // Cache long pour les assets statiques
         if (preg_match('/\.(css|js|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|webp|ico)$/i', $uri)) {
             header('Cache-Control: public, max-age=31536000, immutable');
@@ -90,12 +92,41 @@ add_action('send_headers', 'pianomode_security_headers');
  * CLOUDFLARE COMPATIBILITY
  * Restores the real visitor IP when behind Cloudflare proxy.
  * Cloudflare passes the original client IP in the CF-Connecting-IP header.
- * Without this, all visitors appear to come from Cloudflare's edge IPs.
+ * Only trusts the header when REMOTE_ADDR matches a known Cloudflare IP range.
+ * Ranges from: https://www.cloudflare.com/ips-v4 (update periodically)
  */
 function pianomode_cloudflare_real_ip() {
-    if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
-        $_SERVER['REMOTE_ADDR'] = $_SERVER['HTTP_CF_CONNECTING_IP'];
+    if (empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        return;
     }
+    $cf_ranges = array(
+        '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
+        '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+        '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
+        '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+        '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+    );
+    $remote = $_SERVER['REMOTE_ADDR'];
+    foreach ($cf_ranges as $range) {
+        if (pianomode_ip_in_cidr($remote, $range)) {
+            $_SERVER['REMOTE_ADDR'] = sanitize_text_field($_SERVER['HTTP_CF_CONNECTING_IP']);
+            return;
+        }
+    }
+}
+
+/**
+ * Check if an IPv4 address falls within a CIDR range.
+ */
+function pianomode_ip_in_cidr($ip, $cidr) {
+    list($subnet, $bits) = explode('/', $cidr);
+    $ip_long = ip2long($ip);
+    $subnet_long = ip2long($subnet);
+    if ($ip_long === false || $subnet_long === false) {
+        return false;
+    }
+    $mask = -1 << (32 - (int) $bits);
+    return ($ip_long & $mask) === ($subnet_long & $mask);
 }
 add_action('init', 'pianomode_cloudflare_real_ip', 1);
 
@@ -150,11 +181,14 @@ function pianomode_preload_resources() {
     echo '<link rel="preconnect" href="https://fonts.googleapis.com">' . "\n";
     echo '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' . "\n";
 
-    // HOME PAGE: CDN preconnect for Three.js and Tone.js
-    // Note: mobile hero image preload removed (PNG not in DOM, competing with render-blocking CSS)
+    // CDN preconnect for Three.js (homepage 3D concert hall)
     if (is_front_page()) {
         echo '<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>' . "\n";
         echo '<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>' . "\n";
+    }
+
+    // Tone.js preconnect: consolidated for all audio pages (homepage, games, studio)
+    if (is_front_page() || is_page('virtual-piano') || is_page('pianomode-studio') || is_page('sightreading') || is_page('games') || is_page_template('page-ear-trainer.php')) {
         echo '<link rel="preconnect" href="https://tonejs.github.io" crossorigin>' . "\n";
     }
 
@@ -164,11 +198,6 @@ function pianomode_preload_resources() {
         if ($featured_image) {
             echo '<link rel="preload" as="image" href="' . esc_url($featured_image) . '" fetchpriority="high">' . "\n";
         }
-    }
-
-    // Preload Tone.js audio samples on pages that need them
-    if (is_page('virtual-piano') || is_page('pianomode-studio') || is_page('sightreading') || is_page('games') || is_page_template('page-ear-trainer.php')) {
-        echo '<link rel="preconnect" href="https://tonejs.github.io" crossorigin>' . "\n";
     }
 
     // Preload YouTube thumbnails on Listen & Play
@@ -196,6 +225,32 @@ function pianomode_lazy_load_iframes($content) {
 }
 add_filter('the_content', 'pianomode_lazy_load_iframes', 99);
 add_filter('embed_oembed_html', 'pianomode_lazy_load_iframes', 99);
+
+/**
+ * PIANOMODE - viewport-fit=cover for iPhone Dynamic Island / notch
+ * Adds viewport-fit=cover to the existing viewport meta tag so the
+ * site content extends to the safe-area edges.  The safe-area inset
+ * is handled by CSS env(safe-area-inset-*) in pianomode-header-footer.css.
+ * html background (#0d0d0d) fills the area behind the Dynamic Island.
+ */
+function pianomode_viewport_fit_cover() {
+    // theme-color tells the browser what color the status bar / Dynamic Island area should be
+    echo '<meta name="theme-color" content="#0d0d0d">' . "\n";
+    echo '<script>document.addEventListener("DOMContentLoaded",function(){var v=document.querySelector(\'meta[name="viewport"]\');if(v){var c=v.getAttribute("content");if(c&&c.indexOf("viewport-fit")===-1){v.setAttribute("content",c+", viewport-fit=cover")}}});</script>' . "\n";
+}
+add_action('wp_head', 'pianomode_viewport_fit_cover', 99);
+
+/**
+ * Disable Google Translate auto-translation to prevent layout destruction.
+ */
+function pianomode_disable_google_translate() {
+    echo '<meta name="google" content="notranslate">' . "\n";
+}
+add_action('wp_head', 'pianomode_disable_google_translate', 1);
+add_filter('language_attributes', function($output) {
+    return $output . ' translate="no"';
+});
+
 
 /**
  * PIANOMODE 301 REDIRECTS - Legacy/broken URLs
@@ -270,6 +325,14 @@ function pianomode_get_notation_system() {
  * Output notation system as global JS variable for all game pages.
  */
 function pianomode_output_notation_config() {
+    // Only output on pages that use musical notation
+    if (!is_front_page()
+        && !is_page(array('virtual-piano', 'pianomode-studio', 'sightreading', 'listen-and-play', 'play', 'learn'))
+        && !is_singular('score') && !is_singular('pm_lesson')
+        && !is_page(array('ear-trainer', 'ledger-line', 'note-invaders', 'piano-hero', 'sight-reading-trainer'))) {
+        return;
+    }
+
     $notation = pianomode_get_notation_system();
     $note_names = $notation === 'latin'
         ? array('Do', 'Ré', 'Mi', 'Fa', 'Sol', 'La', 'Si')
@@ -298,6 +361,7 @@ add_action('wp_ajax_pm_save_notation', 'pianomode_save_notation_pref');
 // Activation PianoMode Account System
 
 require_once get_stylesheet_directory() . '/Account/functions-account.php';
+require_once get_stylesheet_directory() . '/assets/pm-mail/pm-mail.php';
 
 /**
  * Piano Hero Game
@@ -348,6 +412,7 @@ if (file_exists(get_stylesheet_directory() . '/assets/games/functions-games.php'
     require_once get_stylesheet_directory() . '/assets/games/functions-games.php';
 }
 
+
 /**
  * PIANOMODE OCR SCANNER
  * 100% client-side OMR (Optical Music Recognition) — no server dependencies.
@@ -357,20 +422,350 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-scanner-api.php'
 require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
 
 /**
- * Enqueue OCR Scanner assets when the template is active
+ * Single cache-buster version for all OMR scanner assets (CSS + JS).
+ * BUMP THIS on every OMR change — user has no CDN cache access, so the
+ * ?ver=X.Y.Z query string is the only way to invalidate client caches.
+ * Referenced by page-omr-scanner.php as well.
  */
-function pianomode_omr_scanner_assets() {
-    if ( ! is_page_template( 'page-omr-scanner.php' ) ) {
-        return;
-    }
+if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
+    define( 'PIANOMODE_OMR_VER', '6.15.0' );
+}
+
+/**
+ * Enqueue OCR Scanner assets when the template is active
+ *
+ * The OMR engine is split into modules under /assets/OCR-Scan/engine/.
+ * Phase 1 ships two files:
+ *   - omr-core.js   : namespace bootstrap, VERSION, flags, debug
+ *   - omr-engine.js : legacy v6 ImageProcessor/Staff/Notes/MXL/MIDI/Engine
+ * Future phases (2..14) will progressively carve modules out of
+ * omr-engine.js and enqueue them here in dependency order. Each new
+ * script must declare its dependencies via the 3rd arg so wp_enqueue
+ * emits them in the correct order.
+ *
+ * pianomode_enqueue_omr_scripts() is extracted as a standalone function
+ * so it can also be called from page-omr-scanner.php as a safety net
+ * (handles Blocksy/child-theme quirks where is_page_template() misses).
+ */
+
+/**
+ * Actually enqueue all OMR engine scripts + CSS. Idempotent — safe to
+ * call more than once thanks to the static $loaded guard.
+ */
+function pianomode_enqueue_omr_scripts() {
+    static $loaded = false;
+    if ( $loaded ) return;
+    $loaded = true;
+
+    $base_uri = get_stylesheet_directory_uri() . '/assets/OCR-Scan';
+
     wp_enqueue_style(
         'pm-omr-scanner',
-        get_stylesheet_directory_uri() . '/assets/OCR-Scan/omr-scanner.css',
+        $base_uri . '/omr-scanner.css',
         [],
-        '2.0.0'
+        PIANOMODE_OMR_VER
+    );
+
+    // 1. Core bootstrap — MUST load first.
+    wp_enqueue_script(
+        'pm-omr-core',
+        $base_uri . '/engine/omr-core.js',
+        [],
+        PIANOMODE_OMR_VER,
+        false  // load in <head> so it's ready before any later module
+    );
+
+    // 2. Phase 2: ScaleBuilder port (interline, mainFore, beamThickness).
+    wp_enqueue_script(
+        'pm-omr-scale',
+        $base_uri . '/engine/omr-scale.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 3a. Phase 3: Chamfer distance transform primitive used by Phases
+    //     6 (StemSeedsBuilder), 8 (NoteHeads template matching) and
+    //     9 (LedgersBuilder).
+    wp_enqueue_script(
+        'pm-omr-distance',
+        $base_uri . '/engine/omr-distance.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 3b. Phase 3: Filament primitives (BasicLine, Filament,
+    //     buildHorizontalFilaments) used by Phase 4 LinesRetriever.
+    wp_enqueue_script(
+        'pm-omr-filaments',
+        $base_uri . '/engine/omr-filaments.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 4. Phase 4: LinesRetriever + ClustersRetriever — staff detection
+    //    from horizontal filaments into 5-line Staff objects. Depends on
+    //    Phase 2 scale + Phase 3 filaments.
+    wp_enqueue_script(
+        'pm-omr-grid-lines',
+        $base_uri . '/engine/omr-grid-lines.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-filaments' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 5. Phase 5: BarsRetriever + StaffProjector — barline detection and
+    //    system assembly (grand staff grouping). Depends on Phase 4 for
+    //    Staff inputs.
+    wp_enqueue_script(
+        'pm-omr-grid-bars',
+        $base_uri . '/engine/omr-grid-bars.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 6. Phase 6: StemSeedsBuilder — vertical stem ribbon detection from
+    //    the staff-removed clean binary. Depends on Phase 2 scale and
+    //    Phase 4 staves for owner assignment.
+    wp_enqueue_script(
+        'pm-omr-stems-seeds',
+        $base_uri . '/engine/omr-stems-seeds.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 7. Phase 7: BeamsBuilder — beam/hook detection via connected
+    //    components on the staff+stem-removed binary. Depends on
+    //    Phase 2 scale + Phase 4 staves.
+    wp_enqueue_script(
+        'pm-omr-beams',
+        $base_uri . '/engine/omr-beams.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 8a. Phase 8: TemplateFactory — procedural note-head templates
+    //     (NOTEHEAD_BLACK, NOTEHEAD_VOID, WHOLE_NOTE, BREVE). Consumed by
+    //     Phase 8b heads builder.
+    wp_enqueue_script(
+        'pm-omr-templates',
+        $base_uri . '/engine/omr-templates.js',
+        [ 'pm-omr-core' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 8b. Phase 8: NoteHeadsBuilder — two-pass (seed-based + range-based)
+    //     note-head detection using distance-transform matching against
+    //     the TemplateFactory catalog. Depends on Phase 3 distance,
+    //     Phase 4 staves, Phase 6 seeds, and Phase 8a templates.
+    wp_enqueue_script(
+        'pm-omr-heads',
+        $base_uri . '/engine/omr-heads.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-distance',
+            'pm-omr-grid-lines',
+            'pm-omr-stems-seeds',
+            'pm-omr-templates'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 9. Phase 9: LedgersBuilder — short horizontal strokes above and
+    //    below each staff. Depends on Phase 3 filaments (candidate
+    //    source) and Phase 4 staves (walking virtual line indices).
+    wp_enqueue_script(
+        'pm-omr-ledgers',
+        $base_uri . '/engine/omr-ledgers.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-filaments',
+            'pm-omr-grid-lines'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 10. Phase 10: StemsBuilder + HeadLinker — links each Phase 8 head
+    //     to its best Phase 6 seed, extends the stem in cleanBin, and
+    //     attaches a Phase 7 beam at the far endpoint if present.
+    wp_enqueue_script(
+        'pm-omr-stems',
+        $base_uri . '/engine/omr-stems.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-stems-seeds',
+            'pm-omr-heads',
+            'pm-omr-beams'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 11. Phase 11: ClefBuilder + KeyBuilder + TimeBuilder — staff
+    //     header detection (clef shape, key signature accidental count,
+    //     time signature numerator/denominator). Pragmatic geometric
+    //     port; no font templates required.
+    wp_enqueue_script(
+        'pm-omr-clef-key-time',
+        $base_uri . '/engine/omr-clef-key-time.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-grid-lines'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 12. Phase 12: RestsBuilder + AltersBuilder — connected-component
+    //     scan in the staff y band, classifying each component as a
+    //     rest (whole/half/quarter/eighth/sixteenth) or accidental
+    //     (sharp/flat/natural/double). Depends on Phase 6/7/8/11.
+    wp_enqueue_script(
+        'pm-omr-rests-alters',
+        $base_uri . '/engine/omr-rests-alters.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-grid-lines',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-heads'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 13. Phase 13: SIGraph + Rhythm + voices — assembles all the
+    //     prior phase outputs into systems / measures / voices /
+    //     events, with pitch + duration + startBeat resolved.
+    //     This is what Phase 14 MusicXML / MIDI writers consume.
+    wp_enqueue_script(
+        'pm-omr-sig',
+        $base_uri . '/engine/omr-sig.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-grid-lines',
+            'pm-omr-grid-bars',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-heads',
+            'pm-omr-stems',
+            'pm-omr-clef-key-time',
+            'pm-omr-rests-alters',
+            'pm-omr-ledgers'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 14a. Phase 14 part 1: MusicXML 3.1 partwise writer. Consumes the
+    //      Phase 13 SIG output and produces a MusicXML string the player
+    //      and external editors (MuseScore, Finale) can load.
+    wp_enqueue_script(
+        'pm-omr-musicxml',
+        $base_uri . '/engine/omr-musicxml.js',
+        [
+            'pm-omr-core',
+            'pm-omr-sig'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 14b. Phase 14 part 2: Standard MIDI File (format 1) writer. Consumes
+    //      the same Phase 13 SIG output and produces a MIDI byte stream
+    //      + Blob URL for the AlphaTab player.
+    wp_enqueue_script(
+        'pm-omr-midi',
+        $base_uri . '/engine/omr-midi.js',
+        [
+            'pm-omr-core',
+            'pm-omr-sig'
+        ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // N. Legacy v6 engine (ImageProcessor, StaffDetector, NoteDetector,
+    //    MusicXMLWriter, MIDIWriter, Engine). Loads last; depends on all
+    //    new-phase modules so they are available from OMR.<ModuleName>
+    //    inside Engine.process().
+    wp_enqueue_script(
+        'pm-omr-engine',
+        $base_uri . '/engine/omr-engine.js',
+        [
+            'pm-omr-core',
+            'pm-omr-scale',
+            'pm-omr-distance',
+            'pm-omr-filaments',
+            'pm-omr-grid-lines',
+            'pm-omr-grid-bars',
+            'pm-omr-stems-seeds',
+            'pm-omr-beams',
+            'pm-omr-templates',
+            'pm-omr-heads',
+            'pm-omr-ledgers',
+            'pm-omr-stems',
+            'pm-omr-clef-key-time',
+            'pm-omr-rests-alters',
+            'pm-omr-sig',
+            'pm-omr-musicxml',
+            'pm-omr-midi'
+        ],
+        PIANOMODE_OMR_VER,
+        false
     );
 }
+
+/**
+ * Hook wrapper: detect whether the current page uses the OMR scanner
+ * template and, if so, enqueue scripts. Multiple detection methods are
+ * used because Blocksy + child-theme combos can break is_page_template().
+ */
+function pianomode_omr_scanner_assets() {
+    if ( ! is_page() ) return;
+
+    // Method 1: standard WP template meta check.
+    if ( is_page_template( 'page-omr-scanner.php' ) ) {
+        pianomode_enqueue_omr_scripts();
+        return;
+    }
+
+    // Method 2: direct post-meta check (handles child-theme path quirks
+    // and the Template Name rename to "Sheet to Sound").
+    global $post;
+    if ( $post ) {
+        $tpl = get_post_meta( $post->ID, '_wp_page_template', true );
+        if ( $tpl && strpos( $tpl, 'omr-scanner' ) !== false ) {
+            pianomode_enqueue_omr_scripts();
+            return;
+        }
+    }
+
+    // Method 3: scripts were already loaded by the template safety-net
+    // (page-omr-scanner.php calls pianomode_enqueue_omr_scripts directly).
+    // This branch is a no-op but documents why the check above may seem
+    // incomplete.
+}
 add_action( 'wp_enqueue_scripts', 'pianomode_omr_scanner_assets', 25 );
+
+
+
+
+
 
 /**
  * PIANOMODE LEGAL PAGES - Templates personnalisés
@@ -413,6 +808,29 @@ add_filter('template_include', 'pianomode_load_legal_page_template', 99);
 
 
 // =====================================================
+// FAQ — PAGE TEMPLATE
+// =====================================================
+function pianomode_register_faq_template($templates) {
+    $templates['assets/Other Page/Pianomode/page-faq.php'] = 'FAQ';
+    return $templates;
+}
+add_filter('theme_page_templates', 'pianomode_register_faq_template');
+
+function pianomode_load_faq_template($template) {
+    global $post;
+    if (!$post) return $template;
+    $page_template = get_post_meta($post->ID, '_wp_page_template', true);
+    if ($page_template === 'assets/Other Page/Pianomode/page-faq.php') {
+        $new = get_stylesheet_directory() . '/assets/Other Page/Pianomode/page-faq.php';
+        if (file_exists($new)) return $new;
+    }
+    return $template;
+}
+add_filter('template_include', 'pianomode_load_faq_template', 99);
+
+
+
+// =====================================================
 // LISTEN & PLAY — PAGE TEMPLATE (2026 OPTIMIZED)
 // Replaces shortcode approach with a direct template
 // =====================================================
@@ -450,7 +868,7 @@ function pm_listen_play_assets() {
 
     // Enqueue new optimized assets
     $theme_uri = get_stylesheet_directory_uri();
-    $version   = '2.0.0';
+    $version   = '3.0.0';
 
     wp_enqueue_style(
         'pm-listen-play',
@@ -1518,18 +1936,6 @@ function pianomode_score_permalink($permalink, $post) {
 }
 add_filter('post_type_link', 'pianomode_score_permalink', 10, 2);
 
-/**
- * 13. FLUSH AUTOMATIQUE
- * Version 6.0: Correction conflit listen-and-play page vs archive
- */
-//function pianomode_auto_flush() {
-  //  if (get_option('pianomode_urls_active') !== '6.0') {
-    //    flush_rewrite_rules(false);
-      //  update_option('pianomode_urls_active', '6.0');
-    //}
-//}
-//add_action('wp_loaded', 'pianomode_auto_flush', 999);
-
 
 
 
@@ -1565,10 +1971,10 @@ function pianomode_complete_design() {
     // Detecter page accueil
     $is_home = is_front_page() || is_home();
 
-    // URLs
-    $logo_url = site_url('/wp-content/uploads/2025/12/PianoMode_Logo_2026.png');
-    $video_url = site_url('/wp-content/uploads/2025/05/freepik-untitled-creation-2025-05-30.mp4');
-    $mobile_bg = site_url('/wp-content/uploads/2025/05/Capture-decran-2025-05-31-164137.png');
+    // URLs - configurable via wp_options, with hardcoded fallbacks
+    $logo_url = get_option('pm_logo_url', site_url('/wp-content/uploads/2025/12/PianoMode_Logo_2026.png'));
+    $video_url = get_option('pm_hero_video_url', site_url('/wp-content/uploads/2025/05/freepik-untitled-creation-2025-05-30.mp4'));
+    $mobile_bg = get_option('pm_hero_mobile_bg', site_url('/wp-content/uploads/2025/05/Capture-decran-2025-05-31-164137.png'));
 
     // CSS now loaded via external file (pianomode-header-footer.css)
     ?>
@@ -1589,8 +1995,7 @@ function pianomode_complete_design() {
     ?>
     
     <header class="piano-header" id="pianoHeader" role="banner">
-        <a href="#main-content" class="skip-link screen-reader-text" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;z-index:100000;padding:8px 16px;background:#1a1a2e;color:#fff;font-size:14px;text-decoration:none;border-radius:0 0 4px 0;" onfocus="this.style.position='fixed';this.style.left='0';this.style.top='0';this.style.width='auto';this.style.height='auto';this.style.overflow='visible';" onblur="this.style.position='absolute';this.style.left='-9999px';this.style.width='1px';this.style.height='1px';this.style.overflow='hidden';">Skip to main content</a>
-        <div class="top-bar">
+        <div class="top-bar" id="pm-newsletter-banner" style="cursor:pointer;" role="button" tabindex="0" aria-label="Subscribe to our newsletter">
             ♪ New Posts Weekly • Join The PianoMode Community ♪
         </div>
 
@@ -1612,8 +2017,8 @@ function pianomode_complete_design() {
                 
                 <div class="nav-container">
                     <ul class="nav-menu">
-                        <li><a href="/" class="<?php echo (($current_url === '' || $current_url === '/') ? 'active' : ''); ?>">Home</a></li>
                         <li><a href="/listen-and-play/" class="<?php echo ($current_url === '/listen-and-play' ? 'active' : ''); ?>">Listen</a></li>
+                        <li><a href="/learn/" class="<?php echo ($current_url === '/learn' ? 'active' : ''); ?>">Learn</a></li>
                         <li><a href="/play/" class="<?php echo ($current_url === '/play' ? 'active' : ''); ?>">Play</a></li>
                         <li><a href="/explore/" class="<?php echo ($current_url === '/explore' ? 'active' : ''); ?>">Explore</a></li>
                         <li class="nav-more">
@@ -1693,16 +2098,37 @@ function pianomode_complete_design() {
         <ul class="mobile-nav">
             <li><a href="/" class="<?php echo (($current_url === '' || $current_url === '/') ? 'active' : ''); ?>">Home</a></li>
             <li><a href="/listen-and-play/" class="<?php echo ($current_url === '/listen-and-play/' ? 'active' : ''); ?>">Listen</a></li>
+            <li><a href="/learn/" class="<?php echo ($current_url === '/learn/' ? 'active' : ''); ?>">Learn</a></li>
             <li><a href="/play/" class="<?php echo ($current_url === '/play/' ? 'active' : ''); ?>">Play</a></li>
             <li><a href="/explore/" class="<?php echo ($current_url === '/explore/' ? 'active' : ''); ?>">Explore</a></li>
             <div class="mobile-nav-separator"></div>
-            <li class="mobile-nav-account"><a href="/my-account" class="<?php echo ($current_url === '/account/' ? 'active' : ''); ?>"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>My Account</a></li>
+            <li class="mobile-nav-account"><a href="/account/" class="<?php echo ($current_url === '/account/' ? 'active' : ''); ?>"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>My Account</a></li>
             <div class="mobile-nav-separator"></div>
+            <li><a href="/help-center/" class="<?php echo ($current_url === '/help-center/' ? 'active' : ''); ?>">FAQ</a></li>
             <li><a href="/about-us/" class="<?php echo ($current_url === '/about-us/' ? 'active' : ''); ?>">About Us</a></li>
             <li><a href="/contact-us/" class="<?php echo ($current_url === '/contact-us/' ? 'active' : ''); ?>">Contact Us</a></li>
             <li><a href="/privacy-cookie-policy/">Privacy & Cookie Policy</a></li>
             <li><a href="/terms-of-service-disclaimers/">Terms of Service & Disclaimers</a></li>
         </ul>
+
+        <!-- Social Media -->
+        <div class="pm-mobile-social">
+            <p class="pm-mobile-social-title">Follow Us</p>
+            <div class="pm-mobile-social-row">
+                <a href="https://instagram.com/pianomode.studio" target="_blank" rel="noopener noreferrer" aria-label="Instagram">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg>
+                </a>
+                <a href="https://tiktok.com/@pianomode.studio" target="_blank" rel="noopener noreferrer" aria-label="TikTok">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.88 2.89 2.89 0 0 1 2.88-2.88c.28 0 .56.04.82.12v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V9.16a8.16 8.16 0 0 0 4.76 1.53v-3.5a4.82 4.82 0 0 1-1-.5z"/></svg>
+                </a>
+                <a href="https://www.facebook.com/share/1CQs7XUXpJ/?mibextid=wwXIfr" target="_blank" rel="noopener noreferrer" aria-label="Facebook">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                </a>
+                <a href="https://pinterest.com/pianomodestudio" target="_blank" rel="noopener noreferrer" aria-label="Pinterest">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12c0 5.084 3.163 9.426 7.627 11.174-.105-.949-.2-2.405.042-3.441.218-.937 1.407-5.965 1.407-5.965s-.359-.719-.359-1.782c0-1.668.967-2.914 2.171-2.914 1.023 0 1.518.769 1.518 1.69 0 1.029-.655 2.568-.994 3.995-.283 1.194.599 2.169 1.777 2.169 2.133 0 3.772-2.249 3.772-5.495 0-2.873-2.064-4.882-5.012-4.882-3.414 0-5.418 2.561-5.418 5.207 0 1.031.397 2.138.893 2.738a.36.36 0 0 1 .083.345c-.091.379-.293 1.194-.333 1.361-.053.218-.174.265-.401.16-1.499-.698-2.436-2.889-2.436-4.649 0-3.785 2.75-7.262 7.929-7.262 4.163 0 7.398 2.967 7.398 6.931 0 4.136-2.607 7.464-6.227 7.464-1.216 0-2.359-.632-2.75-1.378l-.748 2.853c-.271 1.043-1.002 2.35-1.492 3.146C9.57 23.812 10.763 24 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0z"/></svg>
+                </a>
+            </div>
+        </div>
 
         <!-- Latest Articles Section -->
         <div class="mobile-latest-articles">
@@ -1719,7 +2145,7 @@ function pianomode_complete_design() {
         <!-- Canvas Header -->
         <div class="pm-canvas-header">
             <div class="pm-canvas-title-row">
-                <h2 class="pm-canvas-title">PianoMode</h2>
+                <a href="<?php echo esc_url(home_url('/')); ?>" class="pm-canvas-title-link"><h2 class="pm-canvas-title">PianoMode</h2></a>
                 <button class="pm-canvas-close-inline" id="pmCanvasCloseInline" aria-label="Close">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -1728,6 +2154,11 @@ function pianomode_complete_design() {
                 </button>
             </div>
             <p class="pm-canvas-subtitle">Explore our musical universe</p>
+            <!-- Discrete back-to-home link -->
+            <a href="<?php echo esc_url(home_url('/')); ?>" class="pm-canvas-back-home">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>Back to Home</span>
+            </a>
         </div>
 
         <!-- Canvas Content -->
@@ -1735,18 +2166,18 @@ function pianomode_complete_design() {
             <!-- Main Navigation - Primary Pages -->
             <div class="pm-canvas-nav pm-canvas-nav-primary">
                 <h3>Discover</h3>
-                <a href="/" class="pm-canvas-nav-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                        <polyline points="9 22 9 12 15 12 15 22"/>
-                    </svg>
-                    <span>Home</span>
-                </a>
                 <a href="/listen-and-play/" class="pm-canvas-nav-link">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M9 18V5l12-2v13M9 18c0 1.657-1.343 3-3 3s-3-1.343-3-3 1.343-3 3-3 3 1.343 3 3zm12-2c0 1.657-1.343 3-3 3s-3-1.343-3-3 1.343-3 3-3 3 1.343 3 3z"/>
                     </svg>
                     <span>Listen</span>
+                </a>
+                <a href="/learn/" class="pm-canvas-nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+                        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+                    </svg>
+                    <span>Learn</span>
                 </a>
                 <a href="/play/" class="pm-canvas-nav-link">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1769,6 +2200,14 @@ function pianomode_complete_design() {
             <!-- Secondary Navigation - More -->
             <div class="pm-canvas-nav pm-canvas-nav-secondary">
                 <h3>More</h3>
+                <a href="/help-center/" class="pm-canvas-nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                        <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <span>FAQ</span>
+                </a>
                 <a href="/about-us/" class="pm-canvas-nav-link">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                         <circle cx="12" cy="8" r="4"/>
@@ -1798,6 +2237,25 @@ function pianomode_complete_design() {
                     </svg>
                     <span>Terms & Conditions</span>
                 </a>
+            </div>
+
+            <!-- Social Media -->
+            <div class="pm-canvas-nav pm-canvas-nav-social">
+                <h3>Follow Us</h3>
+                <div class="pm-canvas-social-row">
+                    <a href="https://instagram.com/pianomode.studio" target="_blank" rel="noopener noreferrer" class="pm-canvas-social-icon" aria-label="Instagram">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg>
+                    </a>
+                    <a href="https://tiktok.com/@pianomode.studio" target="_blank" rel="noopener noreferrer" class="pm-canvas-social-icon" aria-label="TikTok">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.88 2.89 2.89 0 0 1 2.88-2.88c.28 0 .56.04.82.12v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V9.16a8.16 8.16 0 0 0 4.76 1.53v-3.5a4.82 4.82 0 0 1-1-.5z"/></svg>
+                    </a>
+                    <a href="https://www.facebook.com/share/1CQs7XUXpJ/?mibextid=wwXIfr" target="_blank" rel="noopener noreferrer" class="pm-canvas-social-icon" aria-label="Facebook">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                    </a>
+                    <a href="https://pinterest.com/pianomodestudio" target="_blank" rel="noopener noreferrer" class="pm-canvas-social-icon" aria-label="Pinterest">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12c0 5.084 3.163 9.426 7.627 11.174-.105-.949-.2-2.405.042-3.441.218-.937 1.407-5.965 1.407-5.965s-.359-.719-.359-1.782c0-1.668.967-2.914 2.171-2.914 1.023 0 1.518.769 1.518 1.69 0 1.029-.655 2.568-.994 3.995-.283 1.194.599 2.169 1.777 2.169 2.133 0 3.772-2.249 3.772-5.495 0-2.873-2.064-4.882-5.012-4.882-3.414 0-5.418 2.561-5.418 5.207 0 1.031.397 2.138.893 2.738a.36.36 0 0 1 .083.345c-.091.379-.293 1.194-.333 1.361-.053.218-.174.265-.401.16-1.499-.698-2.436-2.889-2.436-4.649 0-3.785 2.75-7.262 7.929-7.262 4.163 0 7.398 2.967 7.398 6.931 0 4.136-2.607 7.464-6.227 7.464-1.216 0-2.359-.632-2.75-1.378l-.748 2.853c-.271 1.043-1.002 2.35-1.492 3.146C9.57 23.812 10.763 24 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0z"/></svg>
+                    </a>
+                </div>
             </div>
 
             <!-- Latest Publications -->
@@ -2009,12 +2467,29 @@ function pianomode_footer_glassmorphism() {
                 <!-- Navigation centrée -->
                 <nav class="footer-nav">
                     <ul class="footer-links">
-                        <li><a href="/about-us">About Us</a></li>
-                        <li><a href="/contact-us">Contact Us</a></li>
-                        <li><a href="/privacy-cookie-policy">Privacy & Cookie Policy</a></li>
-                        <li><a href="/terms-of-service-disclaimers">Terms & Conditions</a></li>
+                        <li><a href="/about-us/">About Us</a></li>
+                        <li><a href="/contact-us/">Contact Us</a></li>
+                        <li><a href="/privacy-cookie-policy/">Privacy & Cookie Policy</a></li>
+                        <li><a href="/terms-of-service-disclaimers/">Terms & Conditions</a></li>
+                        <li><a href="/help-center/">FAQ</a></li>
                     </ul>
                 </nav>
+
+                <!-- Social Media -->
+                <div class="pm-social-links">
+                    <a href="https://instagram.com/pianomode.studio" target="_blank" rel="noopener noreferrer" class="pm-social-icon" aria-label="Instagram">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg>
+                    </a>
+                    <a href="https://tiktok.com/@pianomode.studio" target="_blank" rel="noopener noreferrer" class="pm-social-icon" aria-label="TikTok">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.88 2.89 2.89 0 0 1 2.88-2.88c.28 0 .56.04.82.12v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V9.16a8.16 8.16 0 0 0 4.76 1.53v-3.5a4.82 4.82 0 0 1-1-.5z"/></svg>
+                    </a>
+                    <a href="https://www.facebook.com/share/1CQs7XUXpJ/?mibextid=wwXIfr" target="_blank" rel="noopener noreferrer" class="pm-social-icon" aria-label="Facebook">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                    </a>
+                    <a href="https://pinterest.com/pianomodestudio" target="_blank" rel="noopener noreferrer" class="pm-social-icon" aria-label="Pinterest">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12c0 5.084 3.163 9.426 7.627 11.174-.105-.949-.2-2.405.042-3.441.218-.937 1.407-5.965 1.407-5.965s-.359-.719-.359-1.782c0-1.668.967-2.914 2.171-2.914 1.023 0 1.518.769 1.518 1.69 0 1.029-.655 2.568-.994 3.995-.283 1.194.599 2.169 1.777 2.169 2.133 0 3.772-2.249 3.772-5.495 0-2.873-2.064-4.882-5.012-4.882-3.414 0-5.418 2.561-5.418 5.207 0 1.031.397 2.138.893 2.738a.36.36 0 0 1 .083.345c-.091.379-.293 1.194-.333 1.361-.053.218-.174.265-.401.16-1.499-.698-2.436-2.889-2.436-4.649 0-3.785 2.75-7.262 7.929-7.262 4.163 0 7.398 2.967 7.398 6.931 0 4.136-2.607 7.464-6.227 7.464-1.216 0-2.359-.632-2.75-1.378l-.748 2.853c-.271 1.043-1.002 2.35-1.492 3.146C9.57 23.812 10.763 24 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0z"/></svg>
+                    </a>
+                </div>
 
                 <!-- Portée musicale animée -->
                 <div class="footer-musical-staff">
@@ -2081,6 +2556,326 @@ function pianomode_footer_glassmorphism() {
 }
 add_action('wp_footer', 'pianomode_footer_glassmorphism', 1);
 
+
+// ===================================================
+// SHARE BUTTON — Reusable for posts and scores
+// ===================================================
+
+/**
+ * Renders the share button HTML (bottom of article variant).
+ * Call with pianomode_render_share_bottom().
+ */
+function pianomode_render_share_bottom() {
+    $url   = esc_url(get_permalink());
+    $title = esc_attr(get_the_title());
+    $encoded_url   = rawurlencode(get_permalink());
+    $encoded_title = rawurlencode(get_the_title());
+    ?>
+    <div class="pm-share-bottom">
+        <button class="pm-share-toggle" aria-label="Share this content">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+                <polyline points="16 6 12 2 8 6"/>
+                <line x1="12" y1="2" x2="12" y2="15"/>
+            </svg>
+            <span>Share</span>
+        </button>
+        <div class="pm-share-dropdown" data-url="<?php echo $url; ?>" data-title="<?php echo $title; ?>">
+            <button class="pm-share-item" data-action="copy" aria-label="Copy link">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                <span>Copy link</span>
+            </button>
+            <a class="pm-share-item" href="https://www.instagram.com/" target="_blank" rel="noopener noreferrer" aria-label="Share on Instagram" data-action="instagram">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg>
+                <span>Instagram</span>
+            </a>
+            <a class="pm-share-item" href="https://www.tiktok.com/" target="_blank" rel="noopener noreferrer" aria-label="Share on TikTok" data-action="tiktok">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.88 2.89 2.89 0 0 1 2.88-2.88c.28 0 .56.04.82.12v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V9.16a8.16 8.16 0 0 0 4.76 1.53v-3.5a4.82 4.82 0 0 1-1-.5z"/></svg>
+                <span>TikTok</span>
+            </a>
+            <a class="pm-share-item" href="https://www.facebook.com/sharer/sharer.php?u=<?php echo $encoded_url; ?>" target="_blank" rel="noopener noreferrer" aria-label="Share on Facebook">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                <span>Facebook</span>
+            </a>
+            <a class="pm-share-item" href="https://www.facebook.com/dialog/send?link=<?php echo $encoded_url; ?>&app_id=966242223397117&redirect_uri=<?php echo $encoded_url; ?>" target="_blank" rel="noopener noreferrer" aria-label="Send via Messenger">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 0C5.373 0 0 4.975 0 11.111c0 3.497 1.745 6.616 4.472 8.652V24l4.086-2.242c1.09.301 2.246.464 3.442.464 6.627 0 12-4.974 12-11.111C24 4.975 18.627 0 12 0zm1.193 14.963l-3.056-3.26-5.963 3.26L10.733 8.3l3.13 3.26 5.889-3.26-6.559 6.663z"/></svg>
+                <span>Messenger</span>
+            </a>
+            <a class="pm-share-item" href="https://pinterest.com/pin/create/button/?url=<?php echo $encoded_url; ?>&description=<?php echo $encoded_title; ?>" target="_blank" rel="noopener noreferrer" aria-label="Share on Pinterest">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12c0 5.084 3.163 9.426 7.627 11.174-.105-.949-.2-2.405.042-3.441.218-.937 1.407-5.965 1.407-5.965s-.359-.719-.359-1.782c0-1.668.967-2.914 2.171-2.914 1.023 0 1.518.769 1.518 1.69 0 1.029-.655 2.568-.994 3.995-.283 1.194.599 2.169 1.777 2.169 2.133 0 3.772-2.249 3.772-5.495 0-2.873-2.064-4.882-5.012-4.882-3.414 0-5.418 2.561-5.418 5.207 0 1.031.397 2.138.893 2.738a.36.36 0 0 1 .083.345c-.091.379-.293 1.194-.333 1.361-.053.218-.174.265-.401.16-1.499-.698-2.436-2.889-2.436-4.649 0-3.785 2.75-7.262 7.929-7.262 4.163 0 7.398 2.967 7.398 6.931 0 4.136-2.607 7.464-6.227 7.464-1.216 0-2.359-.632-2.75-1.378l-.748 2.853c-.271 1.043-1.002 2.35-1.492 3.146C9.57 23.812 10.763 24 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0z"/></svg>
+                <span>Pinterest</span>
+            </a>
+            <a class="pm-share-item" href="https://www.reddit.com/submit?url=<?php echo $encoded_url; ?>&title=<?php echo $encoded_title; ?>" target="_blank" rel="noopener noreferrer" aria-label="Share on Reddit">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 13.38c.15.36.22.75.22 1.15 0 2.34-2.73 4.24-6.1 4.24s-6.1-1.9-6.1-4.24c0-.4.08-.79.22-1.15a1.63 1.63 0 0 1-.66-1.31 1.63 1.63 0 0 1 2.78-1.16 8 8 0 0 1 3.76-1.14l.71-3.33a.36.36 0 0 1 .43-.27l2.36.5a1.14 1.14 0 0 1 2.13.56 1.14 1.14 0 0 1-1.14 1.14 1.14 1.14 0 0 1-1.1-.85l-2.1-.45-.63 2.96a8 8 0 0 1 3.72 1.14 1.63 1.63 0 0 1 2.78 1.16c0 .52-.25 1-.66 1.31zM9.3 12.5a1.18 1.18 0 1 0 0 2.36 1.18 1.18 0 0 0 0-2.36zm5.4 0a1.18 1.18 0 1 0 0 2.36 1.18 1.18 0 0 0 0-2.36zm-4.73 3.72a3.63 3.63 0 0 0 4.06 0 .23.23 0 0 0-.32-.32 3.2 3.2 0 0 1-3.42 0 .23.23 0 0 0-.32.32z"/></svg>
+                <span>Reddit</span>
+            </a>
+            <a class="pm-share-item" href="https://twitter.com/intent/tweet?url=<?php echo $encoded_url; ?>&text=<?php echo $encoded_title; ?>" target="_blank" rel="noopener noreferrer" aria-label="Share on X">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                <span>X</span>
+            </a>
+            <a class="pm-share-item" href="mailto:?subject=<?php echo $encoded_title; ?>&body=Check%20this%20out%3A%20<?php echo $encoded_url; ?>" aria-label="Share via Email">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                <span>Email</span>
+            </a>
+        </div>
+    </div>
+    <?php
+}
+
+/**
+ * Renders the compact hero share button (single icon).
+ * Opens native share sheet on mobile, dropdown on desktop.
+ */
+function pianomode_render_share_hero() {
+    $url   = esc_url(get_permalink());
+    $title = esc_attr(get_the_title());
+    ?>
+    <button class="pm-share-hero-btn" aria-label="Share" data-url="<?php echo $url; ?>" data-title="<?php echo $title; ?>">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+            <polyline points="16 6 12 2 8 6"/>
+            <line x1="12" y1="2" x2="12" y2="15"/>
+        </svg>
+    </button>
+    <?php
+}
+
+/**
+ * Output share CSS + JS once (hooked to wp_footer on single posts/scores).
+ */
+function pianomode_share_assets() {
+    if (!is_singular('post') && !is_singular('score')) return;
+    ?>
+    <style>
+    /* ═══════════════════════════════════════
+       SHARE BOTTOM — below Last Updated
+       ═══════════════════════════════════════ */
+    .pm-share-bottom {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        margin-top: 12px;
+    }
+
+    .pm-share-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: none;
+        border: 1.5px solid rgba(0,0,0,.08);
+        border-radius: 999px;
+        padding: 7px 16px 7px 12px;
+        font-size: .78rem;
+        font-weight: 600;
+        font-family: 'Montserrat', sans-serif;
+        color: #888;
+        cursor: pointer;
+        transition: all .25s ease;
+        letter-spacing: .02em;
+    }
+    .pm-share-toggle:hover {
+        color: #D7BF81;
+        border-color: rgba(215,191,129,.4);
+        background: rgba(215,191,129,.05);
+    }
+    .pm-share-toggle svg { color: inherit; }
+
+    .pm-share-dropdown {
+        position: absolute;
+        bottom: calc(100% + 10px);
+        left: 0;
+        background: #fff;
+        border: 1px solid rgba(0,0,0,.08);
+        border-radius: 14px;
+        padding: 8px;
+        box-shadow: 0 8px 32px rgba(0,0,0,.12);
+        display: none;
+        z-index: 100;
+        min-width: 200px;
+    }
+    .pm-share-dropdown.active { display: block; animation: pmShareFadeIn .2s ease; }
+
+    @keyframes pmShareFadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .pm-share-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 14px;
+        border: none;
+        background: none;
+        border-radius: 10px;
+        font-size: .84rem;
+        font-weight: 600;
+        font-family: 'Montserrat', sans-serif;
+        color: #333;
+        cursor: pointer;
+        text-decoration: none;
+        transition: background .15s ease;
+        white-space: nowrap;
+    }
+    .pm-share-item:hover { background: rgba(215,191,129,.08); color: #333; }
+    .pm-share-item svg { flex-shrink: 0; color: #555; }
+    .pm-share-item:hover svg { color: #D7BF81; }
+
+    .pm-share-copied {
+        color: #D7BF81 !important;
+        font-weight: 700;
+    }
+
+    /* ═══════════════════════════════════════
+       SHARE HERO — compact icon on hero
+       ═══════════════════════════════════════ */
+    .pm-share-hero-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        background: rgba(255,255,255,.12);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1.5px solid rgba(255,255,255,.2);
+        border-radius: 50%;
+        cursor: pointer;
+        transition: all .25s ease;
+        color: rgba(255,255,255,.85);
+        padding: 0;
+        flex-shrink: 0;
+    }
+    .pm-share-hero-btn:hover {
+        background: rgba(215,191,129,.2);
+        border-color: rgba(215,191,129,.5);
+        color: #D7BF81;
+        transform: scale(1.08);
+    }
+    .pm-share-hero-btn svg { color: inherit; }
+
+    /* ═══════════════════════════════════════
+       RESPONSIVE
+       ═══════════════════════════════════════ */
+    @media (max-width: 768px) {
+        .pm-share-dropdown {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            top: auto;
+            border-radius: 18px 18px 0 0;
+            padding: 12px 8px calc(12px + env(safe-area-inset-bottom, 0px));
+            min-width: auto;
+            box-shadow: 0 -8px 40px rgba(0,0,0,.18);
+        }
+        .pm-share-dropdown::before {
+            content: '';
+            display: block;
+            width: 40px;
+            height: 4px;
+            background: rgba(0,0,0,.12);
+            border-radius: 4px;
+            margin: 0 auto 8px;
+        }
+        .pm-share-item { padding: 14px 18px; font-size: .9rem; }
+    }
+    @media (max-width: 480px) {
+        .pm-share-hero-btn { width: 34px; height: 34px; }
+        .pm-share-hero-btn svg { width: 16px; height: 16px; }
+    }
+    </style>
+
+    <script>
+    (function() {
+        /* Bottom share toggle */
+        document.querySelectorAll('.pm-share-toggle').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var dd = this.closest('.pm-share-bottom').querySelector('.pm-share-dropdown');
+                dd.classList.toggle('active');
+            });
+        });
+
+        /* Hero share button — native share on mobile, fallback to copy */
+        document.querySelectorAll('.pm-share-hero-btn').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var url = this.getAttribute('data-url');
+                var title = this.getAttribute('data-title');
+                if (navigator.share) {
+                    navigator.share({ title: title, url: url }).catch(function(){});
+                } else {
+                    navigator.clipboard.writeText(url).then(function() {
+                        btn.style.color = '#D7BF81';
+                        btn.style.borderColor = 'rgba(215,191,129,.5)';
+                        setTimeout(function() {
+                            btn.style.color = '';
+                            btn.style.borderColor = '';
+                        }, 1500);
+                    });
+                }
+            });
+        });
+
+        /* Copy link action */
+        document.querySelectorAll('.pm-share-item[data-action="copy"]').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                var url = this.closest('.pm-share-dropdown').getAttribute('data-url');
+                navigator.clipboard.writeText(url).then(function() {
+                    var span = btn.querySelector('span');
+                    var orig = span.textContent;
+                    span.textContent = 'Copied!';
+                    btn.classList.add('pm-share-copied');
+                    setTimeout(function() {
+                        span.textContent = orig;
+                        btn.classList.remove('pm-share-copied');
+                    }, 1500);
+                });
+            });
+        });
+
+        /* Instagram & TikTok: copy link + open app (no direct share URL) */
+        document.querySelectorAll('.pm-share-item[data-action="instagram"], .pm-share-item[data-action="tiktok"]').forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                var url = this.closest('.pm-share-dropdown').getAttribute('data-url');
+                navigator.clipboard.writeText(url).then(function() {
+                    var span = link.querySelector('span');
+                    var orig = span.textContent;
+                    span.textContent = 'Link copied! Paste in ' + orig;
+                    link.classList.add('pm-share-copied');
+                    setTimeout(function() {
+                        span.textContent = orig;
+                        link.classList.remove('pm-share-copied');
+                    }, 2500);
+                });
+            });
+        });
+
+        /* Close dropdown on outside click */
+        document.addEventListener('click', function() {
+            document.querySelectorAll('.pm-share-dropdown.active').forEach(function(dd) {
+                dd.classList.remove('active');
+            });
+        });
+        document.querySelectorAll('.pm-share-dropdown').forEach(function(dd) {
+            dd.addEventListener('click', function(e) { e.stopPropagation(); });
+        });
+
+        /* Mobile: close bottom sheet on overlay backdrop click */
+        document.querySelectorAll('.pm-share-dropdown').forEach(function(dd) {
+            dd.addEventListener('touchstart', function(e) {
+                if (e.target === dd) dd.classList.remove('active');
+            });
+        });
+    })();
+    </script>
+    <?php
+}
+add_action('wp_footer', 'pianomode_share_assets', 50);
 
 
 /**
@@ -2231,9 +3026,27 @@ function pm_explore_render_card($post) {
 }
 
 /**
+ * RATE LIMITING for public AJAX endpoints.
+ * Uses WordPress transients keyed by IP + action to prevent abuse.
+ * @param string $action Unique action identifier
+ * @param int    $limit  Max requests per window (default 30)
+ * @param int    $window Time window in seconds (default 60)
+ */
+function pianomode_check_rate_limit($action, $limit = 30, $window = 60) {
+    $ip = $_SERVER['REMOTE_ADDR'];
+    $key = 'pm_rl_' . md5($action . $ip);
+    $count = (int) get_transient($key);
+    if ($count >= $limit) {
+        wp_send_json_error('Rate limit exceeded. Please slow down.', 429);
+    }
+    set_transient($key, $count + 1, $window);
+}
+
+/**
  * AJAX: Filter topics by tag/category
  */
 function pm_explore_ajax_filter_by_tag() {
+    pianomode_check_rate_limit('explore_filter');
     check_ajax_referer('explore_nonce', 'nonce');
 
     $tag   = isset($_POST['tag']) ? sanitize_text_field($_POST['tag']) : 'all';
@@ -2291,6 +3104,7 @@ add_action('wp_ajax_nopriv_filter_by_tag', 'pm_explore_ajax_filter_by_tag');
  * AJAX: Search articles
  */
 function pm_explore_ajax_search() {
+    pianomode_check_rate_limit('explore_search');
     check_ajax_referer('explore_nonce', 'nonce');
 
     $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
@@ -2329,6 +3143,7 @@ add_action('wp_ajax_nopriv_explore_ajax_search', 'pm_explore_ajax_search');
  * AJAX: Load more topics
  */
 function pm_explore_ajax_load_more() {
+    pianomode_check_rate_limit('explore_load_more');
     check_ajax_referer('explore_nonce', 'nonce');
 
     $offset = isset($_POST['offset']) ? absint($_POST['offset']) : 0;
@@ -2413,8 +3228,8 @@ require_once get_stylesheet_directory() . '/assets/social-media-generator/pianom
  * PIANOMODE SCORES - Score & Post Banners
  * ===================================================
  * Admin: WP Admin → Scores → Score Banners / Post Banners
+ * (loaded via require_once at top of functions.php)
  */
-require_once get_stylesheet_directory() . '/seed-score-banners.php';
 
 
 /**
@@ -2427,6 +3242,13 @@ require_once get_stylesheet_directory() . '/seed-score-banners.php';
 function pianomode_generate_breadcrumb_schema() {
     // Ne pas générer sur la homepage
     if (is_front_page()) {
+        return;
+    }
+
+    // Skip pages handled by pianomode-seo-master.php (it outputs its own breadcrumbs)
+    if (is_category() || is_singular('score') || is_tax(array('score_composer', 'score_style', 'score_level'))
+        || is_page(array('virtual-piano', 'explore', 'about-us', 'listen-and-play', 'play', 'learn', 'account', 'contact', 'contact-us'))
+        || is_post_type_archive('score')) {
         return;
     }
     
@@ -2710,222 +3532,9 @@ add_filter('the_content', function($content) {
  * ===================================================
  */
 
-// ===== 1. META TAGS SEO/GEO GLOBAUX =====
-
-function pianomode_seo_meta_tags() {
-    // NOTE: Tous les meta tags SEO sont désormais gérés par pianomode-seo-master.php
-    // (homepage, virtual-piano, explore, about-us, scores, catégories, taxonomies)
-    // Les articles/posts sont gérés par post-meta-admin.php
-    // Cette fonction est conservée vide pour éviter de casser d'éventuels hooks tiers.
-}
-add_action('wp_head', 'pianomode_seo_meta_tags', 5);
-
-// ===== 2. BREADCRUMBS SCHEMA.ORG (GOOGLE COMPLIANT) =====
-// DISABLED: Duplicate of pianomode_generate_breadcrumb_schema() (line ~2095)
-// Having two BreadcrumbList schemas hurts SEO. Keeping the newer one at priority 50.
-
-function pianomode_breadcrumbs_schema() {
-    return; // DISABLED - use pianomode_generate_breadcrumb_schema() instead
-    if (is_front_page()) {
-        return; // Pas de breadcrumbs sur homepage
-    }
-    
-    $breadcrumbs = array();
-    $position = 1;
-    
-    // Home toujours en premier (avec 'item')
-    $breadcrumbs[] = array(
-        '@type' => 'ListItem',
-        'position' => $position++,
-        'name' => 'Home',
-        'item' => home_url('/')
-    );
-    
-    if (is_singular('post')) {
-        // Récupérer la hiérarchie des catégories
-        $categories = get_the_category();
-        if ($categories) {
-            $category = $categories[0];
-            $cat_hierarchy = array();
-            while ($category) {
-                array_unshift($cat_hierarchy, $category);
-                $category = $category->parent ? get_category($category->parent) : null;
-            }
-            
-            // Ajouter chaque catégorie (avec 'item')
-            foreach ($cat_hierarchy as $cat) {
-                $breadcrumbs[] = array(
-                    '@type' => 'ListItem',
-                    'position' => $position++,
-                    'name' => $cat->name,
-                    'item' => get_category_link($cat->term_id)
-                );
-            }
-        }
-        
-        // DERNIER ÉLÉMENT : Post actuel (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => get_the_title()
-        );
-        
-    } elseif (is_singular('score')) {
-        // Ajouter Listen (avec 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position++,
-            'name' => 'Listen',
-            'item' => home_url('/listen-and-play/')
-        );
-
-        // DERNIER ÉLÉMENT : Score actuel (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => get_the_title()
-        );
-        
-    } elseif (is_category()) {
-        // Récupérer la hiérarchie des catégories
-        $term = get_queried_object();
-        $cat_hierarchy = array();
-        $category = get_category($term->term_id);
-        while ($category) {
-            array_unshift($cat_hierarchy, $category);
-            $category = $category->parent ? get_category($category->parent) : null;
-        }
-        
-        $total_cats = count($cat_hierarchy);
-        $current_index = 0;
-        
-        foreach ($cat_hierarchy as $cat) {
-            $current_index++;
-            $is_last = ($current_index === $total_cats);
-            
-            if ($is_last) {
-                // DERNIER ÉLÉMENT : Catégorie actuelle (SANS 'item')
-                $breadcrumbs[] = array(
-                    '@type' => 'ListItem',
-                    'position' => $position++,
-                    'name' => $cat->name
-                );
-            } else {
-                // Catégories parentes (avec 'item')
-                $breadcrumbs[] = array(
-                    '@type' => 'ListItem',
-                    'position' => $position++,
-                    'name' => $cat->name,
-                    'item' => get_category_link($cat->term_id)
-                );
-            }
-        }
-        
-    } elseif (is_page('virtual-piano')) {
-        // DERNIER ÉLÉMENT : Virtual Piano (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => 'Virtual Piano'
-        );
-        
-    } elseif (is_page('explore')) {
-        // DERNIER ÉLÉMENT : Explore (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => 'Explore'
-        );
-        
-    } elseif (is_page('listen-and-play')) {
-        // DERNIER ÉLÉMENT : Listen (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => 'Listen'
-        );
-        
-    } elseif (is_page('about-us')) {
-        // DERNIER ÉLÉMENT : About Us (SANS 'item')
-        $breadcrumbs[] = array(
-            '@type' => 'ListItem',
-            'position' => $position,
-            'name' => 'About Us'
-        );
-    }
-    
-    $schema = array(
-        '@context' => 'https://schema.org',
-        '@type' => 'BreadcrumbList',
-        'itemListElement' => $breadcrumbs
-    );
-    
-    echo '<script type="application/ld+json">' . json_encode($schema, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>' . "\n";
-}
-add_action('wp_head', 'pianomode_breadcrumbs_schema', 6);
-
-// ===== 3. CANONICAL URLS =====
-
-function pianomode_canonical_urls() {
-    // NOTE: Canonical URLs are now handled by:
-    // - pianomode-seo-master.php for categories, scores, taxonomies
-    // - post-meta-admin.php for blog posts
-    // This function is DISABLED to prevent duplicate canonical tags
-
-    // DO NOT output canonical tags - handled elsewhere
-    return;
-
-    /* DISABLED - Keeping code for reference
-    // Retirer le canonical WordPress natif
-    remove_action('wp_head', 'rel_canonical');
-
-    $canonical = '';
-
-    if (is_singular('post')) {
-        global $post;
-        $categories = get_the_category($post->ID);
-        if (!$categories) {
-            $canonical = home_url('/explore/' . $post->post_name . '/');
-        } else {
-            $category = $categories[0];
-            $hierarchy = array();
-            while ($category) {
-                array_unshift($hierarchy, $category->slug);
-                $category = $category->parent ? get_category($category->parent) : null;
-            }
-            $canonical = home_url('/explore/' . implode('/', $hierarchy) . '/' . $post->post_name . '/');
-        }
-
-    } elseif (is_singular('score')) {
-        global $post;
-        $canonical = home_url('/listen-and-play/' . $post->post_name . '/');
-
-    } elseif (is_category()) {
-        $term = get_queried_object();
-        $hierarchy = array();
-        $category = get_category($term->term_id);
-        while ($category) {
-            array_unshift($hierarchy, $category->slug);
-            $category = $category->parent ? get_category($category->parent) : null;
-        }
-        $canonical = home_url('/explore/' . implode('/', $hierarchy) . '/');
-
-    } elseif (is_front_page()) {
-        $canonical = home_url('/');
-
-    } elseif (is_page()) {
-        $canonical = get_permalink();
-
-    } elseif (is_search()) {
-        $canonical = home_url('/search/' . urlencode(get_search_query()));
-    }
-
-    if ($canonical) {
-        echo '<link rel="canonical" href="' . esc_url($canonical) . '" />' . "\n";
-    }
-    */
-}
-add_action('wp_head', 'pianomode_canonical_urls', 999); // Priorité très tardive
+// ===== SEO META / BREADCRUMBS / CANONICAL =====
+// All handled by pianomode-seo-master.php (pages, scores, categories, taxonomies)
+// and post-meta-admin.php (blog posts). Legacy stubs removed.
 
 // ===== 4. ROBOTS META =====
 
@@ -2950,6 +3559,8 @@ function pianomode_robots_meta() {
         is_page('about-us') ||
         is_page(['listen-and-play', 'listen-play']) ||
         is_page('play') ||
+        is_page(['account', 'contact', 'contact-us', 'privacy-cookie-policy', 'terms-of-service-disclaimers', 'help-center', 'faq']) ||
+        is_page(['ear-trainer', 'ledger-line', 'note-invaders', 'piano-hero', 'sight-reading-trainer', 'sightreading']) ||
         is_front_page() ||
         is_post_type_archive('score')) {
         return; // pianomode-seo-master.php s'en charge
@@ -2960,7 +3571,8 @@ function pianomode_robots_meta() {
         return; // post-meta-admin.php s'en charge
     }
 
-    // Tags : noindex (géré par hook séparé dans pianomode-seo-master.php)
+    // Tags : force-404'd by pianomode_restrict_unwanted_archives()
+    // If somehow reached, let 404 handler deal with it
     if (is_tag()) {
         return;
     }
@@ -2981,6 +3593,17 @@ function pianomode_robots_meta() {
     echo '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">' . "\n";
 }
 add_action('wp_head', 'pianomode_robots_meta', 1);
+
+/**
+ * Remove WordPress core wp_robots() globally.
+ * wp_robots outputs only "max-image-preview:large" which is already included
+ * in all our custom robots meta tags. Having both creates DUPLICATE meta robots
+ * tags — a known cause of Google de-indexation.
+ * Must run at template_redirect (before wp_head) to safely remove the hook.
+ */
+add_action('template_redirect', function() {
+    remove_action('wp_head', 'wp_robots', 1);
+}, 0);
 
 // ===== 4.5. CONTRÔLE TOTAL DES ARCHIVES - SÉCURITÉ SEO =====
 /**
@@ -3007,10 +3630,9 @@ function pianomode_restrict_unwanted_archives() {
         return;
     }
 
-    // FORCER 404 sur archives non désirées
-    // NOTE: Tags (is_tag) RETIRÉS - Les pages de tags sont maintenant accessibles
-    // pour le SEO et la navigation utilisateur
-    if (is_author() || is_date()) {
+    // FORCER 404 sur archives non désirées (tags, auteurs, dates)
+    // Tags: noindex + crawl budget waste → force 404
+    if (is_tag() || is_author() || is_date()) {
         global $wp_query;
         $wp_query->set_404();
         status_header(404);
@@ -3089,8 +3711,6 @@ require_once get_stylesheet_directory() . '/pianomode-seo-dashboard.php';
  * ===================================================================
  */
 
-// Include the main sight reading class
-//require_once get_stylesheet_directory() . '/assets/Sightreading-game/sightreading-main.php';
 
 
 
@@ -3395,7 +4015,7 @@ function pianomode_ajax_load_more() {
     $query = new WP_Query($args);
     
     $default_images = array(
-        'fallback' => 'https://images.unsplash.com/photo-1520523839897-bd0b52f945a0?w=600&q=85&fm=webp'
+        'fallback' => get_stylesheet_directory_uri() . '/assets/images/default-card.webp'
     );
     
     ob_start();
@@ -3461,12 +4081,9 @@ function pianomode_ajax_load_more() {
         'loaded' => $offset + $query->post_count
     ));
 }
-// REMOVED OLD AJAX HANDLERS - Using new pianomode_load_more() instead
-// add_action('wp_ajax_pianomode_load_more', 'pianomode_ajax_load_more');
-// add_action('wp_ajax_nopriv_pianomode_load_more', 'pianomode_ajax_load_more');
-
 // AJAX handler for filtering by tags (Home page)
 function pm_filter_by_tag() {
+    pianomode_check_rate_limit('home_filter');
     check_ajax_referer('pm_home_nonce', 'nonce');
 
     $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
@@ -3709,8 +4326,14 @@ function pm_toggle_favorite() {
             pianomode_invalidate_like_cache($post_id);
         }
 
-        // Set cookie (expires in 1 year)
-        setcookie('pm_guest_likes', json_encode(array_values($liked_posts)), time() + (365 * 24 * 60 * 60), '/');
+        // Set cookie (expires in 1 year) with secure flags
+        setcookie('pm_guest_likes', json_encode(array_values($liked_posts)), array(
+            'expires'  => time() + (365 * 24 * 60 * 60),
+            'path'     => '/',
+            'httponly'  => true,
+            'secure'   => is_ssl(),
+            'samesite' => 'Lax',
+        ));
 
         // Calculate total count using optimized function
         $total_count = function_exists('pianomode_get_like_count')
@@ -3851,16 +4474,6 @@ function pm_enqueue_learn_assets() {
             filemtime(get_stylesheet_directory() . '/Learn page/learn-page.js'),
             true
         );
-
-        // Localize data
-        wp_localize_script('pm-learn-js', 'pmLearnData', [
-            'ajaxUrl' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('pm_learn_nonce'),
-            'userId' => get_current_user_id(),
-            'isLoggedIn' => is_user_logged_in(),
-            'assetsUrl' => get_stylesheet_directory_uri() . '/assets/',
-            'paths' => pm_get_learning_paths_data()
-        ]);
     }
 }
 add_action('wp_enqueue_scripts', 'pm_enqueue_learn_assets', 20);
@@ -4353,7 +4966,7 @@ add_action('wp_ajax_pm_get_user_progress', 'pm_get_user_progress');
  * AJAX handler for loading more articles in Start Journey component (Home page)
  */
 function pianomode_load_more() {
-    // Verify nonce
+    pianomode_check_rate_limit('home_load_more');
     check_ajax_referer('pm_home_nonce', 'nonce');
 
     $page = isset($_POST['page']) ? absint($_POST['page']) : 1;
@@ -4474,6 +5087,7 @@ add_action('wp_ajax_nopriv_pianomode_load_more', 'pianomode_load_more');
  * Called when client-side search finds no results
  */
 function pianomode_ajax_search() {
+    pianomode_check_rate_limit('home_search');
     check_ajax_referer('pm_home_nonce', 'nonce');
 
     $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
@@ -4869,10 +5483,5 @@ add_filter('rest_endpoints', function($endpoints) {
     return $endpoints;
 });
 
-// Disable author archives to prevent user enumeration
-add_action('template_redirect', function() {
-    if (is_author()) {
-        wp_safe_redirect(home_url(), 301);
-        exit;
-    }
-});
+// Author archives: handled by pianomode_restrict_unwanted_archives() which force-404s
+// is_tag(), is_author(), and is_date() at template_redirect priority 5.
