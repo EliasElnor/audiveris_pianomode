@@ -1,13 +1,20 @@
 <?php
 /**
- * Template Name: OCR Scanner - Partition vers MIDI
+ * Template Name: Sheet to Sound
  * Description: Upload a sheet music photo or PDF, process it 100% in the browser
  *              using the PianoMode OMR engine, and play/download as MusicXML + MIDI.
  *              No server dependencies — everything runs client-side.
  *
  * @package Blocksy-child
- * @version 2.0.0
+ * @version 3.0.0
  */
+
+// Safety net: ensure OMR scripts are enqueued even when is_page_template()
+// misses (Blocksy / child-theme quirk). This runs BEFORE get_header() so
+// the add_action callback fires during wp_head → wp_enqueue_scripts.
+if ( function_exists( 'pianomode_enqueue_omr_scripts' ) ) {
+    add_action( 'wp_enqueue_scripts', 'pianomode_enqueue_omr_scripts', 30 );
+}
 
 get_header();
 
@@ -26,10 +33,10 @@ $theme_uri = get_stylesheet_directory_uri();
                     <circle cx="18" cy="16" r="3"/>
                 </svg>
             </div>
-            <h1>Sheet Music <span>OCR Scanner</span></h1>
-            <p>Transform any photo or PDF of sheet music into an interactive, playable score.
-               Upload your partition and listen to it instantly with real piano sounds.<br>
-               <strong>100% browser-based</strong> — no installation required.</p>
+            <h1>Play <span>My Sheet</span></h1>
+            <p>Upload any photo or PDF of sheet music and hear it played back instantly with real piano sounds.
+               Our AI-powered scanner detects notes, rhythms, and dynamics automatically.<br>
+               <strong>100% browser-based</strong> — no installation, no signup, completely free.</p>
         </div>
     </section>
 
@@ -83,26 +90,40 @@ $theme_uri = get_stylesheet_directory_uri();
             </button>
         </div>
 
-        <!-- Progress Stepper -->
+        <!-- Progress Stepper (Audiveris-style detailed pipeline) -->
         <div class="pm-omr-progress" id="omr-progress">
             <ul class="pm-omr-steps">
                 <li class="pm-omr-step" data-step="1">
-                    <div class="pm-omr-step-circle">1</div>
-                    <span class="pm-omr-step-label">Upload</span>
+                    <div class="pm-omr-step-circle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    </div>
+                    <span class="pm-omr-step-label">Load</span>
                 </li>
                 <li class="pm-omr-step" data-step="2">
-                    <div class="pm-omr-step-circle">2</div>
-                    <span class="pm-omr-step-label">OCR Analysis</span>
+                    <div class="pm-omr-step-circle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    </div>
+                    <span class="pm-omr-step-label">Image</span>
                 </li>
                 <li class="pm-omr-step" data-step="3">
-                    <div class="pm-omr-step-circle">3</div>
-                    <span class="pm-omr-step-label">Conversion</span>
+                    <div class="pm-omr-step-circle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                    </div>
+                    <span class="pm-omr-step-label">Detect</span>
                 </li>
                 <li class="pm-omr-step" data-step="4">
-                    <div class="pm-omr-step-circle">4</div>
-                    <span class="pm-omr-step-label">Ready</span>
+                    <div class="pm-omr-step-circle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg>
+                    </div>
+                    <span class="pm-omr-step-label">Export</span>
                 </li>
             </ul>
+
+            <!-- Live log panel (Audiveris-style) -->
+            <div class="pm-omr-log-panel" id="omr-log-panel">
+                <div class="pm-omr-log-scroll" id="omr-log-scroll"></div>
+            </div>
+
             <div class="pm-omr-progress-status" id="omr-progress-status"></div>
             <div class="pm-omr-progress-bar-container">
                 <div class="pm-omr-progress-bar" id="omr-progress-bar">
@@ -291,11 +312,15 @@ $theme_uri = get_stylesheet_directory_uri();
     }
 </script>
 
-<!-- OMR Engine (client-side) -->
-<script src="<?php echo esc_url( $theme_uri . '/assets/OCR-Scan/omr-engine.js?ver=6.0.0' ); ?>"></script>
+<!--
+    OMR Engine (client-side) — now enqueued via functions.php
+    pianomode_omr_scanner_assets() under the 'pm-omr-core' and
+    'pm-omr-engine' handles, so there is no inline <script> tag here.
+    Cache busting is controlled by the PIANOMODE_OMR_VER constant.
+-->
 
-<!-- AlphaTab -->
-<script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js"></script>
+<!-- AlphaTab (pinned version - @latest is unreliable) -->
+<script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/alphaTab.js"></script>
 
 <!-- ===== Inline JavaScript ===== -->
 <script>
@@ -338,6 +363,10 @@ $theme_uri = get_stylesheet_directory_uri();
     var atTempoValue = document.getElementById('omr-at-tempo-value');
     var atVolume     = document.getElementById('omr-at-volume');
 
+    // Log panel (Audiveris-style live output)
+    var logPanel       = document.getElementById('omr-log-panel');
+    var logScroll      = document.getElementById('omr-log-scroll');
+
     var selectedFile = null;
     var atApi = null;
     var lastResult = null;
@@ -353,6 +382,20 @@ $theme_uri = get_stylesheet_directory_uri();
 
     function show(el) { el.classList.add('visible'); }
     function hide(el) { el.classList.remove('visible'); }
+
+    // Audiveris-style log: append a timestamped line to the log panel.
+    var _logStart = 0;
+    function logLine(msg) {
+        if (!logScroll) return;
+        if (!_logStart) _logStart = Date.now();
+        var elapsed = ((Date.now() - _logStart) / 1000).toFixed(1);
+        var line = document.createElement('div');
+        line.className = 'pm-omr-log-line';
+        line.textContent = '[' + elapsed + 's] ' + msg;
+        logScroll.appendChild(line);
+        logScroll.scrollTop = logScroll.scrollHeight;
+        if (logPanel) logPanel.style.display = 'block';
+    }
 
     // -------------------------------------------------------
     // Dropzone
@@ -441,9 +484,12 @@ $theme_uri = get_stylesheet_directory_uri();
         }
         progressStatus.textContent = statusText || '';
         if (typeof percent === 'number') {
-            progressBarFill.style.width = Math.min(100, Math.max(0, percent)) + '%';
-            progressPercent.textContent = Math.round(percent) + '%';
+            var pct = Math.min(100, Math.max(0, percent));
+            progressBarFill.style.width = pct + '%';
+            progressPercent.textContent = Math.round(pct) + '%';
         }
+        // Log every progress update to the Audiveris-style panel
+        if (statusText) logLine(statusText);
     }
 
     function markStepError(step, statusText) {
@@ -453,6 +499,7 @@ $theme_uri = get_stylesheet_directory_uri();
             if (n === step) steps[i].classList.add('error');
         }
         progressStatus.textContent = statusText || '';
+        if (statusText) logLine('ERROR: ' + statusText);
     }
 
     function resetProgress() {
@@ -463,6 +510,9 @@ $theme_uri = get_stylesheet_directory_uri();
         progressStatus.textContent = '';
         progressBarFill.style.width = '0%';
         progressPercent.textContent = '0%';
+        if (logScroll) logScroll.innerHTML = '';
+        if (logPanel) logPanel.style.display = 'none';
+        _logStart = 0;
     }
 
     // -------------------------------------------------------
@@ -479,6 +529,17 @@ $theme_uri = get_stylesheet_directory_uri();
         previewPanel.style.display = 'none';
         scanBtn.disabled = true;
         scanBtn.textContent = 'Processing...';
+
+        // Safety check: ensure the OMR engine loaded
+        if (typeof PianoModeOMR === 'undefined' || !PianoModeOMR.Engine) {
+            showError('OMR engine failed to load. Please refresh the page and try again.');
+            scanBtn.textContent = 'Analyse & Convert to Playable Score';
+            scanBtn.disabled = false;
+            console.error('[PianoMode] PianoModeOMR is not defined — engine scripts did not load. Check page template assignment.');
+            return;
+        }
+
+        logLine('Starting OMR analysis of ' + file.name + ' (' + formatBytes(file.size) + ')');
 
         // Use the client-side OMR engine
         PianoModeOMR.Engine.process(file, function(step, message, percent) {
@@ -503,7 +564,7 @@ $theme_uri = get_stylesheet_directory_uri();
                 result.events.length + ' musical events';
 
             // Load in AlphaTab
-            updateProgress(4, 'Score ready — loading player...');
+            updateProgress(4, 'Score ready — loading player...', 100);
             show(resultPanel);
 
             // Build the piano keyboard now that the result panel is visible
@@ -583,14 +644,30 @@ $theme_uri = get_stylesheet_directory_uri();
     // -------------------------------------------------------
     // AlphaTab Initialization
     // -------------------------------------------------------
+    var atLoadTimeoutId = null;
+    function clearAtLoadTimeout() {
+        if (atLoadTimeoutId) {
+            clearTimeout(atLoadTimeoutId);
+            atLoadTimeoutId = null;
+        }
+    }
+
     function initAlphaTab(musicxmlUrl) {
+        if (typeof alphaTab === 'undefined') {
+            atProgress.textContent = 'Error: player library unavailable';
+            atProgress.style.color = '#ff4444';
+            return;
+        }
+
         if (atApi) {
             try { atApi.destroy(); } catch(e) {}
             atApi = null;
             atMain.innerHTML = '';
         }
 
-        atProgress.textContent = 'Loading...';
+        clearAtLoadTimeout();
+        atProgress.textContent = 'Loading player...';
+        atProgress.style.color = '';
         atProgress.style.opacity = '1';
         atProgress.style.display = '';
         atPlay.disabled = true;
@@ -600,22 +677,41 @@ $theme_uri = get_stylesheet_directory_uri();
 
         var currentTempo = 1.0;
 
+        // Watchdog: if after 45s we still have no playerReady, surface the problem
+        atLoadTimeoutId = setTimeout(function() {
+            atProgress.textContent = 'Player timeout';
+            atProgress.style.color = '#ff4444';
+        }, 45000);
+
         var settings = {
             file: musicxmlUrl,
+            core: {
+                engine: 'svg',
+                enableLazyLoading: true
+            },
             player: {
                 enablePlayer: true,
                 enableCursor: true,
                 enableUserInteraction: true,
                 scrollMode: 1,
-                soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
+                soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/soundfont/sonivox.sf2',
                 scrollElement: document.getElementById('omr-at-viewport')
             },
             display: {
                 layoutMode: 0,
-                staveProfile: 0,
-                stretchForce: 0.8,
-                scale: 1.0,
-                barsPerRow: -1
+                staveProfile: 2,
+                stretchForce: 1.2,
+                scale: 1.2,
+                barsPerRow: -1,
+                padding: [15, 40, 15, 40],
+                systemsLayout: 0,
+                resources: {
+                    staffLineColor:      '#1a0e03',
+                    barSeparatorColor:   '#1a0e03',
+                    mainGlyphColor:      '#0c0604',
+                    secondaryGlyphColor: '#3a2106',
+                    scoreInfoColor:      '#1a0e03'
+                }
             },
             notation: {
                 notationMode: 1,
@@ -637,10 +733,20 @@ $theme_uri = get_stylesheet_directory_uri();
             }
         };
 
-        atApi = new alphaTab.AlphaTabApi(atMain, settings);
+        try {
+            atApi = new alphaTab.AlphaTabApi(atMain, settings);
+        } catch (initErr) {
+            clearAtLoadTimeout();
+            atProgress.textContent = 'Player init failed';
+            atProgress.style.color = '#ff4444';
+            return;
+        }
 
         atApi.error.on(function(e) {
-            atProgress.textContent = 'Error loading score';
+            clearAtLoadTimeout();
+            var msg = 'Error loading score';
+            if (e && e.message) msg += ': ' + e.message;
+            atProgress.textContent = msg;
             atProgress.style.color = '#ff4444';
         });
 
@@ -686,6 +792,7 @@ $theme_uri = get_stylesheet_directory_uri();
         });
 
         atApi.playerReady.on(function() {
+            clearAtLoadTimeout();
             atProgress.style.display = 'none';
             atPlay.disabled = false;
             atStop.disabled = false;
