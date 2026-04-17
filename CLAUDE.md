@@ -2,14 +2,53 @@
 
 ## Current State (2026-04-17)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.16.1** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.17.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
 **STATUS:** Audiveris-port pipeline is authoritative (all 14 phases enabled by
-default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 1
-grand-staff plumbing landed in v6.16.0, followed by UI-stability fixes in
-v6.16.1. Next focus is note-detection accuracy and grand-staff fidelity in the
-rendered AlphaTab score.
+default via `OMR.flags`, legacy v6 heuristics only run as fallback). Waves 1
+and 2 address grand-staff correctness, false-positive note detection, and the
+playback engine (Tone.js + Salamander Grand Piano). Next focus is the Phase 4
+bass-staff miss (systems still sometimes render as single-staff because Phase 4
+fails to pair the bass) and the remaining note-classification mistakes.
+
+### Wave 2 fixes (v6.17.0 — 2026-04-17)
+User report after v6.16.1: AlphaTab still showed a single treble clef on the
+second system, dozens of spurious 32nd-note clusters appeared where rests /
+dynamics / fingerings belonged in the source, reading order was wrong, and the
+playback sound was "pas un vrai grand piano". Fixes, one commit per file:
+1. **Force bass clef on paired lower staff** (`omr-clef-key-time.js`
+   `scanClef()`) — when `staff.partner` + `staff.staffIndex` are set,
+   return TREBLE/BASS from the grand-staff convention directly. Geometric
+   scoring is no longer consulted for paired piano staves because the +4
+   hint was losing to treble-leaning geometric cues on low-res scans.
+2. **Piano-mode normalization across all systems** (`omr-musicxml.js`
+   `collectParts()` / `normalizeGrandStaffIndices()`) — any sheet that
+   triggers piano mode (any system with ≥2 staves, or an even total across
+   single-staff systems, or multiple single-staff systems in a row) now
+   stamps every staff with a `staffIndex` (0 upper / 1 lower) so
+   `staffIndexInPart`'s fallback routes voices to the right staff even when
+   the voice's staff object isn't in the template `staffMap`. Single-staff
+   systems default their lone staff to treble so the bass side auto-emits
+   a measure-rest.
+3. **Restore strict head thresholds** (`omr-heads.js` `C` block) — revert
+   the v6.15.0 relaxation (minGrade 0.25, maxDistanceLow 2.5, maxDistanceHigh
+   4.0, maxYOffsetRatio 0.25) back to Audiveris defaults with a small
+   tightening (minGrade 0.40, maxYOffsetRatio 0.18). The relaxation had
+   been catching rest glyphs, dynamic markings and fingerings as heads.
+4. **Tone.js + Salamander Grand Piano** (`functions.php` +
+   `page-omr-scanner.php`) — enqueue Tone.js on the scanner page, build a
+   `Tone.Sampler` with the 29 Salamander mp3 samples used elsewhere on the
+   site (concert-hall, sightreading, virtual-piano, games), mute AlphaTab's
+   Sonivox synth on `playerReady`, and drive attack/release from
+   `midiEventsPlayed`. The volume slider now controls a `Tone.Volume` node
+   with a cube-root taper. Graceful fallback to AlphaTab's own synth if
+   Tone.js is blocked.
+5. **AlphaTab autosize warning** (`page-omr-scanner.php`) — defer
+   `initAlphaTab` via `requestAnimationFrame` until `atMain.offsetWidth > 0`
+   so the flex layout inside `.pm-omr-alphatab-wrap` is resolved before
+   AlphaTab mounts. Kills the "container was invisible while autosizing"
+   warning that fired on first scan.
 
 ### Wave 1 fixes (v6.16.0 — 2026-04-17)
 User report: AlphaTab only showed the treble clef, detection was "EXTRÊMEMENT
@@ -143,12 +182,29 @@ fallback when a new module fails to produce output.
 - `page-omr-scanner.php` inline `<script src=...?ver=X.Y.Z>` must match
 
 ### Known Remaining Work
-- **Detection accuracy** — user still reports imprecise results. Phase 8 head
-  filters were relaxed in v6.15.0 (minGrade 0.25, maxDistanceLow 2.5,
-  maxDistanceHigh 4.0, maxYOffsetRatio 0.25); may need re-tightening plus
-  stronger Phase 12 accidentals and Phase 13 voice assignment.
-- **Grand-staff fidelity in AlphaTab** — Wave 1 ensures both clefs render, but
-  the brace/bracket and cross-staff beaming visual correctness still needs
-  verification against real piano scores.
-- **Test material** — user's "morning sunbeam" PDF not yet located. Fallback
-  test PDFs in `app/src/test/resources/` and `data/examples/`.
+- **Phase 4 bass-staff recall** — user's Wave 2 screenshot still shows one
+  system as grand staff + one system as lone treble, because Phase 4
+  `pairStavesIntoSystems` missed the bass staff on the second system. Need
+  to enforce "consistent staff count" across systems in a piece (if any
+  system has 2 staves, every system should find 2) by searching harder for
+  the missing partner filament below/above the detected staff. Possibly
+  port `ClustersRetriever.matchSystems` logic from Audiveris.
+- **Note classification precision** — even after the Wave 2 threshold
+  tightening, some non-heads are still promoted. Future tightening should
+  happen through Audiveris's built-in mechanisms (`evalBlackAsVoid`, ledger
+  pitches ±6/±7, seed-conflict resolution) rather than by moving the grade
+  bar again. Phase 12 accidentals and Phase 13 voice assignment also need
+  review — the current voice IDs (1,2 treble / 5,6 bass) are right but the
+  event ordering within a voice may still be off (user reports "lecture ne
+  se fait pas dans l'ordre d'apparition des notes").
+- **Cross-staff beaming + brace** — Wave 1/2 ensure both clefs render, but
+  the brace/bracket glyph and cross-staff beaming still need verification
+  against real piano scores. AlphaTab's rendering is what we see, and it
+  appears to be drawing the brace correctly when `<staves>2</staves>` is
+  emitted, so this is likely a content issue (voice/staff assignment) rather
+  than a rendering issue.
+- **Test material** — user's "Bright Eyes" (Florence B. Price) PDF is the
+  current reference ground truth. The MIDI version of the same piece lives
+  at `data/examples/price-florence-bright-eyes.midi` and is referenced from
+  concert-hall.js SONG_LIBRARY_FALLBACK. Compare scanner output against
+  that MIDI to catch ordering / rhythm / pitch regressions.
