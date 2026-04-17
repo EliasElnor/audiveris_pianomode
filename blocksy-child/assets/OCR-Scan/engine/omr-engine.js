@@ -2074,6 +2074,10 @@ OMR.Engine = {
             }).then(function(ctx) {
                 return self._yieldThen(function() {
                     // Phase 4: LinesRetriever + ClustersRetriever.
+                    // Strict pass first (matches Audiveris defaults), then
+                    // a relaxed pass for PDF rasters where staff lines are
+                    // antialiased to 1 px and both the slope and straightness
+                    // budgets need to grow.
                     var glReason = null;
                     if (OMR.GridLines && typeof OMR.GridLines.retrieveStaves === 'function'
                             && ctx.scale && ctx.scale.valid) {
@@ -2082,6 +2086,20 @@ OMR.Engine = {
                                 ctx.bin, ctx.w, ctx.h, ctx.scale);
                             if (ctx.gridLines && ctx.gridLines.reason) {
                                 glReason = ctx.gridLines.reason;
+                            }
+                            if (!ctx.gridLines
+                                    || !ctx.gridLines.staves
+                                    || ctx.gridLines.staves.length === 0) {
+                                console.info('[OMR] Phase 4 strict pass yielded no staves; retrying with relaxed thresholds. Strict reason: ' + glReason);
+                                var relaxed = OMR.GridLines.retrieveStaves(
+                                    ctx.bin, ctx.w, ctx.h, ctx.scale, { relaxed: true });
+                                if (relaxed && relaxed.staves && relaxed.staves.length > 0) {
+                                    ctx.gridLines = relaxed;
+                                    glReason = null;
+                                    console.info('[OMR] Phase 4 relaxed pass recovered ' + relaxed.staves.length + ' staves.');
+                                } else if (relaxed && relaxed.reason) {
+                                    glReason = glReason + ' | relaxed: ' + relaxed.reason;
+                                }
                             }
                         } catch (glErr) {
                             ctx.gridLines = null;
