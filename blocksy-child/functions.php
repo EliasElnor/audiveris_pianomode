@@ -428,7 +428,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.16.1' );
+    define( 'PIANOMODE_OMR_VER', '6.17.0' );
 }
 
 /**
@@ -3740,7 +3740,11 @@ function pianomode_enqueue_tonejs() {
     // Charger seulement sur les pages qui en ont besoin
     // Note: Virtual Piano et Studio ont leurs propres tags <script>
     // Home page loads Tone.js dynamically in concert-hall.js Phase 2 (LCP optimization)
-    if (is_page('sightreading') || is_page('games') || is_page_template('page-ear-trainer.php')) {
+    // OMR scanner uses Tone.js + Salamander Grand Piano samples as the
+    // playback engine instead of AlphaTab's built-in Sonivox soundfont.
+    if (is_page('sightreading') || is_page('games')
+        || is_page_template('page-ear-trainer.php')
+        || is_page_template('page-omr-scanner.php')) {
         wp_enqueue_script('tonejs-library');
     }
 }
