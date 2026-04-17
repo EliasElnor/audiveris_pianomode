@@ -86,13 +86,20 @@
     var C = {
         // Grade 0 ↔ distance == params.maxDistance
         // Grade 1 ↔ distance == 0
-        maxDistanceLow:      2.5,   // acceptable head match distance (relaxed from 2.0)
-        maxDistanceHigh:     4.0,   // "reallyBad" cutoff; abandon template (relaxed from 3.5)
-        minGrade:            0.25,  // min acceptable grade (0..1) (lowered from 0.35 to catch more heads)
+        //
+        // Values tightened back to Audiveris defaults in v6.17.0 —
+        // the relaxed v6.15.0 numbers (2.5/4.0/0.25) were catching
+        // rests, dynamic markings (mf, f, p), fingering digits and
+        // articulation dots as note heads. See user report dated
+        // 2026-04-17 showing dozens of 32nd-note clusters that don't
+        // exist in the source score.
+        maxDistanceLow:      2.0,   // acceptable head match distance
+        maxDistanceHigh:     3.5,   // "reallyBad" cutoff; abandon template
+        minGrade:            0.40,  // min acceptable grade (0..1)
 
         // x offsets tried around a seed (centered, grows outward)
         maxStemXOffsetRatio: 0.15,  // fraction of interline
-        maxYOffsetRatio:     0.25,  // fraction of interline (widened from 0.20)
+        maxYOffsetRatio:     0.18,  // fraction of interline
 
         // Distance skip in Pass 2
         templateHalfRatio:   1.0    // templateHalf = interline * this
