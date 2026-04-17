@@ -677,6 +677,12 @@ $theme_uri = get_stylesheet_directory_uri();
         return names[midi % 12] + (Math.floor(midi / 12) - 1);
     }
 
+    var pmSamplerLoadCallbacks = [];
+    function onSamplerLoaded(cb) {
+        if (pmSamplerLoaded) { cb(); return; }
+        pmSamplerLoadCallbacks.push(cb);
+    }
+
     function ensureSalamander() {
         if (pmSampler || typeof Tone === 'undefined') return pmSampler;
         try {
@@ -695,7 +701,15 @@ $theme_uri = get_stylesheet_directory_uri();
                 },
                 baseUrl: 'https://tonejs.github.io/audio/salamander/',
                 release: 1,
-                onload: function () { pmSamplerLoaded = true; }
+                onload: function () {
+                    pmSamplerLoaded = true;
+                    var cbs = pmSamplerLoadCallbacks;
+                    pmSamplerLoadCallbacks = [];
+                    for (var k = 0; k < cbs.length; k++) {
+                        try { cbs[k](); } catch (e) {}
+                    }
+                },
+                onerror: function () { pmSamplerLoaded = false; }
             }).connect(pmSamplerVol);
         } catch (e) {
             pmSampler = null;
@@ -791,6 +805,19 @@ $theme_uri = get_stylesheet_directory_uri();
             atProgress.style.color = '#ff4444';
         }, 45000);
 
+        // AlphaTab 1.3.x only emits midiEventsPlayed for types present
+        // in this filter — default is empty so the Tone.js bridge would
+        // never fire. Explicitly whitelist NoteOn / NoteOff.
+        var noteOnType = 0x90, noteOffType = 0x80;
+        if (typeof alphaTab !== 'undefined' && alphaTab.midi && alphaTab.midi.MidiEventType) {
+            if (alphaTab.midi.MidiEventType.NoteOn !== undefined) {
+                noteOnType = alphaTab.midi.MidiEventType.NoteOn;
+            }
+            if (alphaTab.midi.MidiEventType.NoteOff !== undefined) {
+                noteOffType = alphaTab.midi.MidiEventType.NoteOff;
+            }
+        }
+
         var settings = {
             file: musicxmlUrl,
             core: {
@@ -803,7 +830,8 @@ $theme_uri = get_stylesheet_directory_uri();
                 enableUserInteraction: true,
                 scrollMode: 1,
                 soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/soundfont/sonivox.sf2',
-                scrollElement: document.getElementById('omr-at-viewport')
+                scrollElement: document.getElementById('omr-at-viewport'),
+                midiEventsPlayedFilter: [noteOnType, noteOffType]
             },
             display: {
                 layoutMode: 0,
@@ -886,17 +914,25 @@ $theme_uri = get_stylesheet_directory_uri();
             atProgress.style.display = 'none';
             atPlay.disabled = false;
             atStop.disabled = false;
-            // Kick the sampler off early so samples are fetched before
-            // the user hits Play (loading 29 mp3 files takes ~2-4 s).
-            // When Tone.js is unavailable (ad-blocker, CDN issue) we
-            // leave AlphaTab's Sonivox synth audible as fallback so
-            // playback still produces sound — ugly, but audible.
+            // Kick off sample fetching early so the first Play is fast.
+            // Keep AlphaTab's Sonivox synth AUDIBLE until the Salamander
+            // samples finish loading — otherwise the user hears silence
+            // during the 2–5 s download window. Once onload fires we
+            // swap to the Salamander output.
             ensureSalamander();
+            try { atApi.masterVolume = atVolume.value / 100; } catch (e) {}
             if (pmSampler) {
-                try { atApi.masterVolume = 0; } catch (e) {}
-                applyPmVolume(atVolume.value / 100);
-            } else {
-                try { atApi.masterVolume = atVolume.value / 100; } catch (e) {}
+                onSamplerLoaded(function () {
+                    try { atApi.masterVolume = 0; } catch (e) {}
+                    applyPmVolume(atVolume.value / 100);
+                });
+                // Safety net: if samples haven't loaded in 20 s, keep
+                // AlphaTab audible so playback isn't broken.
+                setTimeout(function () {
+                    if (!pmSamplerLoaded) {
+                        console.warn('[OMR] Salamander samples still loading after 20s — sticking with Sonivox.');
+                    }
+                }, 20000);
             }
         });
 
@@ -1004,14 +1040,14 @@ $theme_uri = get_stylesheet_directory_uri();
         };
 
         atVolume.oninput = function() {
-            // When the Salamander sampler exists, the slider drives
-            // its Tone.Volume node. Without it (Tone.js unavailable),
-            // fall back to AlphaTab's own master volume so the slider
-            // still controls something audible.
-            if (pmSampler) {
-                applyPmVolume(this.value / 100);
-            } else {
-                try { atApi.masterVolume = this.value / 100; } catch (e) {}
+            var v = this.value / 100;
+            // Always apply to Salamander (if present) so it's ready when
+            // samples finish loading. Also keep AlphaTab's own volume in
+            // sync until the sampler takes over — this way the slider
+            // controls something audible through the whole loading window.
+            if (pmSampler) applyPmVolume(v);
+            if (!pmSamplerLoaded) {
+                try { atApi.masterVolume = v; } catch (e) {}
             }
         };
     }
