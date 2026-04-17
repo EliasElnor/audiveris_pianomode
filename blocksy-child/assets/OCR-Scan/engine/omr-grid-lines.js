@@ -66,6 +66,12 @@
 
     // Audiveris LinesRetriever$Constants defaults, converted to interline
     // fractions where they were absolute.
+    //
+    // Thresholds are authored for a scanned 300-DPI bitmap (stable runs,
+    // 2-3 px thick staff lines). PDFs rasterized via PDF.js often come
+    // out with 1-px antialiased lines whose rows are split by single-pixel
+    // breaks, so we also expose a "relaxed" preset below that the engine
+    // falls back to when the strict pass yields zero staves.
     var C = {
         // Filament acceptance
         minLengthPerInterline:    5.0,   // staff is ≥ 5 interlines wide
@@ -86,6 +92,7 @@
 
         // Filament building thresholds passed to FilamentFactory
         minRunPerInterline:       0.25,  // only count horizontal runs ≥ 0.25*int
+        maxVerticalGap:           1,     // connect runs across ≤ N-row breaks
 
         // Grand-staff pairing (PartsBuilder port). Audiveris pairs two
         // adjacent staves into one Part when their vertical gap is below
@@ -94,6 +101,27 @@
         maxGrandStaffGapIL:       4.5,
         minGrandStaffGapIL:       1.0
     };
+
+    // Relaxed preset for PDF rasters. The engine calls retrieveStaves with
+    // `opts.relaxed: true` after a first-pass failure; we mutate a local
+    // copy of C (not the module-level one) so the strict preset stays
+    // intact for high-quality scans.
+    function makeConstants(opts) {
+        var cc = {};
+        for (var k in C) cc[k] = C[k];
+        if (opts && opts.relaxed) {
+            // Antialiased PDF lines tilt more than strict scans allow:
+            // double the slope tolerance and the straightness budget, and
+            // bridge single-row breaks in the filament factory.
+            cc.maxSlopeDeviation    = 0.05;
+            cc.maxLineResidual      = 2.0;
+            cc.maxVerticalGap       = 2;
+            cc.minRunPerInterline   = 0.20;
+            cc.voteRatio            = 0.30;
+            cc.minLengthPerInterline = 4.0;
+        }
+        return cc;
+    }
 
     /**
      * Run the full LinesRetriever + ClustersRetriever pipeline.
@@ -105,41 +133,48 @@
      *                            .mainFore, .maxFore
      * @returns {object}   { staves: Staff[], slope, filamentCount }
      */
-    function retrieveStaves(bin, width, height, scale) {
+    function retrieveStaves(bin, width, height, scale, opts) {
         if (!scale || !scale.valid) {
             return { staves: [], slope: 0, filamentCount: 0,
                      reason: 'scale invalid' };
         }
+        var cc        = makeConstants(opts);
         var interline = scale.interline;
-        var minRun    = Math.max(3, Math.round(C.minRunPerInterline * interline));
-        var minLen    = Math.round(C.minLengthPerInterline    * interline);
-        var maxThick  = Math.max(2, Math.round(C.maxThicknessPerInterline * interline));
+        var minRun    = Math.max(3, Math.round(cc.minRunPerInterline * interline));
+        var minLen    = Math.round(cc.minLengthPerInterline    * interline);
+        var maxThick  = Math.max(2, Math.round(cc.maxThicknessPerInterline * interline));
 
         // ---- step 1: build horizontal filaments ----
         var filaments = OMR.Filaments.buildHorizontalFilaments(
             bin, width, height, {
                 minRunLength:   minRun,
-                maxVerticalGap: 1
+                maxVerticalGap: cc.maxVerticalGap
             });
         var totalBuilt = filaments.length;
+        var tag = (opts && opts.relaxed) ? '[relaxed]' : '[strict]';
 
         // ---- step 2: length + thickness filter ----
         filaments = filaments.filter(function (f) {
             return f.getLength() >= minLen
                 && f.getThickness() <= maxThick;
         });
+        var afterLenThick = filaments.length;
 
         // ---- step 3: straightness filter ----
         filaments = filaments.filter(function (f) {
-            return f.getMeanDistance() <= C.maxLineResidual;
+            return f.getMeanDistance() <= cc.maxLineResidual;
         });
+        var afterStraight = filaments.length;
 
         if (filaments.length === 0) {
             if (OMR.debug && OMR.debug.push) {
                 OMR.debug.push('gridLines', []);
             }
             return { staves: [], slope: 0, filamentCount: totalBuilt,
-                     reason: 'no surviving filaments after length/thickness/straightness' };
+                     reason: tag + ' no surviving filaments after length/thickness/straightness'
+                             + ' (built=' + totalBuilt
+                             + ', afterLen+Thick=' + afterLenThick
+                             + ', afterStraight=0)' };
         }
 
         // ---- step 4: global sheet slope ----
@@ -147,19 +182,35 @@
 
         // ---- step 5: slope deviation filter ----
         filaments = filaments.filter(function (f) {
-            return Math.abs(f.getSlope() - sheetSlope) <= C.maxSlopeDeviation;
+            return Math.abs(f.getSlope() - sheetSlope) <= cc.maxSlopeDeviation;
         });
-        if (filaments.length < C.linesPerStaff) {
+        var afterSlope = filaments.length;
+        if (filaments.length < cc.linesPerStaff) {
             if (OMR.debug && OMR.debug.push) {
                 OMR.debug.push('gridLines', renderFilamentsDebug(filaments));
             }
             return { staves: [], slope: sheetSlope, filamentCount: totalBuilt,
-                     reason: 'fewer than 5 filaments after slope filter' };
+                     reason: tag + ' fewer than 5 filaments after slope filter'
+                             + ' (built=' + totalBuilt
+                             + ', afterLen+Thick=' + afterLenThick
+                             + ', afterStraight=' + afterStraight
+                             + ', afterSlope=' + afterSlope
+                             + ', sheetSlope=' + sheetSlope.toFixed(4) + ')' };
         }
 
         // ---- step 6: cluster filaments into staves ----
-        var staves = clusterFilamentsIntoStaves(
-            filaments, width, height, interline);
+        var staves = clusterFilamentsIntoStavesWith(
+            filaments, width, height, interline, cc);
+
+        if (staves.length === 0) {
+            if (OMR.debug && OMR.debug.push) {
+                OMR.debug.push('gridLines', renderFilamentsDebug(filaments));
+            }
+            return { staves: [], slope: sheetSlope, filamentCount: totalBuilt,
+                     reason: tag + ' clustering yielded no staves'
+                             + ' (afterSlope=' + afterSlope + ', samplingDx='
+                             + Math.max(4, Math.round(cc.samplingDxPerInterline * interline)) + ')' };
+        }
 
         // ---- step 6b: pair staves into grand-staff systems (PartsBuilder) ----
         var systems = pairStavesIntoSystems(staves, interline);
@@ -173,7 +224,8 @@
             staves:        staves,
             systems:       systems,
             slope:         sheetSlope,
-            filamentCount: totalBuilt
+            filamentCount: totalBuilt,
+            preset:        (opts && opts.relaxed) ? 'relaxed' : 'strict'
         };
     }
 
@@ -363,6 +415,10 @@
     // and emit each bucket as a Staff whose lines are sorted top-to-bottom.
     // -------------------------------------------------------------------
     function clusterFilamentsIntoStaves(filaments, width, height, interline) {
+        return clusterFilamentsIntoStavesWith(filaments, width, height, interline, C);
+    }
+
+    function clusterFilamentsIntoStavesWith(filaments, width, height, interline, cc) {
         // Overall horizontal extent across all filaments.
         var xLeft  = Infinity, xRight = -Infinity;
         for (var i = 0; i < filaments.length; i++) {
@@ -372,11 +428,11 @@
         if (!(xRight > xLeft)) return [];
 
         var samplingDx = Math.max(4,
-            Math.round(C.samplingDxPerInterline * interline));
+            Math.round(cc.samplingDxPerInterline * interline));
         var nCols = 0;
 
-        var interMin = interline * C.interlineMinRatio;
-        var interMax = interline * C.interlineMaxRatio;
+        var interMin = interline * cc.interlineMinRatio;
+        var interMax = interline * cc.interlineMaxRatio;
 
         // Union-find over filaments so co-occurrence in any 5-tuple merges
         // them into the same staff bucket. Simple path-compression DSU.
@@ -429,7 +485,7 @@
         }
 
         if (nCols === 0) return [];
-        var voteThreshold = Math.max(1, Math.round(nCols * C.voteRatio));
+        var voteThreshold = Math.max(1, Math.round(nCols * cc.voteRatio));
 
         // Collect filaments that passed the vote threshold, grouped by DSU
         // root.
