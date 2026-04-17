@@ -478,7 +478,13 @@
     position: relative;
     overflow-x: auto;
     overflow-y: hidden;
-    min-height: 120px;
+    /* Reserve the final piano height up-front so no visible jump
+       occurs between the CSS default and the JS-computed height.
+       adjustPianoSize() clamps whiteKeyHeight to [100, 160]px, so
+       a 152px wrap (140 keys + 12px padding) safely covers both
+       extremes without scrollbar flicker. */
+    height: 152px;
+    min-height: 152px;
 }
 
 .pm-omr-piano-inner {
