@@ -202,15 +202,72 @@
             return [{ id: 1, staves: [staves[0]], grandStaff: false }];
         }
 
+        // Special case: exactly two staves → piano grand staff by
+        // convention (single-line piano scores). Skip all threshold logic.
+        if (staves.length === 2) {
+            staves[0].partner    = staves[1];
+            staves[1].partner    = staves[0];
+            staves[0].staffIndex = 0;
+            staves[1].staffIndex = 1;
+            staves[0].systemIdx  = 0;
+            staves[1].systemIdx  = 0;
+            return [{
+                id:         1,
+                staves:     [staves[0], staves[1]],
+                grandStaff: true
+            }];
+        }
+
         // Compute gaps between consecutive staves.
         var gaps = [];
         for (var i = 0; i < staves.length - 1; i++) {
             gaps.push(staves[i + 1].yTop - staves[i].yBottom);
         }
 
-        // Dynamic threshold: if gap distribution is bimodal (clear split
-        // between small intra-system gaps and large inter-system gaps),
-        // use the midpoint; otherwise use the absolute IL-scaled cap.
+        // For an even number of staves, prefer pairing in (0,1)(2,3)...
+        // by splitting at the K/2 largest gaps. This is the universal
+        // piano layout (each system = grand staff) and avoids the
+        // fragile bimodal threshold when gap variance is modest.
+        if (staves.length >= 4 && staves.length % 2 === 0) {
+            var nPairs = staves.length / 2;
+            var nBreaks = nPairs - 1;
+            if (nBreaks > 0) {
+                var indexed = gaps.map(function (g, ix) { return { g: g, i: ix }; });
+                indexed.sort(function (a, b) { return b.g - a.g; });
+                var breakSet = {};
+                for (var b = 0; b < nBreaks && b < indexed.length; b++) {
+                    breakSet[indexed[b].i] = true;
+                }
+                // Walk staves, cutting at the top-N largest gap indices.
+                var systemsEven = [];
+                var curStart = 0;
+                for (var j = 0; j < staves.length - 1; j++) {
+                    if (breakSet[j]) {
+                        // Emit grand staff from curStart..j (must be 2 staves).
+                        if (j - curStart + 1 === 2) {
+                            pushGrandStaff(systemsEven, staves, curStart);
+                        } else {
+                            // Degenerate; fall back to singles.
+                            for (var q = curStart; q <= j; q++) {
+                                pushSingleStaff(systemsEven, staves, q);
+                            }
+                        }
+                        curStart = j + 1;
+                    }
+                }
+                // Tail pair.
+                if (staves.length - curStart === 2) {
+                    pushGrandStaff(systemsEven, staves, curStart);
+                } else {
+                    for (var q2 = curStart; q2 < staves.length; q2++) {
+                        pushSingleStaff(systemsEven, staves, q2);
+                    }
+                }
+                return systemsEven;
+            }
+        }
+
+        // Odd or 1-3 stave case: fall back to bimodal threshold.
         var sorted = gaps.slice().sort(function (a, b) { return a - b; });
         var minGap = sorted[0];
         var maxGap = sorted[sorted.length - 1];
@@ -220,7 +277,6 @@
 
         var threshold;
         if (maxGap > 1.8 * minGap && minGap < maxGrandStaffGap) {
-            // Bimodal: split at midpoint between the smallest and largest.
             threshold = Math.min(
                 maxGrandStaffGap,
                 (minGap + maxGap) / 2
@@ -229,41 +285,46 @@
             threshold = maxGrandStaffGap;
         }
 
-        // Greedy pairing walk.
         var systems = [];
         var k = 0;
         while (k < staves.length) {
-            var sys;
             if (k + 1 < staves.length) {
                 var gap = staves[k + 1].yTop - staves[k].yBottom;
                 if (gap >= minGrandStaffGap && gap < threshold) {
-                    sys = {
-                        id:         systems.length + 1,
-                        staves:     [staves[k], staves[k + 1]],
-                        grandStaff: true
-                    };
-                    staves[k].partner      = staves[k + 1];
-                    staves[k + 1].partner  = staves[k];
-                    staves[k].staffIndex   = 0; // upper (treble by default)
-                    staves[k + 1].staffIndex = 1; // lower (bass by default)
-                    staves[k].systemIdx    = systems.length;
-                    staves[k + 1].systemIdx = systems.length;
-                    systems.push(sys);
+                    pushGrandStaff(systems, staves, k);
                     k += 2;
                     continue;
                 }
             }
-            sys = {
-                id:         systems.length + 1,
-                staves:     [staves[k]],
-                grandStaff: false
-            };
-            staves[k].staffIndex = 0;
-            staves[k].systemIdx  = systems.length;
-            systems.push(sys);
+            pushSingleStaff(systems, staves, k);
             k++;
         }
         return systems;
+    }
+
+    function pushGrandStaff(systems, staves, k) {
+        var sys = {
+            id:         systems.length + 1,
+            staves:     [staves[k], staves[k + 1]],
+            grandStaff: true
+        };
+        staves[k].partner        = staves[k + 1];
+        staves[k + 1].partner    = staves[k];
+        staves[k].staffIndex     = 0;
+        staves[k + 1].staffIndex = 1;
+        staves[k].systemIdx      = systems.length;
+        staves[k + 1].systemIdx  = systems.length;
+        systems.push(sys);
+    }
+
+    function pushSingleStaff(systems, staves, k) {
+        staves[k].staffIndex = 0;
+        staves[k].systemIdx  = systems.length;
+        systems.push({
+            id:         systems.length + 1,
+            staves:     [staves[k]],
+            grandStaff: false
+        });
     }
 
     // -------------------------------------------------------------------
