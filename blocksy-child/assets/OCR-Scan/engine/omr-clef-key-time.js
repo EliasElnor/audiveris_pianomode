@@ -83,6 +83,25 @@
         if (!staves || staves.length === 0) return [];
         var interline = scale.interline;
 
+        // Piano-convention fallback: if we have an even number of staves
+        // and NONE have a partner set, pair them top-to-bottom so the
+        // grand-staff hint below can resolve treble/bass correctly.
+        // Otherwise clef detection must rely on noisy geometric cues alone.
+        if (staves.length >= 2 && staves.length % 2 === 0) {
+            var anyPartnered = false;
+            for (var k = 0; k < staves.length; k++) {
+                if (staves[k].partner) { anyPartnered = true; break; }
+            }
+            if (!anyPartnered) {
+                for (var kk = 0; kk < staves.length; kk += 2) {
+                    staves[kk].partner     = staves[kk + 1];
+                    staves[kk + 1].partner = staves[kk];
+                    if (staves[kk].staffIndex === undefined)     staves[kk].staffIndex     = 0;
+                    if (staves[kk + 1].staffIndex === undefined) staves[kk + 1].staffIndex = 1;
+                }
+            }
+        }
+
         var results = [];
         for (var i = 0; i < staves.length; i++) {
             var staff = staves[i];
