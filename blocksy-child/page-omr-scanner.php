@@ -752,31 +752,13 @@ $theme_uri = get_stylesheet_directory_uri();
 
         atApi.scoreLoaded.on(function(score) {
             if (!score.tracks || score.tracks.length === 0) return;
-            var pianoTrack = null;
-            var maxNotes = 0;
 
-            for (var i = 0; i < score.tracks.length; i++) {
-                var track = score.tracks[i];
-                if (track.name && track.name.toLowerCase().indexOf('piano') !== -1) {
-                    pianoTrack = track;
-                    break;
-                }
-                var noteCount = 0;
-                if (track.staves) {
-                    track.staves.forEach(function(staff) {
-                        if (staff.bars) staff.bars.forEach(function(bar) {
-                            if (bar.voices) bar.voices.forEach(function(voice) {
-                                if (voice.beats) voice.beats.forEach(function(beat) {
-                                    if (!beat.isRest && beat.notes) noteCount += beat.notes.length;
-                                });
-                            });
-                        });
-                    });
-                }
-                if (noteCount > maxNotes) { maxNotes = noteCount; pianoTrack = track; }
-            }
-
-            atApi.renderTracks([pianoTrack || score.tracks[0]]);
+            // Render ALL tracks: piano scores emitted by the engine use
+            // either (a) a single piano part with 2 staves (treble+bass)
+            // or (b) two single-staff parts when grand-staff pairing
+            // missed. Rendering every track guarantees both clefs show,
+            // and the AlphaTab layout groups them automatically.
+            atApi.renderTracks(score.tracks);
         });
 
         atApi.soundFontLoad.on(function(e) {
