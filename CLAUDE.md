@@ -2,15 +2,42 @@
 
 ## Current State (2026-04-17)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.17.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.18.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
 **STATUS:** Audiveris-port pipeline is authoritative (all 14 phases enabled by
-default via `OMR.flags`, legacy v6 heuristics only run as fallback). Waves 1
-and 2 address grand-staff correctness, false-positive note detection, and the
-playback engine (Tone.js + Salamander Grand Piano). Next focus is the Phase 4
-bass-staff miss (systems still sometimes render as single-staff because Phase 4
-fails to pair the bass) and the remaining note-classification mistakes.
+default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 3
+addresses two hard blockers user reported after Wave 2: (a) Phase 4 returns
+"Found 0 staves" on PDFs (silent failure, no diagnostics), and (b) Tone.js
+Salamander is wired up but playback is silent because AlphaTab
+`midiEventsPlayed` never fires without an event-type filter, and masterVolume
+was being muted before the Salamander samples finished loading.
+
+### Wave 3 fixes (v6.18.0 — 2026-04-17)
+1. **Surface Phase 4 failure reason** (`omr-engine.js` pipeline) — log the
+   `ctx.scale.reason` when scale is invalid and the `ctx.gridLines.reason`
+   when LinesRetriever bails. Both paths now `console.warn` the cause so
+   "Found 0 staves" stops being a silent failure. Also appends the reason
+   to the on-screen progress message when the legacy fallback kicks in.
+2. **Strengthen legacy StaffDetector on PDFs** (`omr-engine.js`
+   `OMR.StaffDetector.detect`) — width-floor for the ink row threshold
+   drops from 15 % → 6 % of the image width (PDFs rendered at scale 3.0
+   are very wide and staff lines rarely cover 15 % of that, once margins
+   are clipped). Added a `relaxed` retry pass that drops to 3 % with
+   `1.3·avgBlack` multiplier so we still emit staves when the first pass
+   misses.
+3. **AlphaTab midiEventsPlayedFilter** (`page-omr-scanner.php`) — 1.3.x
+   only emits MIDI events to listeners whose types are in this filter;
+   the default is empty so `pmHandleMidiEvent` never fired. Now
+   whitelists `NoteOn` / `NoteOff` explicitly (using
+   `alphaTab.midi.MidiEventType` when available, falling back to raw
+   `0x90` / `0x80`).
+4. **Safer Salamander mute sequence** (`page-omr-scanner.php`) — keep
+   AlphaTab's Sonivox synth AUDIBLE until the 29 Salamander mp3 samples
+   finish loading (onload callback). This closes the silent window
+   between `playerReady` and the sampler actually being ready. The
+   volume slider keeps AlphaTab `masterVolume` in sync during loading so
+   the slider always controls something audible.
 
 ### Wave 2 fixes (v6.17.0 — 2026-04-17)
 User report after v6.16.1: AlphaTab still showed a single treble clef on the
