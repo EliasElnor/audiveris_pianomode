@@ -2,16 +2,42 @@
 
 ## Current State (2026-04-17)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.18.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.19.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
 **STATUS:** Audiveris-port pipeline is authoritative (all 14 phases enabled by
-default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 3
-addresses two hard blockers user reported after Wave 2: (a) Phase 4 returns
-"Found 0 staves" on PDFs (silent failure, no diagnostics), and (b) Tone.js
-Salamander is wired up but playback is silent because AlphaTab
-`midiEventsPlayed` never fires without an event-type filter, and masterVolume
-was being muted before the Salamander samples finished loading.
+default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 4
+(v6.19.0) attacks the real root cause of "Found 0 staves" on PDFs that Wave 3's
+diagnostics exposed: the Audiveris-default slope / straightness / vertical-gap
+budgets in `omr-grid-lines.js` are authored for 300-DPI scans. PDFs rasterized
+via PDF.js at scale 3.0 produce 1-px antialiased staff lines whose rows get
+split by single-pixel breaks — the strict defaults throw the lines away. The
+"fewer than 5 filaments after slope filter" message on Chopin's Valse
+(interline=15, mainFore=1) is the smoking gun.
+
+### Wave 4 fixes (v6.19.0 — 2026-04-17)
+1. **Relaxed Phase 4 preset** (`omr-grid-lines.js`) — exposed a
+   `makeConstants(opts)` helper that clones the module-level `C` and,
+   when `opts.relaxed`, doubles `maxSlopeDeviation` (0.025 → 0.05 rad),
+   grows `maxLineResidual` (1.25 → 2.0 px), bumps `maxVerticalGap`
+   (1 → 2) so the filament factory bridges single-row breaks in
+   antialiased lines, drops `minRunPerInterline` (0.25 → 0.20) and
+   `voteRatio` (0.40 → 0.30), and eases `minLengthPerInterline`
+   (5.0 → 4.0). Strict preset is untouched for high-quality scans.
+2. **retrieveStaves accepts opts** — threaded `cc` (constants copy)
+   through `clusterFilamentsIntoStavesWith` so the relaxed preset also
+   affects the clustering vote. Kept the old
+   `_clusterFilamentsIntoStaves` export for external callers.
+3. **Filament-pipeline diagnostics** — the `reason` field now reports
+   per-stage counts (built, after length+thickness, after straightness,
+   after slope) plus the computed sheetSlope and the preset tag. No more
+   guessing which filter killed the filaments.
+4. **Engine retry on Phase 4 failure** (`omr-engine.js`) — if the strict
+   pass returns zero staves, the engine automatically retries
+   `retrieveStaves(..., {relaxed: true})` before falling back to the
+   legacy detector. When the relaxed pass recovers staves the normal
+   Phase 4 path continues into Phase 5+ (bars, seeds, beams, heads,
+   ledgers, stems) — unlike the legacy fallback which skips those.
 
 ### Wave 3 fixes (v6.18.0 — 2026-04-17)
 1. **Surface Phase 4 failure reason** (`omr-engine.js` pipeline) — log the
