@@ -982,25 +982,46 @@ $theme_uri = get_stylesheet_directory_uri();
         }
 
         pianoBuilt = true;
-        // Delay adjustPianoSize to ensure container is laid out after display:block
-        setTimeout(adjustPianoSize, 50);
-        setTimeout(adjustPianoSize, 300);
 
-        // Resize listener
+        // Prevent the visible height jump reported by the user:
+        //   1. Hide the piano until it has been sized against the real
+        //      container width (avoids the 140px CSS default flashing
+        //      before the JS-computed height kicks in).
+        //   2. Try sizing synchronously (common case: container laid out).
+        //   3. Fall back to requestAnimationFrame when the wrap has zero
+        //      width because display:none -> block just happened.
+        //   4. Use ResizeObserver so future resizes update the keys
+        //      without the previous setTimeout(50/300) double-reflow jump.
+        pianoEl.style.visibility = 'hidden';
+        if (!adjustPianoSize()) {
+            requestAnimationFrame(function () {
+                if (!adjustPianoSize()) {
+                    requestAnimationFrame(adjustPianoSize);
+                }
+            });
+        }
+
         if (!pianoEl._resizeListenerAdded) {
             pianoEl._resizeListenerAdded = true;
-            var resizeTimeout;
-            window.addEventListener('resize', function() {
-                clearTimeout(resizeTimeout);
-                resizeTimeout = setTimeout(adjustPianoSize, 150);
-            });
+            if (typeof ResizeObserver === 'function') {
+                var ro = new ResizeObserver(function () { adjustPianoSize(); });
+                ro.observe(pianoWrap);
+            } else {
+                var resizeTimeout;
+                window.addEventListener('resize', function () {
+                    clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(adjustPianoSize, 150);
+                });
+            }
         }
     }
 
+    // Returns true when sizing was applied, false when the container
+    // wasn't laid out yet (caller should retry on the next frame).
     function adjustPianoSize() {
-        if (!pianoWrap || !pianoEl) return;
+        if (!pianoWrap || !pianoEl) return false;
         var containerWidth = pianoWrap.clientWidth;
-        if (containerWidth === 0) return;
+        if (containerWidth === 0) return false;
 
         // Count white keys: 52 for full 88-key piano
         var whiteKeyCount = 52;
@@ -1017,6 +1038,8 @@ $theme_uri = get_stylesheet_directory_uri();
 
         pianoEl.style.width = '100%';
         pianoEl.style.height = whiteKeyHeight + 'px';
+        pianoEl.style.visibility = 'visible';
+        return true;
     }
 
     function highlightPianoKey(midiNote, on) {
