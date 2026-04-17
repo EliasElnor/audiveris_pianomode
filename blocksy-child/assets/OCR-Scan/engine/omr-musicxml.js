@@ -140,35 +140,79 @@
     }
 
     // -------------------------------------------------------------------
-    // Collect "parts" from sig systems. A grand-staff system (2 staves)
-    // becomes one piano part with 2 internal staves. Otherwise each
-    // staff is its own part.
+    // Collect "parts" from sig systems.
+    //
+    // Piano grand-staff mode: if ANY system has >= 2 staves we assume
+    // the whole piece is a piano grand staff and emit a single <part>
+    // with <staves>2</staves>. If every system has only 1 staff but
+    // the total staff count across all systems is even (2, 4, ...) we
+    // still pair them — this catches the failure mode where Phase 4
+    // grid-lines pairing mis-classified the grand-staff gap.
+    //
+    // Otherwise (odd or single-staff total) → one part per staff.
     // -------------------------------------------------------------------
     function collectParts(sig) {
         var parts = [];
-        // We assume the same staff layout repeats across systems for
-        // piano music — pair the first system's staves and reuse the
-        // grouping for every measure across all systems.
         if (sig.systems.length === 0) return parts;
-        var firstSys = sig.systems[0];
-        if (firstSys.staves.length === 2) {
-            // Single grand-staff piano part.
+
+        var maxStaves = 0;
+        for (var s0 = 0; s0 < sig.systems.length; s0++) {
+            if (sig.systems[s0].staves.length > maxStaves) {
+                maxStaves = sig.systems[s0].staves.length;
+            }
+        }
+
+        if (maxStaves >= 2) {
+            // Use the first system with >= 2 staves as the staffMap
+            // template (its clef/key survives all systems).
+            var templateSys = null;
+            for (var s1 = 0; s1 < sig.systems.length; s1++) {
+                if (sig.systems[s1].staves.length >= 2) {
+                    templateSys = sig.systems[s1];
+                    break;
+                }
+            }
             parts.push({
                 name:   'Piano',
                 staves: 2,
-                staffMap: firstSys.staves,
+                staffMap: [templateSys.staves[0], templateSys.staves[1]],
                 allMeasures: collectGrandStaffMeasures(sig)
             });
-        } else {
-            // One part per staff.
-            for (var s = 0; s < firstSys.staves.length; s++) {
-                parts.push({
-                    name:   'Staff ' + (s + 1),
-                    staves: 1,
-                    staffMap: [firstSys.staves[s]],
-                    allMeasures: collectSingleStaffMeasures(sig, s)
-                });
+            return parts;
+        }
+
+        // maxStaves === 1: flatten every staff across systems.
+        var allStaves = [];
+        for (var s2 = 0; s2 < sig.systems.length; s2++) {
+            for (var t = 0; t < sig.systems[s2].staves.length; t++) {
+                allStaves.push(sig.systems[s2].staves[t]);
             }
+        }
+
+        if (allStaves.length >= 2 && allStaves.length % 2 === 0) {
+            // Even count → assume grand-staff pairing mis-fired; pair
+            // top-to-bottom. Tag staves with staffIndex (0=upper,1=lower)
+            // so staffIndexInPart can route voices by position.
+            for (var p = 0; p < allStaves.length; p += 2) {
+                if (allStaves[p].staffIndex === undefined)   allStaves[p].staffIndex   = 0;
+                if (allStaves[p + 1].staffIndex === undefined) allStaves[p + 1].staffIndex = 1;
+            }
+            parts.push({
+                name:   'Piano',
+                staves: 2,
+                staffMap: [allStaves[0], allStaves[1]],
+                allMeasures: collectGrandStaffMeasures(sig)
+            });
+            return parts;
+        }
+
+        for (var s = 0; s < allStaves.length; s++) {
+            parts.push({
+                name:   allStaves.length === 1 ? 'Piano' : 'Staff ' + (s + 1),
+                staves: 1,
+                staffMap: [allStaves[s]],
+                allMeasures: collectSingleStaffMeasures(sig, s)
+            });
         }
         return parts;
     }
