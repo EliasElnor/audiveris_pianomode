@@ -225,7 +225,8 @@ OMR.ImageProcessor = {
  * ========================================================================= */
 OMR.StaffDetector = {
 
-    detect: function(bin, width, height) {
+    detect: function(bin, width, height, scaleHint, opts) {
+        opts = opts || {};
         var hProj = new Uint32Array(height);
         var x, y, idx, i;
         for (y = 0; y < height; y++) {
@@ -240,7 +241,13 @@ OMR.StaffDetector = {
         var totalBlack = 0;
         for (y = 0; y < height; y++) totalBlack += hProj[y];
         var avgBlack = totalBlack / height;
-        var lineThreshold = Math.max(avgBlack * 2.0, width * 0.15);
+        // Width-floor tuned for 300dpi image scans. On PDFs rendered at
+        // scale 3.0 the pages can be very wide (2000+ px) and staff lines
+        // rarely span a full 15% of that width once margins are cropped,
+        // so we use a softer floor. "relaxed" drops it further for retry.
+        var widthFloorRatio = opts.relaxed ? 0.03 : 0.06;
+        var mulFactor       = opts.relaxed ? 1.3  : 2.0;
+        var lineThreshold = Math.max(avgBlack * mulFactor, width * widthFloorRatio);
 
         var lineRows = [];
         for (y = 0; y < height; y++) {
@@ -2046,35 +2053,42 @@ OMR.Engine = {
                 return self._yieldThen(function() {
                     // Phase 2: ScaleBuilder port. Runs unconditionally so the
                     // result is available for debugging and for phases 3..14.
-                    // Legacy StaffDetector still drives staff detection until
-                    // Phase 4 flips OMR.flags.useNewStaff.
                     if (OMR.Scale && typeof OMR.Scale.build === 'function') {
                         try {
                             ctx.scale = OMR.Scale.build(ctx.bin, ctx.w, ctx.h);
                         } catch (scaleErr) {
-                            // Scale build failure: fall back to legacy pipeline.
-                            ctx.scale = null;
+                            ctx.scale = { valid: false, reason: 'exception: ' + (scaleErr && scaleErr.message) };
                         }
+                    }
+                    if (ctx.scale && !ctx.scale.valid) {
+                        // Surface scale failure so operators see WHY downstream dies.
+                        console.warn('[OMR] Scale invalid:', ctx.scale.reason);
+                    } else if (ctx.scale) {
+                        console.info('[OMR] Scale: interline=' + ctx.scale.interline
+                                     + 'px, mainFore=' + ctx.scale.mainFore
+                                     + 'px, beam=' + ctx.scale.beamThickness + 'px');
                     }
                     report(2, 'Detecting staves...', 25);
                     return ctx;
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
-                    // Phase 4: run the new LinesRetriever + ClustersRetriever
-                    // port alongside the legacy StaffDetector. While
-                    // OMR.flags.useNewStaff is false the result is used only
-                    // for the debug overlay; once validated, flipping the
-                    // flag will replace the legacy path.
+                    // Phase 4: LinesRetriever + ClustersRetriever.
+                    var glReason = null;
                     if (OMR.GridLines && typeof OMR.GridLines.retrieveStaves === 'function'
                             && ctx.scale && ctx.scale.valid) {
                         try {
                             ctx.gridLines = OMR.GridLines.retrieveStaves(
                                 ctx.bin, ctx.w, ctx.h, ctx.scale);
+                            if (ctx.gridLines && ctx.gridLines.reason) {
+                                glReason = ctx.gridLines.reason;
+                            }
                         } catch (glErr) {
-                            // GridLines retrieval failed: leave gridLines null.
                             ctx.gridLines = null;
+                            glReason = 'exception: ' + (glErr && glErr.message);
                         }
+                    } else if (!ctx.scale || !ctx.scale.valid) {
+                        glReason = 'scale invalid (' + (ctx.scale ? ctx.scale.reason : 'null') + ')';
                     }
 
                     var useNew = !!(OMR.flags && OMR.flags.useNewStaff
@@ -2083,16 +2097,8 @@ OMR.Engine = {
                                     && ctx.gridLines.staves.length > 0);
 
                     if (useNew) {
-                        // Use Phase 4 staves. The legacy StaffDetector
-                        // output shape exposes staves + systems + spacing;
-                        // we adapt the GridLines output to match.
                         ctx.staves = ctx.gridLines.staves;
                         ctx.staffSpacing = ctx.gridLines.staves[0].interline;
-                        // Use Phase 4 grand-staff systems if available.
-                        // GridLines.pairStavesIntoSystems already detects
-                        // grand-staff pairs, sets staff.partner / staffIndex
-                        // / systemIdx. Only fall back to one-per-staff if
-                        // the Phase 4 module didn't return systems.
                         ctx.systems = (ctx.gridLines.systems
                                        && ctx.gridLines.systems.length > 0)
                             ? ctx.gridLines.systems
@@ -2101,8 +2107,19 @@ OMR.Engine = {
                             });
                         report(2, 'Found ' + ctx.staves.length + ' staves (Phase 4 GridLines). Removing staff lines...', 35);
                     } else {
-                        var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h);
-                        report(2, 'Found ' + staffResult.staves.length + ' staves. Removing staff lines...', 35);
+                        if (glReason) {
+                            console.warn('[OMR] Phase 4 GridLines yielded no staves:', glReason);
+                        }
+                        // Hand the scale to the legacy detector so it can seed
+                        // spacing-aware defaults instead of guessing from scratch.
+                        var hint = (ctx.scale && ctx.scale.valid) ? ctx.scale : null;
+                        var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint);
+                        if (staffResult.staves.length === 0) {
+                            console.warn('[OMR] Legacy StaffDetector found 0 staves; retrying with relaxed thresholds.');
+                            staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint, { relaxed: true });
+                        }
+                        var suffix = glReason ? ' (legacy fallback; Phase 4 reason: ' + glReason + ')' : ' (legacy)';
+                        report(2, 'Found ' + staffResult.staves.length + ' staves' + suffix + '. Removing staff lines...', 35);
                         ctx.staves = staffResult.staves;
                         ctx.staffSpacing = staffResult.staffSpacing;
                         ctx.systems = staffResult.systems;
