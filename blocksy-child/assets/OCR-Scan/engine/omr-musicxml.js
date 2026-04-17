@@ -156,15 +156,36 @@
         if (sig.systems.length === 0) return parts;
 
         var maxStaves = 0;
+        var totalStaves = 0;
         for (var s0 = 0; s0 < sig.systems.length; s0++) {
             if (sig.systems[s0].staves.length > maxStaves) {
                 maxStaves = sig.systems[s0].staves.length;
             }
+            totalStaves += sig.systems[s0].staves.length;
         }
 
-        if (maxStaves >= 2) {
-            // Use the first system with >= 2 staves as the staffMap
-            // template (its clef/key survives all systems).
+        // Piano-mode decision: treat the whole piece as a single piano
+        // part with <staves>2</staves> whenever any system shows a
+        // grand staff, OR whenever every system is single-staff but
+        // the grand total is even (Phase 4 miscalibration), OR whenever
+        // we have more than one single-staff system in a row (common
+        // in Bright Eyes-style scans where Phase 4 collapses the bass
+        // staff on every other system). Single-staff-only pieces with
+        // exactly 1 staff stay as a single-staff part.
+        var pianoMode = (maxStaves >= 2)
+            || (totalStaves >= 2 && totalStaves % 2 === 0)
+            || (sig.systems.length >= 2 && maxStaves === 1);
+
+        if (pianoMode) {
+            // Stamp every staff across every system with a staffIndex
+            // so writeMeasureContent -> staffIndexInPart can route the
+            // voices correctly even when a system is missing its
+            // partner staff (the missing staff gets a measure-rest on
+            // the fly).
+            normalizeGrandStaffIndices(sig);
+
+            // Pick a template system — prefer the first with >= 2 staves
+            // so both clefs and key signatures come from a real pair.
             var templateSys = null;
             for (var s1 = 0; s1 < sig.systems.length; s1++) {
                 if (sig.systems[s1].staves.length >= 2) {
@@ -172,49 +193,53 @@
                     break;
                 }
             }
+            if (!templateSys) templateSys = sig.systems[0];
+
+            // Staff map: always treble-top + bass-bottom. When the
+            // template system only has 1 staff we reuse it for both
+            // slots so writeFirstAttributes still emits bass clef on
+            // staff 2 via the fallback (s === 1 ? 'BASS' : 'TREBLE').
+            var upper = templateSys.staves[0];
+            var lower = templateSys.staves[1] || upper;
             parts.push({
                 name:   'Piano',
                 staves: 2,
-                staffMap: [templateSys.staves[0], templateSys.staves[1]],
+                staffMap: [upper, lower],
                 allMeasures: collectGrandStaffMeasures(sig)
             });
             return parts;
         }
 
-        // maxStaves === 1: flatten every staff across systems.
-        var allStaves = [];
-        for (var s2 = 0; s2 < sig.systems.length; s2++) {
-            for (var t = 0; t < sig.systems[s2].staves.length; t++) {
-                allStaves.push(sig.systems[s2].staves[t]);
-            }
-        }
-
-        if (allStaves.length >= 2 && allStaves.length % 2 === 0) {
-            // Even count → assume grand-staff pairing mis-fired; pair
-            // top-to-bottom. Tag staves with staffIndex (0=upper,1=lower)
-            // so staffIndexInPart can route voices by position.
-            for (var p = 0; p < allStaves.length; p += 2) {
-                if (allStaves[p].staffIndex === undefined)   allStaves[p].staffIndex   = 0;
-                if (allStaves[p + 1].staffIndex === undefined) allStaves[p + 1].staffIndex = 1;
-            }
-            parts.push({
-                name:   'Piano',
-                staves: 2,
-                staffMap: [allStaves[0], allStaves[1]],
-                allMeasures: collectGrandStaffMeasures(sig)
-            });
-            return parts;
-        }
-
-        for (var s = 0; s < allStaves.length; s++) {
-            parts.push({
-                name:   allStaves.length === 1 ? 'Piano' : 'Staff ' + (s + 1),
-                staves: 1,
-                staffMap: [allStaves[s]],
-                allMeasures: collectSingleStaffMeasures(sig, s)
-            });
-        }
+        // Single staff only (rare).
+        var only = sig.systems[0].staves[0];
+        parts.push({
+            name:   'Piano',
+            staves: 1,
+            staffMap: [only],
+            allMeasures: collectSingleStaffMeasures(sig, 0)
+        });
         return parts;
+    }
+
+    // Stamp every staff in every system with a staffIndex so
+    // staffIndexInPart's staffIndex fallback can route voices coming
+    // from systems that never went through Phase 4 pairStavesIntoSystems.
+    // Upper staff (first in y order) = 0, lower = 1. Single-staff
+    // systems default their lone staff to 0 (treble) by convention.
+    function normalizeGrandStaffIndices(sig) {
+        for (var i = 0; i < sig.systems.length; i++) {
+            var sys = sig.systems[i];
+            for (var j = 0; j < sys.staves.length; j++) {
+                var st = sys.staves[j];
+                if (st.staffIndex !== undefined) continue;
+                if (sys.staves.length >= 2) {
+                    // Order by yTop so the top staff is 0.
+                    st.staffIndex = (j === 0) ? 0 : (j === sys.staves.length - 1 ? 1 : j);
+                } else {
+                    st.staffIndex = 0;
+                }
+            }
+        }
     }
 
     function collectGrandStaffMeasures(sig) {
