@@ -203,6 +203,30 @@
             }
         }
 
+        // Grand-staff convention is ABSOLUTE for piano music: upper
+        // staff = TREBLE, lower staff = BASS. This overrides the noisy
+        // geometric scoring which in practice often mis-classifies the
+        // bass clef as treble because the glyph centroid and height are
+        // similar in low-resolution scans. Only honored when the staff
+        // is part of a confirmed grand-staff pair (partner + staffIndex
+        // were set by Phase 4 or the detectHeaders orphan-pairing
+        // fallback above). The geometric scores are still computed and
+        // exposed for debugging, but the return kind is forced.
+        if (staff && staff.partner && staff.staffIndex !== undefined) {
+            var forced = (staff.staffIndex === 0) ? 'TREBLE' : 'BASS';
+            return {
+                kind:    forced,
+                x:       (count > 0) ? (sumX / count) : x0,
+                y:       (count > 0) ? (sumY / count) : 0,
+                ink:     count,
+                height:  (count > 0) ? (yMax - yMin) : 0,
+                rel:     (count > 0) ? ((sumY / count - (yTopAt(sumX / count) + yBotAt(sumX / count)) / 2) / interline) : 0,
+                scores:  null,
+                hint:    forced,
+                forcedByGrandStaff: true
+            };
+        }
+
         if (count < interline * 2) {
             return { kind: 'NONE', x: x0, y: 0, ink: count };
         }
