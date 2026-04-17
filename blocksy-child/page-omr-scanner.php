@@ -570,7 +570,19 @@ $theme_uri = get_stylesheet_directory_uri();
             // Build the piano keyboard now that the result panel is visible
             if (!pianoBuilt && pianoEl) buildPiano();
 
-            initAlphaTab(result.musicxmlUrl);
+            // Defer AlphaTab init by one frame so the flex layout
+            // inside .pm-omr-alphatab-wrap is fully resolved and
+            // atMain has a non-zero offsetWidth. Avoids the
+            // "AlphaTab container was invisible while autosizing"
+            // warning that would otherwise fire on first scan.
+            var mxlUrl = result.musicxmlUrl;
+            requestAnimationFrame(function () {
+                if (atMain.offsetWidth > 0) {
+                    initAlphaTab(mxlUrl);
+                } else {
+                    requestAnimationFrame(function () { initAlphaTab(mxlUrl); });
+                }
+            });
 
             scanBtn.textContent = 'Analyse & Convert to Playable Score';
             scanBtn.disabled = false;
@@ -640,6 +652,102 @@ $theme_uri = get_stylesheet_directory_uri();
             previewToggle.textContent = 'Show';
         }
     });
+
+    // -------------------------------------------------------
+    // Salamander Grand Piano sampler (Tone.js)
+    //
+    // AlphaTab's built-in Sonivox SF2 sounds cheap and plasticky. The
+    // rest of the site uses the Tone.js Salamander samples (see
+    // concert-hall.js, sightreading-engine.js, virtual-piano/*.js) so
+    // the scanner playback should match: real piano, real dynamics.
+    //
+    // Wiring strategy: we keep AlphaTab running for tempo / cursor /
+    // scrolling, mute its internal synth (masterVolume = 0), and on
+    // every midiEventsPlayed tick we route NoteOn / NoteOff to a
+    // Tone.Sampler. The UI volume slider drives a Tone.Volume node
+    // instead of AlphaTab's master.
+    // -------------------------------------------------------
+    var pmSampler = null;          // Tone.Sampler
+    var pmSamplerVol = null;       // Tone.Volume (user-controlled)
+    var pmSamplerLoaded = false;
+    var pmActiveNotes = {};        // midi -> release callback (for cleanup)
+
+    function midiToNoteName(midi) {
+        var names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+        return names[midi % 12] + (Math.floor(midi / 12) - 1);
+    }
+
+    function ensureSalamander() {
+        if (pmSampler || typeof Tone === 'undefined') return pmSampler;
+        try {
+            pmSamplerVol = new Tone.Volume(linearToDb(0.5)).toDestination();
+            pmSampler = new Tone.Sampler({
+                urls: {
+                    'A0':  'A0.mp3',  'C1':  'C1.mp3',
+                    'D#1': 'Ds1.mp3', 'F#1': 'Fs1.mp3', 'A1':  'A1.mp3',
+                    'C2':  'C2.mp3', 'D#2': 'Ds2.mp3', 'F#2': 'Fs2.mp3', 'A2':  'A2.mp3',
+                    'C3':  'C3.mp3', 'D#3': 'Ds3.mp3', 'F#3': 'Fs3.mp3', 'A3':  'A3.mp3',
+                    'C4':  'C4.mp3', 'D#4': 'Ds4.mp3', 'F#4': 'Fs4.mp3', 'A4':  'A4.mp3',
+                    'C5':  'C5.mp3', 'D#5': 'Ds5.mp3', 'F#5': 'Fs5.mp3', 'A5':  'A5.mp3',
+                    'C6':  'C6.mp3', 'D#6': 'Ds6.mp3', 'F#6': 'Fs6.mp3', 'A6':  'A6.mp3',
+                    'C7':  'C7.mp3', 'D#7': 'Ds7.mp3', 'F#7': 'Fs7.mp3', 'A7':  'A7.mp3',
+                    'C8':  'C8.mp3'
+                },
+                baseUrl: 'https://tonejs.github.io/audio/salamander/',
+                release: 1,
+                onload: function () { pmSamplerLoaded = true; }
+            }).connect(pmSamplerVol);
+        } catch (e) {
+            pmSampler = null;
+        }
+        return pmSampler;
+    }
+
+    function linearToDb(v) {
+        if (v <= 0) return -Infinity;
+        return 20 * Math.log10(v);
+    }
+
+    function pmSamplerStopAll() {
+        if (!pmSampler) return;
+        try { pmSampler.releaseAll(); } catch (e) {}
+        pmActiveNotes = {};
+    }
+
+    // Route an AlphaTab midi event (command + data1 + data2) to the
+    // Salamander sampler. Accepts both the raw MIDI status-byte form
+    // and AlphaTab's richer event object with {type, noteKey, velocity}.
+    function pmHandleMidiEvent(ev) {
+        if (!pmSampler || !pmSamplerLoaded) return;
+        // AlphaTab 1.3.x MidiEvent fields:
+        //   type (MidiEventType), command (0x80..0xFF), data1, data2,
+        //   noteKey, velocity, channel.
+        var note     = (ev.noteKey !== undefined) ? ev.noteKey : ev.data1;
+        var velocity = (ev.velocity !== undefined) ? ev.velocity : ev.data2;
+        var cmd      = (ev.command !== undefined) ? ev.command : ev.type;
+        if (note === undefined || note < 0 || note > 127) return;
+
+        // Channel 10 (index 9) = drums in GM — skip.
+        var channel = (ev.channel !== undefined) ? ev.channel : ((cmd & 0x0F) || 0);
+        if (channel === 9) return;
+
+        var high = (typeof cmd === 'number') ? (cmd & 0xF0) : 0;
+        // MidiEventType enum in AlphaTab: NoteOn = 144 (0x90), NoteOff = 128 (0x80).
+        var isNoteOn  = (high === 0x90) && velocity > 0;
+        var isNoteOff = (high === 0x80) || (high === 0x90 && velocity === 0);
+
+        if (isNoteOn) {
+            var name = midiToNoteName(note);
+            var vel = Math.max(0, Math.min(1, (velocity || 100) / 127));
+            try { pmSampler.triggerAttack(name, Tone.now(), vel); } catch (e) {}
+            pmActiveNotes[note] = true;
+        } else if (isNoteOff) {
+            if (pmActiveNotes[note]) {
+                try { pmSampler.triggerRelease(midiToNoteName(note), Tone.now()); } catch (e) {}
+                delete pmActiveNotes[note];
+            }
+        }
+    }
 
     // -------------------------------------------------------
     // AlphaTab Initialization
@@ -778,11 +886,45 @@ $theme_uri = get_stylesheet_directory_uri();
             atProgress.style.display = 'none';
             atPlay.disabled = false;
             atStop.disabled = false;
-            atApi.masterVolume = atVolume.value / 100;
+            // Kick the sampler off early so samples are fetched before
+            // the user hits Play (loading 29 mp3 files takes ~2-4 s).
+            // When Tone.js is unavailable (ad-blocker, CDN issue) we
+            // leave AlphaTab's Sonivox synth audible as fallback so
+            // playback still produces sound — ugly, but audible.
+            ensureSalamander();
+            if (pmSampler) {
+                try { atApi.masterVolume = 0; } catch (e) {}
+                applyPmVolume(atVolume.value / 100);
+            } else {
+                try { atApi.masterVolume = atVolume.value / 100; } catch (e) {}
+            }
         });
 
-        atPlay.onclick = function() { atApi.playPause(); };
-        atStop.onclick = function() { atApi.stop(); };
+        // Every AlphaTab time tick emits the midi events that would have
+        // been played by the internal synth. We re-route them to the
+        // Salamander sampler instead (internal synth is muted above).
+        if (atApi.midiEventsPlayed && atApi.midiEventsPlayed.on) {
+            atApi.midiEventsPlayed.on(function (args) {
+                if (!args || !args.events) return;
+                for (var i = 0; i < args.events.length; i++) {
+                    pmHandleMidiEvent(args.events[i]);
+                }
+            });
+        }
+
+        atPlay.onclick = function() {
+            // Tone requires a user gesture to unlock AudioContext.
+            if (typeof Tone !== 'undefined' && Tone.context
+                && Tone.context.state !== 'running') {
+                try { Tone.start(); } catch (e) {}
+            }
+            ensureSalamander();
+            atApi.playPause();
+        };
+        atStop.onclick = function() {
+            atApi.stop();
+            pmSamplerStopAll();
+        };
 
         atApi.playerStateChanged.on(function(e) {
             if (e.state === alphaTab.synth.PlayerState.Playing) {
@@ -792,6 +934,9 @@ $theme_uri = get_stylesheet_directory_uri();
                 // Clear piano + preview highlights when stopped/paused
                 clearPianoKeys();
                 clearPreviewHighlights();
+                // Stop any sustaining Salamander voices so pause/stop
+                // don't leave a note ringing.
+                pmSamplerStopAll();
             }
         });
 
@@ -858,7 +1003,31 @@ $theme_uri = get_stylesheet_directory_uri();
             atApi.countInVolume = countinBtn.classList.contains('active') ? 1 : 0;
         };
 
-        atVolume.oninput = function() { atApi.masterVolume = this.value / 100; };
+        atVolume.oninput = function() {
+            // When the Salamander sampler exists, the slider drives
+            // its Tone.Volume node. Without it (Tone.js unavailable),
+            // fall back to AlphaTab's own master volume so the slider
+            // still controls something audible.
+            if (pmSampler) {
+                applyPmVolume(this.value / 100);
+            } else {
+                try { atApi.masterVolume = this.value / 100; } catch (e) {}
+            }
+        };
+    }
+
+    // Map the 0..1 UI slider to the Tone.Volume node in dB. 0 -> -Infinity
+    // (silent), 1 -> 0 dB (sampler nominal), mapped with a mild taper so
+    // low slider positions stay audible.
+    function applyPmVolume(v) {
+        if (!pmSamplerVol) return;
+        if (v <= 0) {
+            pmSamplerVol.volume.value = -Infinity;
+        } else {
+            // Cube-root taper: more resolution at low volumes.
+            var taper = Math.pow(v, 1 / 1.7);
+            pmSamplerVol.volume.value = 20 * Math.log10(taper);
+        }
     }
 
     // -------------------------------------------------------
@@ -876,6 +1045,9 @@ $theme_uri = get_stylesheet_directory_uri();
             atApi = null;
             atMain.innerHTML = '';
         }
+        // Release any Salamander voices still ringing from the
+        // previous scan so a new load starts from silence.
+        pmSamplerStopAll();
 
         // Revoke object URLs to free memory
         if (lastResult) {
