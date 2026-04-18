@@ -80,13 +80,42 @@
      *                            (blank, too low/high resolution).
      */
     function build(bin, width, height) {
-        var maxBlack = Math.max(3, Math.round(height * C.maxBlackHeightRatio));
-        var maxWhite = Math.max(3, Math.round(height * C.maxWhiteHeightRatio));
+        // Defensive input validation. Some upstream paths (blank pages,
+        // corrupt PDFs, tiny cover thumbnails) feed non-integer or
+        // zero-sized buffers — without this guard we throw "Invalid
+        // typed array length" out of the Uint32Array allocations below,
+        // which the engine surfaces as "exception: Invalid array length"
+        // and which kills the entire pipeline instead of letting the
+        // page be skipped cleanly.
+        if (!bin || !isFinite(width) || !isFinite(height)
+                || width < 4 || height < 4
+                || bin.length < width * height) {
+            return {
+                valid: false,
+                reason: 'bad input (w=' + width + ', h=' + height
+                        + ', binLen=' + (bin ? bin.length : 'null') + ')',
+                interline: 0, mainFore: 0, beamThickness: 0, beamIsGuess: false
+            };
+        }
+
+        var maxBlack = Math.max(3, Math.min(65535,
+                                            Math.round(height * C.maxBlackHeightRatio)));
+        var maxWhite = Math.max(3, Math.min(65535,
+                                            Math.round(height * C.maxWhiteHeightRatio)));
         var maxCombo = maxBlack + maxWhite;
 
-        var blackHist = new Uint32Array(maxBlack + 1);
-        var whiteHist = new Uint32Array(maxWhite + 1);
-        var comboHist = new Uint32Array(maxCombo + 1);
+        var blackHist, whiteHist, comboHist;
+        try {
+            blackHist = new Uint32Array(maxBlack + 1);
+            whiteHist = new Uint32Array(maxWhite + 1);
+            comboHist = new Uint32Array(maxCombo + 1);
+        } catch (allocErr) {
+            return {
+                valid: false,
+                reason: 'histogram alloc failed (' + (allocErr && allocErr.message) + ')',
+                interline: 0, mainFore: 0, beamThickness: 0, beamIsGuess: false
+            };
+        }
 
         var totalBlackPixels = 0;
         var totalPixels      = width * height;
