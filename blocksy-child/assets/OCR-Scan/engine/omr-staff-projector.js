@@ -200,6 +200,7 @@
             barlines:   barlines,
             measures:   measures,
             staffId:    staff.id,
+            staff:      staff,
             interline:  interline
         };
     }
