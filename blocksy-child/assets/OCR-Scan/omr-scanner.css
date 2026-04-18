@@ -464,6 +464,60 @@
 }
 
 /* =====================================================
+   PIANO OPTIONS TOOLBAR — above the keyboard
+   ===================================================== */
+.pm-omr-piano-options {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    background: linear-gradient(135deg, #0D0D0D 0%, #151515 100%);
+    border-top: 1px solid rgba(215, 191, 129, 0.12);
+    border-bottom: 1px solid rgba(215, 191, 129, 0.12);
+}
+.pm-omr-piano-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--pm-font, 'Montserrat'), sans-serif;
+    font-size: 12px;
+    color: #c9c9c9;
+}
+.pm-omr-piano-option label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    color: #D7BF81;
+}
+.pm-omr-piano-option select {
+    background: #1a1a1a;
+    color: #e8e8e8;
+    border: 1px solid rgba(215, 191, 129, 0.35);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    outline: none;
+}
+.pm-omr-piano-option select:hover,
+.pm-omr-piano-option select:focus {
+    border-color: #D7BF81;
+}
+.pm-omr-preview-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 12px;
+}
+.pm-omr-preview-page {
+    font-size: 12px;
+    color: #c9c9c9;
+    min-width: 90px;
+    text-align: center;
+}
+
+/* =====================================================
    PREMIUM PIANO KEYBOARD — Sightreading-quality
    Realistic Grand Piano Look with responsive sizing
    ===================================================== */
