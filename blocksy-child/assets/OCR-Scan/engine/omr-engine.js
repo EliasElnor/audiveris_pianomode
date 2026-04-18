@@ -335,15 +335,59 @@ OMR.ImageProcessor = {
     MAX_STITCH_W:       4800,
     MAX_STITCH_H:       18000,
     STITCH_SEPARATOR:   40, // white px between pages
+    // Cover / blank / lyrics-only pages have no staff lines, so
+    // `_loadPdfPageAdaptive` keeps them at probe scale and reports
+    // probeInterline = 0. Pages whose interline falls outside the
+    // musical range [11, 55] are almost always title-only or very
+    // heavily text-dominated — scanning them would produce phantom
+    // notes from text stems. We drop them before stitching.
+    MIN_VALID_INTERLINE: 11,
+    MAX_VALID_INTERLINE: 55,
+    _isMusicPage: function(page) {
+        var il = page && page.probeInterline;
+        if (!il || il <= 0) return false;
+        var IP = OMR.ImageProcessor;
+        return il >= IP.MIN_VALID_INTERLINE && il <= IP.MAX_VALID_INTERLINE;
+    },
     loadPDFStitched: function(file, onPageProgress) {
         var IP = OMR.ImageProcessor;
         return IP.loadPDFAllPages(file, onPageProgress).then(function (all) {
             if (!all || !all.pages || all.pages.length === 0) {
                 throw new Error('PDF contains no pages');
             }
-            // Fast path: only one page, no stitching needed.
-            if (all.pages.length === 1) {
-                var only = all.pages[0];
+            // Drop non-music pages (covers, blanks, lyrics-only, text)
+            // before any scaling/stitching work. We keep the original
+            // order so `pagesStitched` still reports meaningful page
+            // numbers for overlays + diagnostics.
+            var musicPages = [];
+            var droppedLog = [];
+            for (var fi = 0; fi < all.pages.length; fi++) {
+                var pg = all.pages[fi];
+                if (IP._isMusicPage(pg)) {
+                    musicPages.push(pg);
+                } else {
+                    droppedLog.push((pg && pg.pageIndex != null ? (pg.pageIndex + 1) : fi + 1)
+                                    + '(il=' + (pg && pg.probeInterline || 0) + ')');
+                }
+            }
+            if (droppedLog.length > 0) {
+                console.info('[OMR] PDF cover/blank filter: dropped ' + droppedLog.length
+                             + ' of ' + all.pages.length + ' pages: ' + droppedLog.join(', '));
+            }
+            if (musicPages.length === 0) {
+                // No music pages at all — fall back to page 1 so the
+                // engine still runs and the user sees a clear "no staves
+                // found" message rather than a thrown error.
+                console.warn('[OMR] No music pages detected in PDF; falling back to page 1.');
+                var fb = all.pages[0];
+                fb.pageCount    = all.pageCount;
+                fb.stitched     = false;
+                fb.pagesStitched = [fb.pageIndex || 0];
+                return fb;
+            }
+            // Fast path: only one music page, no stitching needed.
+            if (musicPages.length === 1) {
+                var only = musicPages[0];
                 only.pageCount    = all.pageCount;
                 only.stitched     = false;
                 only.pagesStitched = [only.pageIndex || 0];
@@ -353,15 +397,15 @@ OMR.ImageProcessor = {
             // preserving aspect ratio before stacking — keeps per-page
             // interline approximately consistent across the stitched image.
             var minW = Infinity;
-            for (var pi = 0; pi < all.pages.length; pi++) {
-                if (all.pages[pi].width < minW) minW = all.pages[pi].width;
+            for (var pi = 0; pi < musicPages.length; pi++) {
+                if (musicPages[pi].width < minW) minW = musicPages[pi].width;
             }
             if (minW > IP.MAX_STITCH_W) minW = IP.MAX_STITCH_W;
 
             var scaled = [];
             var totalH = 0;
-            for (var qi = 0; qi < all.pages.length; qi++) {
-                var p = all.pages[qi];
+            for (var qi = 0; qi < musicPages.length; qi++) {
+                var p = musicPages[qi];
                 var sw = minW;
                 var sh = Math.round(p.height * (minW / p.width));
                 totalH += sh;
@@ -369,13 +413,34 @@ OMR.ImageProcessor = {
                 scaled.push({ page: p, sw: sw, sh: sh });
             }
             if (totalH > IP.MAX_STITCH_H) {
-                console.warn('[OMR] PDF stitch aborted: would be '
-                             + minW + 'x' + totalH + ' px. Falling back to page 1 only.');
-                var first = all.pages[0];
-                first.pageCount    = all.pageCount;
-                first.stitched     = false;
-                first.pagesStitched = [first.pageIndex || 0];
-                return first;
+                // Too tall to stitch safely. Split into chunks of
+                // MAX_STITCH_H and stitch the FIRST chunk only — it
+                // still contains multiple pages, unlike the old
+                // behaviour which fell back to page 1 (which is often
+                // a cover even after filtering).
+                console.warn('[OMR] PDF stitch would be '
+                             + minW + 'x' + totalH + ' px; stitching first chunk only.');
+                var chunk = [];
+                var chunkH = 0;
+                for (var ci = 0; ci < scaled.length; ci++) {
+                    var e = scaled[ci];
+                    var add = e.sh + (chunk.length > 0 ? IP.STITCH_SEPARATOR : 0);
+                    if (chunkH + add > IP.MAX_STITCH_H && chunk.length > 0) break;
+                    chunk.push(e);
+                    chunkH += add;
+                }
+                if (chunk.length === 0) {
+                    // Even the first page exceeds MAX_STITCH_H — give up
+                    // and emit it alone (renderer will cope or the
+                    // oversize guard kicks in).
+                    var soloPage = musicPages[0];
+                    soloPage.pageCount    = all.pageCount;
+                    soloPage.stitched     = false;
+                    soloPage.pagesStitched = [soloPage.pageIndex || 0];
+                    return soloPage;
+                }
+                scaled = chunk;
+                totalH = chunkH;
             }
 
             var out = document.createElement('canvas');
@@ -1484,6 +1549,23 @@ OMR.NoteDetector = {
         }
     },
 
+    // Look up whether any notehead sits within ±1.5*sp of column `x`
+    // and inside the [yTop-sp, yBot+sp] band (cheap O(n) scan — fast
+    // enough for the typical few-hundred-note range).
+    _hasHeadNear: function(heads, x, yTop, yBot, sp) {
+        if (!heads || heads.length === 0) return false;
+        var xGuard = sp * 1.5;
+        var yGuard = sp;
+        for (var i = 0; i < heads.length; i++) {
+            var h = heads[i];
+            if (h.x === undefined) continue;
+            if (Math.abs(h.x - x) > xGuard) continue;
+            if (h.y < yTop - yGuard || h.y > yBot + yGuard) continue;
+            return true;
+        }
+        return false;
+    },
+
     detectRests: function(bin, width, height, staves, staffSpacing, barlines) {
         var sp = staffSpacing;
         var rests = [];
@@ -1537,18 +1619,37 @@ OMR.NoteDetector = {
                     }
                 }
 
+                // Quarter / eighth rest scanning. The Audiveris v6 legacy
+                // heuristic was wildly over-eager (any vertical ink column
+                // 0.25..1.1× staff height → rest), which on PDFs with
+                // stems + slurs + fingerings + dynamics surfaces hundreds
+                // of phantom rests. We now require BOTH:
+                //   (a) a denser ink column (≥ 3 near-neighbours instead
+                //       of 2) so slurs / dynamics don't qualify, AND
+                //   (b) absence of any real Phase 8 notehead within
+                //       1.5 interlines — a rest never coexists with a
+                //       notehead at the same x, so if we see one we skip
+                //       this column (cuts out stems completely). We look
+                //       up noteheads via the optional `headsIndex` param.
                 var quarterSearchLeft = mLeft + Math.round(sp * 1.5);
                 var quarterSearchRight = mRight - Math.round(sp * 0.5);
                 var staffH = staff.lines[4] - staff.lines[0];
+                var headsIndex = OMR.NoteDetector._headsIndex || null;
 
                 for (var qx = quarterSearchLeft; qx < quarterSearchRight; qx += Math.round(sp * 0.3)) {
+                    // Skip columns that overlap a real head — rests
+                    // never coexist with heads at the same x.
+                    if (headsIndex && OMR.NoteDetector._hasHeadNear(
+                            headsIndex, qx, staff.lines[0], staff.lines[4], sp)) {
+                        continue;
+                    }
                     var colTop = -1, colBot = -1, colBlack = 0;
                     for (var qy = staff.lines[0]; qy <= staff.lines[4]; qy++) {
                         var nearBlack = 0;
                         for (var qdx = -2; qdx <= 2; qdx++) {
                             if (qx + qdx >= 0 && qx + qdx < width && bin[qy * width + (qx + qdx)] === 1) nearBlack++;
                         }
-                        if (nearBlack >= 2) {
+                        if (nearBlack >= 3) {
                             if (colTop === -1) colTop = qy;
                             colBot = qy;
                             colBlack++;
@@ -1556,6 +1657,9 @@ OMR.NoteDetector = {
                     }
                     if (colTop === -1) continue;
                     var colHeight = colBot - colTop;
+                    // Require the column to be relatively dense — thin
+                    // streaks from fingerings / slurs don't qualify.
+                    if (colBlack < colHeight * 0.55) continue;
 
                     if (colHeight > staffH * 0.55 && colHeight < staffH * 1.1) {
                         var restWidth = 0;
@@ -1563,13 +1667,26 @@ OMR.NoteDetector = {
                         for (var wdx = -Math.round(sp); wdx <= Math.round(sp); wdx++) {
                             if (qx + wdx >= 0 && qx + wdx < width && bin[midRow * width + (qx + wdx)] === 1) restWidth++;
                         }
-                        if (restWidth < sp * 1.0 && restWidth > 2) {
+                        // Quarter rest width ~0.4-1.0 interlines (not a
+                        // thin 2-3 px streak). Also require a minimum of
+                        // 0.25*sp so we don't catch single-pixel stems.
+                        if (restWidth < sp * 1.0 && restWidth > sp * 0.25) {
                             rests.push({ type: 'quarter', beats: 1, x: qx, y: Math.round((colTop + colBot) / 2), staffIndex: s, measureIndex: m, durationType: 'quarter' });
                             qx += Math.round(sp * 1.5);
                         }
-                    } else if (colHeight > staffH * 0.25 && colHeight <= staffH * 0.55) {
-                        rests.push({ type: 'eighth', beats: 0.5, x: qx, y: Math.round((colTop + colBot) / 2), staffIndex: s, measureIndex: m, durationType: 'eighth' });
-                        qx += Math.round(sp * 1.5);
+                    } else if (colHeight > staffH * 0.30 && colHeight <= staffH * 0.55) {
+                        // Eighth rests need a stronger aspect-ratio
+                        // check — a real eighth rest is ~0.6-0.9
+                        // interlines wide.
+                        var eMid = Math.round((colTop + colBot) / 2);
+                        var eW = 0;
+                        for (var ewdx = -Math.round(sp); ewdx <= Math.round(sp); ewdx++) {
+                            if (qx + ewdx >= 0 && qx + ewdx < width && bin[eMid * width + (qx + ewdx)] === 1) eW++;
+                        }
+                        if (eW < sp * 0.9 && eW > sp * 0.3) {
+                            rests.push({ type: 'eighth', beats: 0.5, x: qx, y: Math.round((colTop + colBot) / 2), staffIndex: s, measureIndex: m, durationType: 'eighth' });
+                            qx += Math.round(sp * 1.5);
+                        }
                     }
                 }
             }
@@ -1964,6 +2081,12 @@ OMR.NoteDetector = {
         }
         noteheads = verified;
 
+        // Build a spatial index so detectRests can reject columns that
+        // overlap a real notehead — rests never coexist with heads at
+        // the same x and skipping those columns is the cheapest way to
+        // kill the majority of phantom rests the v6 detector emitted.
+        OMR.NoteDetector._headsIndex = noteheads;
+
         var rests = this.detectRests(cleanBin, width, height, staves, staffSpacing, barlines);
         var measures = this.organizeNotes(noteheads, rests, barlines, staves, globalTimeSig);
 
@@ -1989,7 +2112,23 @@ OMR.MusicXMLWriter = {
         var keySig = result.keySignature || { fifths: 0, mode: 'major' };
         var timeSig = result.timeSignature || { beats: 4, beatType: 4 };
         var DIVISIONS = 16;
-        var isGrandStaff = systems && systems.length > 0 && systems[0].isGrandStaff;
+        // Piano-mode detection. A single grand-staff system anywhere in
+        // the piece is enough to promote the whole part to 2-staff output
+        // (AlphaTab won't redraw a BASS clef mid-piece anyway). Also
+        // treat "even staff count with no grand-staff flag" as piano —
+        // this is the Chopin-class failure mode where Phase 4 found the
+        // staves but didn't pair them.
+        var totalStaves = 0;
+        var anyGrand = false;
+        if (systems && systems.length > 0) {
+            for (var ssi = 0; ssi < systems.length; ssi++) {
+                var ssys = systems[ssi];
+                if (ssys.isGrandStaff) anyGrand = true;
+                if (ssys.staves) totalStaves += ssys.staves.length;
+            }
+        }
+        var isGrandStaff = anyGrand
+            || (totalStaves >= 2 && (totalStaves % 2 === 0));
         var numStaves = isGrandStaff ? 2 : 1;
         title = title || 'Untitled Score';
 
@@ -2489,10 +2628,23 @@ OMR.Engine = {
                         // Hand the scale to the legacy detector so it can seed
                         // spacing-aware defaults instead of guessing from scratch.
                         var hint = (ctx.scale && ctx.scale.valid) ? ctx.scale : null;
-                        var staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint);
-                        if (staffResult.staves.length === 0) {
-                            console.warn('[OMR] Legacy StaffDetector found 0 staves; retrying with relaxed thresholds.');
-                            staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint, { relaxed: true });
+                        // Refuse legacy fallback on pages whose scale is
+                        // invalid — these are covers, blanks, lyrics-only
+                        // pages where the detector happily invents "staves"
+                        // from text lines and produces a flood of phantom
+                        // notes downstream. Emit an empty result so the
+                        // engine reports "0 staves, no music detected"
+                        // rather than fabricating notes.
+                        var staffResult;
+                        if (!hint) {
+                            console.warn('[OMR] Skipping legacy StaffDetector: scale invalid (cover/blank/text page).');
+                            staffResult = { staves: [], staffSpacing: 12, systems: [] };
+                        } else {
+                            staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint);
+                            if (staffResult.staves.length === 0) {
+                                console.warn('[OMR] Legacy StaffDetector found 0 staves; retrying with relaxed thresholds.');
+                                staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint, { relaxed: true });
+                            }
                         }
                         // Force grand-staff pairing: when the legacy detector
                         // found an even N >= 2 staves and none of its systems
