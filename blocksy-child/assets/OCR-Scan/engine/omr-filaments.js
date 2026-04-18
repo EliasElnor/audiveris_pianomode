@@ -251,8 +251,15 @@
     // -------------------------------------------------------------------
     function buildHorizontalFilaments(bin, width, height, opts) {
         opts = opts || {};
-        var minRunLength   = opts.minRunLength   || 3;
-        var maxVerticalGap = opts.maxVerticalGap || 1;
+        var minRunLength    = opts.minRunLength    || 3;
+        var maxVerticalGap  = opts.maxVerticalGap  || 1;
+        // Horizontal gap tolerance: on antialiased upscaled rasters
+        // adjacent rows of a staff line can be offset by 2-3 px, so a
+        // strict overlap test breaks every staff line into a thousand
+        // tiny filaments. With maxHorizontalGap > 0 we link runs whose
+        // x-ranges are within `maxHorizontalGap` of each other rather
+        // than strictly overlapping.
+        var maxHorizontalGap = opts.maxHorizontalGap || 0;
 
         // Each row's runs get a filament-id assigned. Previous row runs are
         // kept so the current row can find overlaps cheaply.
@@ -289,8 +296,12 @@
                         var pr = prevRuns[j];
                         var prL = pr.x;
                         var prR = pr.x + pr.len - 1;
-                        // Overlap test (inclusive).
-                        if (prR < curL || prL > curR) continue;
+                        // Overlap test (inclusive) with horizontal-gap
+                        // tolerance — runs whose extents are within
+                        // maxHorizontalGap of each other are linked,
+                        // not just strictly overlapping ones.
+                        if (prR < curL - maxHorizontalGap
+                                || prL > curR + maxHorizontalGap) continue;
                         chosen = pr.filament;
                         // Absorb any later overlapping previous-run filaments
                         // into `chosen` — merges side-by-side candidates.
@@ -298,7 +309,8 @@
                             var pr2 = prevRuns[k];
                             var pr2L = pr2.x;
                             var pr2R = pr2.x + pr2.len - 1;
-                            if (pr2R < curL || pr2L > curR) continue;
+                            if (pr2R < curL - maxHorizontalGap
+                                    || pr2L > curR + maxHorizontalGap) continue;
                             if (pr2.filament && pr2.filament !== chosen) {
                                 chosen.include(pr2.filament);
                                 var idx = filaments.indexOf(pr2.filament);
