@@ -321,6 +321,96 @@ OMR.ImageProcessor = {
         });
     },
 
+    // Multi-page PDF loader that stitches every page vertically into a
+    // single tall imageData. Uses loadPDFAllPages so each page is already
+    // rescaled to target interline=20 before stitching — yields a stable
+    // scale across the whole score. Pages whose probe found no interline
+    // (covers, lyrics) are skipped. A thin white separator is inserted
+    // between pages so Phase 4's vertical filament factory cannot link
+    // filaments from different pages into a single staff.
+    //
+    // Fallback: if the total stitched height would exceed MAX_STITCH_H
+    // (protects against 30+ page PDFs), we fall back to page 1 only and
+    // log a warning so the user sees what happened.
+    MAX_STITCH_W:       4800,
+    MAX_STITCH_H:       18000,
+    STITCH_SEPARATOR:   40, // white px between pages
+    loadPDFStitched: function(file, onPageProgress) {
+        var IP = OMR.ImageProcessor;
+        return IP.loadPDFAllPages(file, onPageProgress).then(function (all) {
+            if (!all || !all.pages || all.pages.length === 0) {
+                throw new Error('PDF contains no pages');
+            }
+            // Fast path: only one page, no stitching needed.
+            if (all.pages.length === 1) {
+                var only = all.pages[0];
+                only.pageCount    = all.pageCount;
+                only.stitched     = false;
+                only.pagesStitched = [only.pageIndex || 0];
+                return only;
+            }
+            // Uniform width = min page width. Scale each page to that width
+            // preserving aspect ratio before stacking — keeps per-page
+            // interline approximately consistent across the stitched image.
+            var minW = Infinity;
+            for (var pi = 0; pi < all.pages.length; pi++) {
+                if (all.pages[pi].width < minW) minW = all.pages[pi].width;
+            }
+            if (minW > IP.MAX_STITCH_W) minW = IP.MAX_STITCH_W;
+
+            var scaled = [];
+            var totalH = 0;
+            for (var qi = 0; qi < all.pages.length; qi++) {
+                var p = all.pages[qi];
+                var sw = minW;
+                var sh = Math.round(p.height * (minW / p.width));
+                totalH += sh;
+                if (qi > 0) totalH += IP.STITCH_SEPARATOR;
+                scaled.push({ page: p, sw: sw, sh: sh });
+            }
+            if (totalH > IP.MAX_STITCH_H) {
+                console.warn('[OMR] PDF stitch aborted: would be '
+                             + minW + 'x' + totalH + ' px. Falling back to page 1 only.');
+                var first = all.pages[0];
+                first.pageCount    = all.pageCount;
+                first.stitched     = false;
+                first.pagesStitched = [first.pageIndex || 0];
+                return first;
+            }
+
+            var out = document.createElement('canvas');
+            out.width  = minW;
+            out.height = totalH;
+            var octx = out.getContext('2d');
+            // White background so separator rows don't become fake ink.
+            octx.fillStyle = '#FFFFFF';
+            octx.fillRect(0, 0, out.width, out.height);
+
+            var cursorY = 0;
+            var pagesStitched = [];
+            for (var ri = 0; ri < scaled.length; ri++) {
+                var entry = scaled[ri];
+                octx.drawImage(entry.page.canvas,
+                               0, 0, entry.page.width, entry.page.height,
+                               0, cursorY, entry.sw, entry.sh);
+                pagesStitched.push(entry.page.pageIndex || ri);
+                cursorY += entry.sh + IP.STITCH_SEPARATOR;
+            }
+
+            console.info('[OMR] PDF stitched ' + all.pages.length + ' pages → '
+                         + out.width + 'x' + out.height + ' px.');
+            return {
+                imageData:  octx.getImageData(0, 0, out.width, out.height),
+                width:      out.width,
+                height:     out.height,
+                canvas:     out,
+                pageCount:  all.pageCount,
+                stitched:   true,
+                pagesStitched: pagesStitched
+            };
+        });
+    },
+
     toGrayscale: function(imageData) {
         var data = imageData.data;
         var w = imageData.width;
@@ -641,6 +731,38 @@ OMR.StaffDetector = {
         return cleaned;
     },
 
+    // When the legacy detector didn't group staves into grand-staff systems
+    // (typically because the bimodal gap heuristic failed), force piano
+    // pairing: pair staves top-to-bottom two-by-two, top = treble,
+    // bottom = bass. Only used when the upstream Phase 4 pipeline and the
+    // legacy system grouper both failed to detect a grand staff but we have
+    // an even number of staves.
+    _forceGrandStaffSystems: function(staves) {
+        var systems = [];
+        for (var i = 0; i + 1 < staves.length; i += 2) {
+            staves[i].clef        = 'treble';
+            staves[i + 1].clef    = 'bass';
+            staves[i].staffIndex  = i;
+            staves[i + 1].staffIndex = i + 1;
+            systems.push({
+                staves:       [staves[i], staves[i + 1]],
+                top:          staves[i].top,
+                bottom:       staves[i + 1].bottom,
+                isGrandStaff: true
+            });
+        }
+        if (staves.length % 2 === 1) {
+            var last = staves[staves.length - 1];
+            systems.push({
+                staves:       [last],
+                top:          last.top,
+                bottom:       last.bottom,
+                isGrandStaff: false
+            });
+        }
+        return systems;
+    },
+
     detectClefs: function(bin, width, height, staves, systems) {
         // First: use heuristic detection for each staff individually
         for (var s = 0; s < staves.length; s++) {
@@ -702,7 +824,25 @@ OMR.NoteDetector = {
     computeDistanceTransform: function(bin, width, height) {
         // Audiveris convention: foreground (ink=1) → 0, background → distance to nearest ink
         // This allows template matching: low DT = on ink (good match), high DT = far from ink (bad)
-        var dt = new Uint16Array(width * height);
+        // Defensive allocation: on very large rescaled images (PDFs scaled
+        // to hit interline=20) the Uint16Array can exceed the JS typed-
+        // array limit and throw "Invalid array length", which surfaces as
+        // an opaque error to the user. Cap at ~120M pixels (240 MB) and
+        // return a zeroed DT if allocation fails.
+        if (!isFinite(width) || !isFinite(height)
+                || width <= 0 || height <= 0
+                || width * height > 120000000) {
+            console.warn('[OMR] computeDistanceTransform skipped: oversize or bad dims ('
+                         + width + 'x' + height + ')');
+            return new Uint16Array(Math.max(1, (width|0) * (height|0)));
+        }
+        var dt;
+        try {
+            dt = new Uint16Array(width * height);
+        } catch (allocErr) {
+            console.warn('[OMR] computeDistanceTransform alloc failed: ' + (allocErr && allocErr.message));
+            return new Uint16Array(1);
+        }
         var INF = 30000;
         var x, y, idx;
 
@@ -2221,7 +2361,16 @@ OMR.Engine = {
 
             var loadPromise;
             if (file.type === 'application/pdf' || (fileName && fileName.toLowerCase().indexOf('.pdf') !== -1)) {
-                loadPromise = OMR.ImageProcessor.loadPDF(file);
+                // Multi-page PDFs are stitched into one tall image so the
+                // pipeline detects ALL pages' staves in a single pass. A
+                // single-page PDF falls through to the same code path with
+                // pageCount=1 and stitched=false.
+                loadPromise = OMR.ImageProcessor.loadPDFStitched(file, function (pageNo, total) {
+                    if (total > 1) {
+                        var pct = Math.round(2 + (pageNo / total) * 6);
+                        report(1, 'Rendering PDF page ' + pageNo + '/' + total + '...', pct);
+                    }
+                });
             } else {
                 loadPromise = OMR.ImageProcessor.loadImage(file);
             }
@@ -2287,15 +2436,27 @@ OMR.Engine = {
                             if (!ctx.gridLines
                                     || !ctx.gridLines.staves
                                     || ctx.gridLines.staves.length === 0) {
-                                console.info('[OMR] Phase 4 strict pass yielded no staves; retrying with relaxed thresholds. Strict reason: ' + glReason);
+                                console.info('[OMR] Phase 4 strict pass yielded no staves; retrying relaxed. Strict reason: ' + glReason);
                                 var relaxed = OMR.GridLines.retrieveStaves(
                                     ctx.bin, ctx.w, ctx.h, ctx.scale, { relaxed: true });
                                 if (relaxed && relaxed.staves && relaxed.staves.length > 0) {
                                     ctx.gridLines = relaxed;
                                     glReason = null;
                                     console.info('[OMR] Phase 4 relaxed pass recovered ' + relaxed.staves.length + ' staves.');
-                                } else if (relaxed && relaxed.reason) {
-                                    glReason = glReason + ' | relaxed: ' + relaxed.reason;
+                                } else {
+                                    if (relaxed && relaxed.reason) {
+                                        glReason = glReason + ' | relaxed: ' + relaxed.reason;
+                                    }
+                                    console.info('[OMR] Phase 4 relaxed pass yielded no staves; retrying ultraRelaxed.');
+                                    var ultra = OMR.GridLines.retrieveStaves(
+                                        ctx.bin, ctx.w, ctx.h, ctx.scale, { ultraRelaxed: true });
+                                    if (ultra && ultra.staves && ultra.staves.length > 0) {
+                                        ctx.gridLines = ultra;
+                                        glReason = null;
+                                        console.info('[OMR] Phase 4 ultraRelaxed pass recovered ' + ultra.staves.length + ' staves.');
+                                    } else if (ultra && ultra.reason) {
+                                        glReason = glReason + ' | ultraRelaxed: ' + ultra.reason;
+                                    }
                                 }
                             }
                         } catch (glErr) {
@@ -2332,6 +2493,22 @@ OMR.Engine = {
                         if (staffResult.staves.length === 0) {
                             console.warn('[OMR] Legacy StaffDetector found 0 staves; retrying with relaxed thresholds.');
                             staffResult = OMR.StaffDetector.detect(ctx.bin, ctx.w, ctx.h, hint, { relaxed: true });
+                        }
+                        // Force grand-staff pairing: when the legacy detector
+                        // found an even N >= 2 staves and none of its systems
+                        // were flagged grand-staff, the sheet is almost
+                        // certainly piano and we pair staves 2-by-2. This
+                        // fixes the "AlphaTab shows only treble clef" failure
+                        // mode the user reported on every PDF where Phase 4
+                        // GridLines fails.
+                        if (staffResult.staves.length >= 2) {
+                            var hasGrand = staffResult.systems
+                                && staffResult.systems.some(function (s) { return s.isGrandStaff; });
+                            if (!hasGrand && staffResult.staves.length % 2 === 0) {
+                                staffResult.systems = OMR.StaffDetector._forceGrandStaffSystems(staffResult.staves);
+                                console.info('[OMR] Legacy fallback: forced grand-staff pairing on '
+                                             + staffResult.staves.length + ' staves.');
+                            }
                         }
                         var suffix = glReason ? ' (legacy fallback; Phase 4 reason: ' + glReason + ')' : ' (legacy)';
                         report(2, 'Found ' + staffResult.staves.length + ' staves' + suffix + '. Removing staff lines...', 35);
@@ -2377,6 +2554,18 @@ OMR.Engine = {
                     var cleanBin = OMR.StaffDetector.removeStaffLines(ctx.bin, ctx.w, ctx.h, ctx.staves);
                     report(3, 'Computing distance transform...', 45);
                     ctx.cleanBin = cleanBin;
+
+                    // Oversize-image gate for the heavy Phase 6-13 sidecars.
+                    // If the rescaled page is too large (>60M pixels) the
+                    // sidecars allocate enough typed arrays to trip "Invalid
+                    // array length" on some browsers. Skip them gracefully;
+                    // the legacy pipeline still runs and produces a MusicXML.
+                    ctx._skipHeavy = (ctx.w * ctx.h) > 60000000;
+                    if (ctx._skipHeavy) {
+                        console.warn('[OMR] Skipping Phase 6-13 sidecars: image too large ('
+                                     + ctx.w + 'x' + ctx.h + ' = '
+                                     + (ctx.w * ctx.h / 1e6).toFixed(1) + ' Mpx).');
+                    }
 
                     // ------------------------------------------------
                     // Phase 6: StemSeedsBuilder sidecar. Needs the
