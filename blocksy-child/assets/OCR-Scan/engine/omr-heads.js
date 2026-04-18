@@ -87,15 +87,19 @@
         // Grade 0 ↔ distance == params.maxDistance
         // Grade 1 ↔ distance == 0
         //
-        // Values tightened back to Audiveris defaults in v6.17.0 —
-        // the relaxed v6.15.0 numbers (2.5/4.0/0.25) were catching
-        // rests, dynamic markings (mf, f, p), fingering digits and
-        // articulation dots as note heads. See user report dated
-        // 2026-04-17 showing dozens of 32nd-note clusters that don't
-        // exist in the source score.
-        maxDistanceLow:      2.0,   // acceptable head match distance
-        maxDistanceHigh:     3.5,   // "reallyBad" cutoff; abandon template
-        minGrade:            0.40,  // min acceptable grade (0..1)
+        // v6.27.0 (Wave 10): further tightened from v6.17.0 values
+        // (2.0 / 3.5 / 0.40). User reports on bach-menuet-g.pdf still
+        // show rests, ornaments, dynamics (f, mf, pp) and fingering
+        // digits boxed as notes. Pass-2 range-scan matches are the
+        // main culprit — they have no seed anchor so any round-ish
+        // ink blob in the staff y-band scores above threshold.
+        // Tighten:
+        //   maxDistanceLow      2.0 → 1.8 (tighter "acceptable" band)
+        //   maxDistanceHigh     3.5 → 3.0 (faster "reallyBad" cutoff)
+        //   minGrade           0.40 → 0.48 (require ≥ 60 % template match)
+        maxDistanceLow:      1.8,   // acceptable head match distance
+        maxDistanceHigh:     3.0,   // "reallyBad" cutoff; abandon template
+        minGrade:            0.48,  // min acceptable grade (0..1)
 
         // x offsets tried around a seed (centered, grows outward)
         maxStemXOffsetRatio: 0.15,  // fraction of interline
