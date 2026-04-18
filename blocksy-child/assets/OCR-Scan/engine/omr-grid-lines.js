@@ -110,23 +110,38 @@
         minGrandStaffGapIL:       1.0
     };
 
-    // Relaxed preset for PDF rasters. The engine calls retrieveStaves with
-    // `opts.relaxed: true` after a first-pass failure; we mutate a local
-    // copy of C (not the module-level one) so the strict preset stays
-    // intact for high-quality scans.
+    // Relaxed presets for PDF rasters. The engine escalates: strict →
+    // relaxed → ultraRelaxed. Each step loosens the filament filters for
+    // antialiased PDFs whose staff lines are 1 px tall, wiggly, and broken
+    // across rows.
+    //
+    // ultraRelaxed is the "we would rather over-include than give up" mode
+    // — we drop straightness to 3.5 px residual, thickness to 0.6*interline,
+    // length to 3.5 interlines, gap to 3, vote to 20 %. It surfaces real
+    // staff lines on Fur Elise, Gedike, Debussy — sheets where the strict
+    // and relaxed passes failed.
     function makeConstants(opts) {
         var cc = {};
         for (var k in C) cc[k] = C[k];
-        if (opts && opts.relaxed) {
-            // Antialiased PDF lines tilt more than strict scans allow:
-            // double the slope tolerance and the straightness budget, and
-            // bridge single-row breaks in the filament factory.
-            cc.maxSlopeDeviation    = 0.05;
-            cc.maxLineResidual      = 2.0;
-            cc.maxVerticalGap       = 2;
-            cc.minRunPerInterline   = 0.20;
-            cc.voteRatio            = 0.30;
+        if (opts && (opts.relaxed || opts.ultraRelaxed)) {
+            cc.maxSlopeDeviation     = 0.05;
+            cc.maxLineResidual       = 2.0;
+            cc.maxVerticalGap        = 2;
+            cc.minRunPerInterline    = 0.20;
+            cc.voteRatio             = 0.30;
             cc.minLengthPerInterline = 4.0;
+            cc.maxThicknessPerInterline = 0.5;
+            cc.meanThicknessAbsFloor = 4;
+        }
+        if (opts && opts.ultraRelaxed) {
+            cc.maxSlopeDeviation     = 0.08;   // ~4.5 degrees
+            cc.maxLineResidual       = 3.5;    // very wiggly antialiased lines
+            cc.maxVerticalGap        = 3;      // bridge 2-row breaks
+            cc.minRunPerInterline    = 0.15;   // accept even 3 px runs on small int
+            cc.voteRatio             = 0.20;   // 20% of slices is enough
+            cc.minLengthPerInterline = 3.5;    // short staves (fragmented scans)
+            cc.maxThicknessPerInterline = 0.6;
+            cc.meanThicknessAbsFloor = 5;
         }
         return cc;
     }
@@ -156,10 +171,19 @@
         // Bound is the larger of (a) a fraction of interline and (b) a small
         // multiple of the measured staff-line thickness (mainFore). The
         // absolute floor keeps us viable on interlines < 10 (cue staves).
+        // Upper bound on mean thickness. Three sources, take the max:
+        //   (a) absolute floor — keep us viable on very small interlines
+        //   (b) a fraction of interline (Audiveris default 0.4)
+        //   (c) a multiple of measured staff-line thickness (mainFore);
+        //       relaxed/ultraRelaxed bump the multiplier to 3× / 4× so
+        //       antialiased PDF lines whose rows merge into 3-4 px bands
+        //       still survive.
+        var mainForeMul = (opts && opts.ultraRelaxed) ? 4.0
+                          : (opts && opts.relaxed) ? 3.0 : 2.0;
         var meanThickBound = Math.max(
             cc.meanThicknessAbsFloor,
             Math.round(cc.maxThicknessPerInterline * interline),
-            Math.round(mainFore * 2.0)
+            Math.round(mainFore * mainForeMul)
         );
 
         // ---- step 1: build horizontal filaments ----
@@ -169,7 +193,8 @@
                 maxVerticalGap: cc.maxVerticalGap
             });
         var totalBuilt = filaments.length;
-        var tag = (opts && opts.relaxed) ? '[relaxed]' : '[strict]';
+        var tag = (opts && opts.ultraRelaxed) ? '[ultraRelaxed]'
+                  : (opts && opts.relaxed) ? '[relaxed]' : '[strict]';
 
         // ---- step 2: length + thickness filter ----
         filaments = filaments.filter(function (f) {
@@ -246,7 +271,8 @@
             systems:       systems,
             slope:         sheetSlope,
             filamentCount: totalBuilt,
-            preset:        (opts && opts.relaxed) ? 'relaxed' : 'strict'
+            preset:        (opts && opts.ultraRelaxed) ? 'ultraRelaxed'
+                           : (opts && opts.relaxed) ? 'relaxed' : 'strict'
         };
     }
 
