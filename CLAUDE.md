@@ -2,7 +2,7 @@
 
 ## Current State (2026-04-18)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.26.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.27.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
 **STATUS:** Audiveris-port pipeline is authoritative (14 phases enabled by
@@ -88,6 +88,60 @@ ornaments, dynamics, fingerings all classified as notes). Symptom on
 - Bravura symbol templates — we use procedural notehead templates
 - `sheet/skew/SkewBuilder` — skew detection is approximated via per-row
   projection smoothing in `omr-hough.js` (`skewTol` param)
+
+### Wave 10 fixes (v6.27.0 — 2026-04-18)
+Follow-ups on Wave 9 that ship the two highest-impact items from the
+priority list: the timing fix (StaffProjector → Phase 13 rhythm) and
+a meaningful dent in over-detection.
+
+1. **StaffProjector measures consumed by Phase 13** (`omr-sig.js`
+   `buildSig` + `buildSystems`) — `buildSig` now takes a tenth argument
+   `staffProjections` (the array returned by
+   `OMR.StaffProjector.detectBarlines`) and prefers its
+   `measures[{x0,x1}]` over the GridBars-derived measures when present.
+   `buildSystems` walks per system, locates the entry for the anchor
+   staff (by `staff.id`, with reference-identity fallback), and
+   translates the projector's absolute-x measures into our
+   `{index, xLeft, xRight}` shape. Falls back to GridBars, then to
+   single-measure-per-staff. Fixes the compressed/random-timing bug
+   on scans where GridBars' global projection misses barlines that
+   the per-staff projector catches.
+2. **StaffProjector output carries staff ref** (`omr-staff-projector.js`)
+   — added `staff: staff` to the `project()` return so
+   `pickProjForStaff` can locate the entry even when `staff.id` isn't
+   set (Hough fallback). The `staffId` field is kept for O(1) lookup.
+3. **Engine wires staffProjections into buildSig** (`omr-engine.js`
+   Phase 13 block) — 10th argument passed through from
+   `ctx.staffProjections`. Still a no-op when the projector produced
+   nothing (e.g. Hough-seeded staves without a projection yet).
+4. **NoteHeadsBuilder threshold tightening** (`omr-heads.js` `C` block):
+     - `maxDistanceLow`  2.0 → 1.8
+     - `maxDistanceHigh` 3.5 → 3.0
+     - `minGrade`       0.40 → 0.48
+   Targets Pass-2 range-scan matches which have no seed anchor and
+   were the main source of rest/ornament/fingering false positives
+   on `bach-menuet-g.pdf`.
+5. **Head/rest conflict pruning** (`omr-engine.js` post-Phase 12) —
+   after `OMR.RestsAlters.buildRestsAndAlters` runs, any head whose
+   center lies within ±0.8·IL of a rest's x-range ON THE SAME STAFF
+   is dropped. A rest and a notehead are mutually exclusive at the
+   same column, so this catches the "rest glyph detected as head"
+   false positives directly, without needing to re-tune geometry.
+   Logs `[OMR] Phase 12 head/rest pruner dropped N heads...` when
+   triggered.
+
+**Known residuals after Wave 10:**
+- StaffProjector only runs when ctx.staves is set AND
+  `ctx.scale.valid`; Hough-seeded staves don't populate
+  `ctx.staffProjections` yet because the projector expects each
+  staff's `lines[i].getYAtX(x)` to track real interline-spaced lines
+  (Hough lines are approximate). Wave 11 fix: have the Hough
+  pipeline build synthetic Filament-shaped lines, which it already
+  does via `makeLineFilament`, so the projector should work. Needs
+  verification on a real Hough-fallback scan.
+- Over-detection is reduced but not zero. The real cure is the
+  classifier/* port (Audiveris CNN) — geometric rules will always
+  have some floor of false positives. See Wave 10 Priority 5.
 
 ### Wave 9 fixes (v6.26.0 — 2026-04-18)
 1. **Phase 4 y-gap clustering fallback** (`omr-grid-lines.js`
