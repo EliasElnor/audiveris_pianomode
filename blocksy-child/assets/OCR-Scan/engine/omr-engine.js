@@ -2999,6 +2999,55 @@ OMR.Engine = {
                             // RestsAlters build failed: leave restsAlters null.
                             ctx.restsAlters = null;
                         }
+
+                        // Wave 10 — head/rest conflict pruning. A rest
+                        // and a notehead are mutually exclusive at the
+                        // same (staff, x) column; when Phase 12 labels
+                        // a CC as a rest, any head hit sharing that
+                        // column within ±0.8·IL is a false positive.
+                        if (ctx.restsAlters
+                                && ctx.restsAlters.rests
+                                && ctx.restsAlters.rests.length > 0
+                                && ctx.heads
+                                && ctx.heads.heads
+                                && ctx.heads.heads.length > 0
+                                && ctx.scale && ctx.scale.valid) {
+                            try {
+                                var tolX = 0.8 * ctx.scale.interline;
+                                var allRests = ctx.restsAlters.rests;
+                                var kept = [];
+                                var dropped = 0;
+                                for (var hi = 0; hi < ctx.heads.heads.length; hi++) {
+                                    var hh = ctx.heads.heads[hi];
+                                    var conflict = false;
+                                    for (var ri = 0; ri < allRests.length; ri++) {
+                                        var rr = allRests[ri];
+                                        if (rr.staff !== hh.staff) continue;
+                                        var rLeft  = rr.x - (rr.w || 0) / 2;
+                                        var rRight = rr.x + (rr.w || 0) / 2;
+                                        if (hh.x >= rLeft - tolX
+                                                && hh.x <= rRight + tolX) {
+                                            conflict = true;
+                                            break;
+                                        }
+                                    }
+                                    if (conflict) { dropped++; continue; }
+                                    kept.push(hh);
+                                }
+                                if (dropped > 0) {
+                                    ctx.heads.heads = kept;
+                                    if (typeof console !== 'undefined'
+                                            && console.log) {
+                                        console.log('[OMR] Phase 12 head/rest'
+                                                + ' pruner dropped ' + dropped
+                                                + ' heads overlapping rest'
+                                                + ' columns.');
+                                    }
+                                }
+                            } catch (prErr) {
+                                // Non-fatal — leave heads intact.
+                            }
+                        }
                     }
 
                     // ------------------------------------------------
@@ -3024,7 +3073,8 @@ OMR.Engine = {
                                 ctx.beams || [],
                                 ctx.ledgers || [],
                                 ctx.restsAlters || [],
-                                ctx.gridBars || null);
+                                ctx.gridBars || null,
+                                ctx.staffProjections || null);
                         } catch (sgErr) {
                             ctx.sig = null;
                         }
