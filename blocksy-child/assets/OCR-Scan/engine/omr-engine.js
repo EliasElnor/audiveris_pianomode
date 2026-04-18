@@ -353,7 +353,11 @@ OMR.ImageProcessor = {
     // (protects against 30+ page PDFs), we fall back to page 1 only and
     // log a warning so the user sees what happened.
     MAX_STITCH_W:       4800,
-    MAX_STITCH_H:       18000,
+    MAX_STITCH_H:       14000,      // lowered from 18000 — keeps Int32Array(w*h)
+                                    // allocations used by Phase 4/6/9 under
+                                    // ~140 MB on 3400 px wide stitches.
+    MAX_STITCH_AREA:    30000000,   // 30 Mpx hard cap. Any over-sized stitch
+                                    // truncates further to respect this.
     STITCH_SEPARATOR:   40, // white px between pages
     // Cover / blank / lyrics-only pages have NO staff lines, so
     // `_loadPdfPageAdaptive` keeps them at probe scale and reports
@@ -429,20 +433,25 @@ OMR.ImageProcessor = {
                 if (qi > 0) totalH += IP.STITCH_SEPARATOR;
                 scaled.push({ page: p, sw: sw, sh: sh });
             }
-            if (totalH > IP.MAX_STITCH_H) {
-                // Too tall to stitch safely. Split into chunks of
-                // MAX_STITCH_H and stitch the FIRST chunk only — it
-                // still contains multiple pages, unlike the old
-                // behaviour which fell back to page 1 (which is often
-                // a cover even after filtering).
+            // Enforce BOTH the height cap AND the total-area cap so
+            // Int32Array(w*h) allocations in Phase 4/6/9 never hit the
+            // V8 "Invalid array length" ceiling (~2 GiB) — but also keep
+            // us well below realistic browser memory limits (~1 GiB
+            // per tab). 15 pages × 2340 px wide stitched to 15 980 px
+            // previously used ≈ 150 MB just for one Int32Array, and with
+            // several such buffers simultaneously the tab crashed.
+            var maxHByArea = Math.floor(IP.MAX_STITCH_AREA / Math.max(1, minW));
+            var effectiveMaxH = Math.min(IP.MAX_STITCH_H, maxHByArea);
+            if (totalH > effectiveMaxH) {
                 console.warn('[OMR] PDF stitch would be '
-                             + minW + 'x' + totalH + ' px; stitching first chunk only.');
+                             + minW + 'x' + totalH + ' px (cap='
+                             + effectiveMaxH + '); stitching first chunk only.');
                 var chunk = [];
                 var chunkH = 0;
                 for (var ci = 0; ci < scaled.length; ci++) {
                     var e = scaled[ci];
                     var add = e.sh + (chunk.length > 0 ? IP.STITCH_SEPARATOR : 0);
-                    if (chunkH + add > IP.MAX_STITCH_H && chunk.length > 0) break;
+                    if (chunkH + add > effectiveMaxH && chunk.length > 0) break;
                     chunk.push(e);
                     chunkH += add;
                 }
