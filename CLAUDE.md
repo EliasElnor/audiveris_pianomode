@@ -1,19 +1,55 @@
 # CLAUDE.md — PianoMode OCR Scanner Project
 
-## Current State (2026-04-17)
+## Current State (2026-04-18)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.19.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.20.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
 **STATUS:** Audiveris-port pipeline is authoritative (all 14 phases enabled by
-default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 4
-(v6.19.0) attacks the real root cause of "Found 0 staves" on PDFs that Wave 3's
-diagnostics exposed: the Audiveris-default slope / straightness / vertical-gap
-budgets in `omr-grid-lines.js` are authored for 300-DPI scans. PDFs rasterized
-via PDF.js at scale 3.0 produce 1-px antialiased staff lines whose rows get
-split by single-pixel breaks — the strict defaults throw the lines away. The
-"fewer than 5 filaments after slope filter" message on Chopin's Valse
-(interline=15, mainFore=1) is the smoking gun.
+default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 5
+(v6.20.0) attacks the raster resolution mismatch that Wave 4's per-stage
+diagnostics revealed: PDFs rendered at the hardcoded `scale = 3.0` were
+landing at wildly different interlines (13 px on Debussy, 46 px on Gedike, 6
+px on cover pages) — Audiveris is authored around **interline ≈ 20 px** (see
+its own log: `Scale{interline(20,20,21) line(2,2,3) beam(10)}`). We now probe
+every page, measure the interline, and re-render at the scale that lands the
+sheet inside that sweet spot. Same for bitmap images. The Phase 4 length
+filter was also switched from bounding-box thickness (fragile to antialiasing)
+to mean thickness (weight / length) so the "only 1/160 filaments survive"
+failure on Gedike is gone.
+
+### Wave 5 fixes (v6.20.0 — 2026-04-18)
+1. **Auto-rescale PDF rendering** (`omr-engine.js`
+   `OMR.ImageProcessor.loadPDF` / `_loadPdfPageAdaptive`) — probe every
+   page at `scale=1.5`, run `OMR.Scale.build` on the probe, compute
+   `finalScale = 1.5 * 20 / interline`, clamp to `[0.6, 5.0]` and also
+   cap the final viewport width at 4800 px. If the probe interline is
+   already within ±15 % of 20 we reuse the probe render (saves a second
+   raster pass). Pages whose probe finds no interline (covers, blank,
+   lyrics) are passed through at the probe resolution so the engine can
+   skip them cleanly on the scale-invalid branch.
+2. **Auto-rescale bitmap images** (`OMR.ImageProcessor.loadImage`) —
+   same idea for JPG/PNG inputs: render a probe at ≤ 1800 px width,
+   measure the interline, re-render the full image at the scale that
+   targets interline 20. Old behaviour was "scale down to 3000 px" with
+   no regard for staff-line geometry.
+3. **Multi-page PDF loader** (`OMR.ImageProcessor.loadPDFAllPages`) —
+   renders every page adaptively and returns `{ pages:[], pageCount }`
+   so the future multi-page pipeline (Wave 6) can iterate rather than
+   silently dropping pages 2..N. Not yet wired into `Engine.process`.
+4. **Mean-thickness filter** (`omr-grid-lines.js` step 2 of
+   `retrieveStaves`) — replaced `f.getThickness()` (bounding-box height,
+   inflated by antialiasing fusing adjacent rows) with
+   `f.getMeanThickness()` (weight / length). Upper bound is now
+   `max(absFloor=3, 0.4*interline, 2*mainFore)` so we follow the
+   measured staff-line thickness instead of guessing from interline
+   alone. Gedike at interline=46 now keeps > 1 filament in step 2.
+5. **Scale + distance defensive guards** (`omr-scale.js` `build`,
+   `omr-distance.js` `computeBounded`) — validate `bin/width/height` up
+   front and trap the Uint32Array allocation so blank pages / corrupt
+   PDFs surface `{valid:false, reason:"bad input ..."}` instead of
+   throwing "Invalid typed array length" out of the scale builder. Same
+   guard in `computeBounded` against degenerate template rectangles.
 
 ### Wave 4 fixes (v6.19.0 — 2026-04-17)
 1. **Relaxed Phase 4 preset** (`omr-grid-lines.js`) — exposed a
