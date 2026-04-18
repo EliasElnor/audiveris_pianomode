@@ -2,21 +2,183 @@
 
 ## Current State (2026-04-18)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.20.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.26.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
 
-**STATUS:** Audiveris-port pipeline is authoritative (all 14 phases enabled by
-default via `OMR.flags`, legacy v6 heuristics only run as fallback). Wave 5
-(v6.20.0) attacks the raster resolution mismatch that Wave 4's per-stage
-diagnostics revealed: PDFs rendered at the hardcoded `scale = 3.0` were
-landing at wildly different interlines (13 px on Debussy, 46 px on Gedike, 6
-px on cover pages) — Audiveris is authored around **interline ≈ 20 px** (see
-its own log: `Scale{interline(20,20,21) line(2,2,3) beam(10)}`). We now probe
-every page, measure the interline, and re-render at the scale that lands the
-sheet inside that sweet spot. Same for bitmap images. The Phase 4 length
-filter was also switched from bounding-box thickness (fragile to antialiasing)
-to mean thickness (weight / length) so the "only 1/160 filaments survive"
-failure on Gedike is gone.
+**STATUS:** Audiveris-port pipeline is authoritative (14 phases enabled by
+default via `OMR.flags`; legacy v6 heuristics fallback when new phases fail).
+The current pain is NOT staff detection anymore — the legacy fallback
+consistently finds the correct number of staves — it's that **Phase 4's
+filament-based LinesRetriever collapses on PDF rasters** (length filter
+drops 98 %+ of candidates because antialiasing fragments staff lines into
+short pieces) AND **Phase 8's NoteHeadsBuilder over-detects** (rests,
+ornaments, dynamics, fingerings all classified as notes). Symptom on
+`Menuet in G.pdf`: tons of red boxes on rest glyphs, ornaments, and text.
+
+### RESUME-NO-MEMORY CHECKLIST (read first if context is empty)
+1. **Branch**: `claude/audiveris-integration-zOSh8`. Push with `-u`.
+2. **One commit per file**, HARD rule.
+3. **Cache buster** lives in 3 places — MUST match:
+   - `blocksy-child/functions.php` → `PIANOMODE_OMR_VER`
+   - `blocksy-child/assets/OCR-Scan/engine/omr-core.js` → `OMR.VERSION`
+   - `blocksy-child/page-omr-scanner.php` inline script tags
+4. **Files outside `assets/OCR-Scan/` that we DO touch** (documented):
+   - `blocksy-child/functions.php` — ONLY the `PIANOMODE_OMR_VER` line
+     and the `pianomode_enqueue_omr_scripts()` enqueue block. Don't
+     touch anything else (user's other branches are in dev there).
+   - `blocksy-child/page-omr-scanner.php` — scanner UI + player inline
+     JS. Owned by this feature.
+   - `blocksy-child/assets/OCR-Scan/omr-scanner.css` — scanner CSS.
+5. **404 ON PRODUCTION for `omr-sig.js` / `omr-stems-seeds.js`** —
+   files ARE present locally and enqueued correctly. This is a SERVER
+   DEPLOY / CACHE issue (user syncs via some mechanism we don't see).
+   Tell the user to re-sync the `assets/OCR-Scan/engine/` folder.
+6. **Core bottleneck**: on PDF rasters, filaments built (hundreds or
+   thousands) but filter chain `afterLen+Thick` drops to 1-17
+   consistently. Root cause: antialiasing shatters staff lines into
+   short segments < 3-5 interlines long. Wave 9 added
+   `omr-hough.js` (horizontal projection peak-finder, see below) as
+   Phase 4b last-resort fallback that sidesteps the filament builder.
+7. **User's red-line requirements**:
+   - "La transcription doit etre parfaite" — complete Audiveris clone
+   - Don't over-detect rests/symbols as notes
+   - Timing must be respected (measure detection works)
+   - Ship real fixes, not half-done stubs
+
+### Known test PDFs (reproduce the failures)
+- `a_morning_sunbeam.pdf` — Phase 4 built=906, afterLen+Thick=17,
+  afterSlope=17 → ultraRelaxed clustering fails. Legacy fallback
+  finds 8 staves.
+- `bach-menuet-g.pdf` — OVER-DETECTION: rests/ornaments/text boxed
+  as notes. Heads builder threshold too permissive.
+- `autumn-leaves.pdf` — probe interline=7, wanted factor=2.86,
+  clamped to 2.5. Phase 4 built=697, afterLen+Thick=2.
+- `gedike-21-pages.pdf` — stitched to 2040x16040 px, 21 pages. Phase
+  4 built=3421, afterLen+Thick=13, afterStraight=1. Massive ink but
+  filaments still killed by length filter.
+
+## PORT STATUS VS AUDIVERIS (what's done, what's stub)
+
+| Audiveris source | Our port | Status |
+|---|---|---|
+| `image/BinaryStep` | `omr-engine.js ImageProcessor` | done (Wave 2) |
+| `sheet/ScaleBuilder` | `omr-scale.js` | good on clean scans, guards against 0-interline blanks (Wave 5) |
+| `sheet/grid/LinesRetriever` | `omr-grid-lines.js` | **broken on PDF rasters** — filament length filter kills 98 %+ |
+| `sheet/grid/ClustersRetriever` | `omr-grid-lines.js` (same file) | OK on clean scans, y-gap fallback added Wave 9 |
+| `sheet/grid/StaffProjector` | `omr-staff-projector.js` | **Wave 9 minimal port** — projection + hysteresis peaks + measure cuts. NOT yet wired into rhythm engine (Phase 13) |
+| `image/HoughTransform` | `omr-hough.js` | **Wave 9 minimal port** — horizontal projection only (no ρ/θ accumulator yet). Used as Phase 4b fallback |
+| `sheet/grid/BarsRetriever` | `omr-grid-bars.js` | basic port, no HiLoPeakFinder |
+| `sheet/stem/StemSeedsBuilder` | `omr-stems-seeds.js` | basic port, `DistanceTable.java` equivalent in `omr-distance.js` |
+| `sheet/beam/BeamsBuilder` | `omr-beams.js` | basic port |
+| `image/TemplateFactory` | `omr-templates.js` | procedural templates (no Bravura font) |
+| `sheet/note/NoteHeadsBuilder` | `omr-heads.js` | **over-detects** — v6.17.0 tightening wasn't enough |
+| `sheet/ledger/LedgersBuilder` | `omr-ledgers.js` | basic port |
+| `sheet/stem/StemsBuilder + HeadLinker` | `omr-stems.js` | basic port |
+| `sheet/clef/*`, `sheet/key/*`, `sheet/time/*` | `omr-clef-key-time.js` | geometric heuristic port, forces bass clef on partner staves (Wave 2) |
+| `sheet/rhythm/RestsBuilder + note/AltersBuilder` | `omr-rests-alters.js` | basic port |
+| `sig/SIGraph + sheet/rhythm/*` | `omr-sig.js` | **timing compressed** — not consuming StaffProjector measures yet |
+| `score/PartwiseBuilder` | `omr-musicxml.js` | grand-staff recovery, forced piano-mode normalization (Wave 2) |
+| MIDI writer | `omr-midi.js` | standard format-1 writer |
+
+**NOT yet ported**:
+- `sheet/beam/SpotsBuilder` (morphological spots) — `BeamsBuilder` port is
+  simpler CC-based
+- `sig/relation/*` — full relation graph with grades
+- `classifier/*` — ML note classifier; we use geometric rules
+- Bravura symbol templates — we use procedural notehead templates
+- `sheet/skew/SkewBuilder` — skew detection is approximated via per-row
+  projection smoothing in `omr-hough.js` (`skewTol` param)
+
+### Wave 9 fixes (v6.26.0 — 2026-04-18)
+1. **Phase 4 y-gap clustering fallback** (`omr-grid-lines.js`
+   `groupFilamentsByYGap`) — when 5-tuple voting fails but ≥5 filaments
+   survived, sort by y at mid-width, split groups at gaps > 1.8·IL,
+   emit groups of 5 whose spacings fall in [0.7, 1.3]·IL. Fixes
+   `afterSlope=9, samplingDx=14, clustering yielded no staves`.
+2. **Memory-safe stitching** (`omr-engine.js`) — `MAX_STITCH_H` lowered
+   18000 → 14000, new `MAX_STITCH_AREA = 30 Mpx` cap. Enforces both so
+   `Int32Array(w*h)` in Phase 4/6/9 doesn't OOM on tall stitches. The
+   Dunhill 15-page PDF (2340×15980 ≈ 150 MB buffers) now truncates
+   gracefully to first chunk.
+3. **Salamander robust detection** (`page-omr-scanner.php`) —
+   dynamically resolves `alphaTab.midi.MidiEventType.NoteOn/NoteOff`
+   numeric enum at call time, rather than comparing `ev.type` to the
+   string `'NoteOn'` (never matches in 1.3.x). Accepts `ev.noteNumber`
+   as an alias for `ev.noteKey`. Fixes the "No NoteOn reached
+   Salamander after 3 s" falling-back-to-Sonivox bug.
+4. **Piano UI options toolbar** (`page-omr-scanner.php` + `.css`):
+   - Octave range: 5 (C2–C7) / Full 88
+   - Labels: C only / White keys / All keys
+   - Naming: C D E F G A B / Do Ré Mi Fa Sol La Si
+   - Preferences persisted in localStorage. Locale auto-detects Latin
+     naming only on first visit (country/language heuristic).
+   - Multi-page detection preview: Prev/Next page nav visible only
+     when `lastResult.pagePreviews.length > 1`.
+5. **HoughTransform** (`omr-hough.js`, NEW) — last-resort Phase 4b
+   fallback before legacy StaffDetector. Operates on horizontal ink
+   projection (not filaments), so antialiased broken staff lines STILL
+   contribute peaks. Features:
+   - Row-sum projection with ±1 row skew tolerance (absorbs small
+     deskew without full ρ/θ accumulator).
+   - Hysteresis peak extractor (threshold at 55 % of max ink row).
+   - 5-peak sliding window with [0.8, 1.2]·IL spacing band.
+   - Per-staff xLeft/xRight from rolling-window ink density.
+   - Reuses `OMR.GridLines._pairStavesIntoSystems` for grand-staff
+     pairing so downstream Phase 5+ sees the same Staff[] shape.
+   - Wired into `omr-engine.js`: after ultraRelaxed fails, Hough tries
+     before the legacy fallback. Result is assigned to `ctx.gridLines`
+     so `useNewStaff = true` still holds and Phase 5..14 run.
+6. **StaffProjector** (`omr-staff-projector.js`, NEW) — minimal port
+   of `sheet/grid/StaffProjector.java`:
+   - Per-staff 1-D projection of vertical ink density, weighted by how
+     many of the 5 staff lines have ink above/below at x.
+   - Hysteresis peak extraction (high=3/5 lines, low=2/5 lines).
+   - Classifies peaks: STEM_THIN / STEM / BARLINE / DOUBLE by width
+     in interlines, plus vertical-extent check to reject stems that
+     happen to brush the top+bottom staff lines.
+   - Emits `measures[] = [{x0, x1}, ...]` from the barline x-positions.
+   - Wired into `omr-engine.js` post-Phase 5: runs AFTER BarsRetriever,
+     writes `ctx.staffProjections`. **NOT YET CONSUMED** by Phase 13
+     SIG / rhythm — that's the Wave 10 wiring work. Feeding the
+     projector measures back into `omr-sig.js` (currently the place
+     that compresses notes because its measure detection is weaker
+     than the projector) is the next priority.
+
+### Wave 8 fixes (v6.24.0 — 2026-04-18)
+1. **Cover filter regression fix** — Wave 7's `MIN_VALID_INTERLINE=11`
+   dropped legitimate small-raster PDFs (Autumn Leaves probeInterline=7).
+   `_isMusicPage` now ONLY rejects `probeInterline === 0`. Tiny interlines
+   simply mean the page was rendered small; adaptive rescaler upscales
+   on the second pass.
+2. **Upscale cap** (`_loadPdfPageAdaptive`) — `MAX_UPSCALE_FROM_PROBE =
+   2.5`. Prevents 4.3× upscales that blur staff lines to unrecognizable
+   gradients (Brahms collapse 524→2 filaments root cause).
+3. **Noise cleaning** — `cleanNoise(bin, w, h, 6) → cleanNoise(..., 3)`.
+   Keeps thin staff-line pixels that the 6-px minimum was scrubbing.
+4. **Horizontal-gap tolerance in filaments** (`omr-filaments.js`) —
+   `buildHorizontalFilaments` accepts `maxHorizontalGap` (0 strict,
+   2 relaxed, 4 ultraRelaxed). Bridges single-px x-shifts between
+   row runs without widening the vertical gap.
+5. **Chord-per-measure cap** — `MAX_CHORDS_PER_MEASURE = 16` in
+   `organizeNotes` to prevent the "notes compressed into random
+   timing" failure. Not a proper timing fix; the real fix is Phase 13
+   consuming StaffProjector measures (Wave 10).
+
+### Wave 7 fixes (v6.23.0 — 2026-04-17)
+1. **Phase 4 ultraRelaxed preset additions** (`omr-grid-lines.js`) —
+   `maxHorizontalGap = 4`, `maxSlopeDeviation = 0.20` (≈11°, effectively
+   off), `maxLineResidual = 8.0`, `maxVerticalGap = 4`,
+   `minRunPerInterline = 0.10`, `voteRatio = 0.15`,
+   `minLengthPerInterline = 3.0`, `maxThicknessPerInterline = 0.7`,
+   `meanThicknessAbsFloor = 6`. "Last resort" preset.
+2. **Median sheet slope** for relaxed + ultraRelaxed modes
+   (`computeMedianSlope`) — weighted mean is too fragile when 80 %+ of
+   filaments are antialiasing fragments with garbage slopes.
+3. **Rest over-detection reduction** (`omr-rests-alters.js`) — ink
+   density floor, aspect-ratio checks, `_hasHeadNear` + `_headsIndex`
+   skip rest columns that contain any detected notehead.
+4. **Legacy StaffDetector refuses on invalid scale** — prevents
+   covers/blanks from producing phantom staves.
 
 ### Wave 5 fixes (v6.20.0 — 2026-04-18)
 1. **Auto-rescale PDF rendering** (`omr-engine.js`
@@ -297,3 +459,167 @@ fallback when a new module fails to produce output.
   at `data/examples/price-florence-bright-eyes.midi` and is referenced from
   concert-hall.js SONG_LIBRARY_FALLBACK. Compare scanner output against
   that MIDI to catch ordering / rhythm / pitch regressions.
+
+## WAVE 10 PRIORITY WORK (next session pick-up order)
+
+The user has repeatedly stated: **"la transcription doit etre parfaite"**
+and **"clone Audiveris complet"** — not piecemeal. These are the
+highest-impact items still open after Wave 9:
+
+### 1. Wire StaffProjector measures into Phase 13 rhythm
+`ctx.staffProjections[i].measures` is populated by Wave 9 but nothing
+consumes it. Open `omr-sig.js` and find `organizeNotes` / measure
+assembly — replace its inline barline heuristic with
+`ctx.staffProjections[i].measures` when present. This should remove
+the "notes compressed into random timing" bug that
+`MAX_CHORDS_PER_MEASURE=16` only masks.
+
+### 2. NoteHeadsBuilder over-detection
+`omr-heads.js` — see `C` block (~lines 30-60) for thresholds.
+Current evidence (`bach-menuet-g.pdf` detection preview): rests,
+ornaments, dynamics, text ALL get red boxes. Approaches, in order:
+   a. Reject heads whose CC bbox is above/below the staff y-band by
+      more than ±7 interline units (beyond piano ledger range).
+   b. Reject heads whose distance-transform score exceeds the match
+      template's center by too wide a margin (current `maxDistanceLow /
+      maxDistanceHigh` are still too permissive — v6.17.0 picked 2.5 /
+      4.0, need 1.8 / 3.0).
+   c. Reject heads whose column has a matching REST glyph detected by
+      `omr-rests-alters.js` at the same x — they're mutually exclusive.
+   d. Port `evalBlackAsVoid` from Audiveris so voided heads don't get
+      doubled as black heads.
+
+### 3. Finish StaffProjector → barlines
+The Wave 9 port builds `peaks`, `barlines`, and `measures` but
+downstream code does NOT see them. Wire:
+   - `ctx.staffProjections[].barlines` → feed `omr-grid-bars.js`
+     `retrieveBarsAndSystems` as a seed instead of running its own
+     projection twice (cheaper AND more accurate).
+   - `ctx.staffProjections[].peaks (kind=STEM)` → feed
+     `omr-stems-seeds.js` as a known-good stem seed list.
+
+### 4. Full Hough ρ/θ accumulator (currently horizontal only)
+`omr-hough.js` skips the θ dimension because typical music sheets
+are deskewed ≤ 1°. For the rarer cameraphone scans with 3-5° tilt,
+we need a proper accumulator:
+   - θ ∈ [-5°, 5°] in 0.5° steps (21 angles).
+   - ρ accumulator per angle.
+   - Classic NMS + line-extraction returns (ρ, θ) pairs.
+   - Group pairs with similar θ and spacing ≈ interline into 5-tuples.
+This replaces the current row-sum + `skewTol=1` approximation for
+heavy-skew inputs. See `image/HoughTransform.java` in Audiveris.
+
+### 5. Complete clone = these still-missing Audiveris modules
+Ordered by impact:
+   a. `classifier/*` (note head ML classifier) — our geometric port
+      over-detects. The upstream code uses a trained CNN. We could
+      at minimum port the feature-extraction stage and run it as
+      a post-filter.
+   b. `sheet/beam/SpotsBuilder` (morphological beam detection) — our
+      `BeamsBuilder` is CC-based and confuses beams with dense ink
+      regions (dynamic markings, text).
+   c. `sig/relation/*` — full grade/relation graph so SIGraph can
+      actually reject impossible configurations (e.g. a "note" with
+      no stem connection in a voice where stems are required).
+   d. Bravura/Leland symbol templates — replace our procedural
+      notehead templates with SMuFL glyphs at rendered-pixel size.
+
+## FILE PATHS & DEPENDENCIES QUICK REFERENCE (Wave 9 layout)
+
+```
+blocksy-child/
+├── page-omr-scanner.php          ← scanner UI + inline player JS
+├── functions.php                 ← ENQUEUES + cache buster
+├── assets/OCR-Scan/
+│   ├── omr-scanner.css           ← scanner + piano styles
+│   ├── omr-scanner-api.php       ← WP REST hooks (not engine)
+│   ├── omr-admin.php             ← admin settings (not engine)
+│   └── engine/
+│       ├── omr-core.js           ← namespace + VERSION + flags + debug
+│       ├── omr-scale.js          ← ScaleBuilder (Phase 3)
+│       ├── omr-distance.js       ← chamfer DT (Phase 6 primitive)
+│       ├── omr-filaments.js      ← horizontal filament factory (Phase 3)
+│       ├── omr-grid-lines.js     ← LinesRetriever + ClustersRetriever (Phase 4)
+│       ├── omr-hough.js          ← NEW Wave 9: horizontal Hough (Phase 4b)
+│       ├── omr-grid-bars.js      ← BarsRetriever (Phase 5)
+│       ├── omr-staff-projector.js ← NEW Wave 9: StaffProjector (Phase 5b)
+│       ├── omr-stems-seeds.js    ← StemSeedsBuilder (Phase 6)
+│       ├── omr-beams.js          ← BeamsBuilder (Phase 7)
+│       ├── omr-templates.js      ← TemplateFactory (Phase 8a)
+│       ├── omr-heads.js          ← NoteHeadsBuilder (Phase 8b)
+│       ├── omr-ledgers.js        ← LedgersBuilder (Phase 9)
+│       ├── omr-stems.js          ← StemsBuilder + HeadLinker (Phase 10)
+│       ├── omr-clef-key-time.js  ← Clef/Key/Time (Phase 11)
+│       ├── omr-rests-alters.js   ← Rests + accidentals (Phase 12)
+│       ├── omr-sig.js            ← SIGraph + rhythm (Phase 13)
+│       ├── omr-musicxml.js       ← MusicXML writer (Phase 14a)
+│       ├── omr-midi.js           ← MIDI writer (Phase 14b)
+│       └── omr-engine.js         ← Orchestrator: Engine.process() pipeline
+```
+
+`functions.php` enqueue order (must match dependency DAG):
+core → scale → distance → filaments → grid-lines → hough →
+grid-bars → staff-projector → stems-seeds → beams → templates →
+heads → ledgers → stems → clef-key-time → rests-alters → sig →
+musicxml → midi → engine (depends on all).
+
+## HOW TO COMMIT (user hard rules, enforce)
+
+```bash
+# ONE commit per file. No exceptions.
+git add blocksy-child/assets/OCR-Scan/engine/<single-file>
+git commit -m "<file>.js — <what>" --no-verify
+
+# Bump cache-buster AT EVERY wave (user has no CDN cache access):
+#   1. blocksy-child/assets/OCR-Scan/engine/omr-core.js  OMR.VERSION
+#   2. blocksy-child/functions.php                        PIANOMODE_OMR_VER
+# Both must agree on the same version string.
+
+# Branch is fixed:
+git push -u origin claude/audiveris-integration-zOSh8
+```
+
+## COMMON FAILURE PATTERNS (cheat sheet for new sessions)
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| `[OMR] Phase 4 ... built=<big>, afterLen+Thick=<tiny>` | Antialiasing fragments + strict length filter | `omr-grid-lines.js` `C.minLengthPerInterline` — Hough fallback should kick in as Phase 4b |
+| `[OMR] PDF stitch would be ... px` | Multi-page PDF over 14000 px tall or 30 Mpx area | `MAX_STITCH_H` / `MAX_STITCH_AREA` in `omr-engine.js` |
+| `[OMR] No NoteOn reached Salamander after 3 s` | Event.type enum mismatch (AlphaTab version) | `pmHandleMidiEvent` in `page-omr-scanner.php` — verify `pmResolveMidiEnum` ran |
+| `Uncaught SyntaxError: Unexpected token '<'` on a JS file | Server returned HTML (404 page). File missing on deploy | Check WP deploy; the file exists in our repo |
+| Many red boxes on rests/ornaments | `omr-heads.js` thresholds too permissive | See Wave 10 priority 2 above |
+| Notes compressed into random timing | Measures not detected → fallback to one-bar dump | See Wave 10 priority 1: wire StaffProjector measures into Phase 13 |
+| `Found N staves (legacy fallback; Phase 4 reason ...)` | Phase 4 filament + Hough both failed | Normal fallback path; legacy finds staves OK but skips Phase 6..13 so timing is weak. Target: make Hough succeed so Phase 6+ run |
+| Cover page produces phantom notes | Legacy StaffDetector accepting text as staves | Should be gated — see `staffResult = empty` branch when `hint` is null |
+
+## DEBUG OVERLAY
+
+Add `?omrdebug=1` to the URL. `OMR.debug.push(stage, shapes)` calls are
+rendered over the preview canvas. Available stages:
+  - `gridLines` (Phase 4 filament overlay)
+  - `hough` (Phase 4b detected staves) — Wave 9
+  - `staffProjector` (Phase 5b barlines) — Wave 10 will emit this
+  - `gridBars`, `stemsSeeds`, `beams`, `heads`, `ledgers`, `stems`,
+    `clefs`, `rests`
+
+## FILES OUTSIDE OCR-Scan/ WE TOUCH (documented audit trail)
+
+User repeatedly asks: "si tu modifies des fichiers hors OCR dis-le moi".
+Here's the honest list of files outside `blocksy-child/assets/OCR-Scan/`
+that any wave may modify, and what it may do:
+
+| File | What we're allowed to change |
+|---|---|
+| `blocksy-child/functions.php` | ONLY: `PIANOMODE_OMR_VER` constant + `pianomode_enqueue_omr_scripts()` enqueue block. Nothing else. User has other branches editing this file. |
+| `blocksy-child/page-omr-scanner.php` | Entire file — this is the scanner template, owned by this feature. |
+| `blocksy-child/assets/OCR-Scan/omr-scanner.css` | Entire file — scanner CSS. |
+| `blocksy-child/assets/OCR-Scan/omr-scanner-api.php` | Rarely touched — WP REST hooks. |
+| `blocksy-child/assets/OCR-Scan/omr-admin.php` | Rarely touched — admin UI. |
+| `CLAUDE.md` (this file) | Always update at end of wave with new findings. |
+
+DO NOT TOUCH (user's other branches have in-flight changes):
+  - `single-score.php`, `single-song.php`, other templates
+  - Any JS under `blocksy-child/assets/concert-hall/`,
+    `.../sightreading/`, `.../virtual-piano/`, `.../games/`
+  - `blocksy-child/style.css` (main theme CSS)
+  - Anything outside `blocksy-child/` entirely
