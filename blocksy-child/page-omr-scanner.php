@@ -728,33 +728,55 @@ $theme_uri = get_stylesheet_directory_uri();
         pmActiveNotes = {};
     }
 
+    // Counts every NoteOn we route to the Salamander sampler. Used by
+    // the audio watchdog below: if we mute AlphaTab's internal synth
+    // but never reach a NoteOn in N seconds of playback the user would
+    // hear total silence — detect that and unmute AlphaTab as a
+    // fallback.
+    var pmSampledNoteOnCount = 0;
+
     // Route an AlphaTab midi event (command + data1 + data2) to the
     // Salamander sampler. Accepts both the raw MIDI status-byte form
     // and AlphaTab's richer event object with {type, noteKey, velocity}.
     function pmHandleMidiEvent(ev) {
         if (!pmSampler || !pmSamplerLoaded) return;
-        // AlphaTab 1.3.x MidiEvent fields:
-        //   type (MidiEventType), command (0x80..0xFF), data1, data2,
-        //   noteKey, velocity, channel.
-        var note     = (ev.noteKey !== undefined) ? ev.noteKey : ev.data1;
-        var velocity = (ev.velocity !== undefined) ? ev.velocity : ev.data2;
-        var cmd      = (ev.command !== undefined) ? ev.command : ev.type;
+        // AlphaTab 1.3.x MidiEvent fields vary by subclass — common
+        // ones: type (MidiEventType enum, small integer), command
+        // (raw MIDI byte 0x80..0xFF on NoteOn/Off/CC/PC), data1, data2,
+        // noteKey, velocity, channel. We read defensively.
+        var note     = (ev.noteKey   !== undefined) ? ev.noteKey
+                     : (ev.data1     !== undefined) ? ev.data1
+                     : (ev.note      !== undefined) ? ev.note
+                     : undefined;
+        var velocity = (ev.velocity  !== undefined) ? ev.velocity
+                     : (ev.data2     !== undefined) ? ev.data2
+                     : undefined;
+        var cmd      = (ev.command   !== undefined) ? ev.command : ev.type;
         if (note === undefined || note < 0 || note > 127) return;
 
         // Channel 10 (index 9) = drums in GM — skip.
-        var channel = (ev.channel !== undefined) ? ev.channel : ((cmd & 0x0F) || 0);
+        var channel = (ev.channel !== undefined) ? ev.channel
+                    : (typeof cmd === 'number' ? (cmd & 0x0F) : 0);
         if (channel === 9) return;
 
         var high = (typeof cmd === 'number') ? (cmd & 0xF0) : 0;
-        // MidiEventType enum in AlphaTab: NoteOn = 144 (0x90), NoteOff = 128 (0x80).
-        var isNoteOn  = (high === 0x90) && velocity > 0;
-        var isNoteOff = (high === 0x80) || (high === 0x90 && velocity === 0);
+        // Prefer AlphaTab's own NoteOn/NoteOff classification when it
+        // populates ev.isNoteOn (older builds). Otherwise derive from
+        // the raw MIDI high nibble, with velocity==0 treated as NoteOff.
+        var isNoteOn  = (ev.isNoteOn === true)
+                     || (high === 0x90 && (velocity === undefined || velocity > 0))
+                     || (ev.type && ev.type === 'NoteOn');
+        var isNoteOff = (ev.isNoteOff === true)
+                     || (high === 0x80)
+                     || (high === 0x90 && velocity === 0)
+                     || (ev.type && ev.type === 'NoteOff');
 
         if (isNoteOn) {
             var name = midiToNoteName(note);
             var vel = Math.max(0, Math.min(1, (velocity || 100) / 127));
             try { pmSampler.triggerAttack(name, Tone.now(), vel); } catch (e) {}
             pmActiveNotes[note] = true;
+            pmSampledNoteOnCount++;
         } else if (isNoteOff) {
             if (pmActiveNotes[note]) {
                 try { pmSampler.triggerRelease(midiToNoteName(note), Tone.now()); } catch (e) {}
@@ -807,16 +829,41 @@ $theme_uri = get_stylesheet_directory_uri();
 
         // AlphaTab 1.3.x only emits midiEventsPlayed for types present
         // in this filter — default is empty so the Tone.js bridge would
-        // never fire. Explicitly whitelist NoteOn / NoteOff.
-        var noteOnType = 0x90, noteOffType = 0x80;
-        if (typeof alphaTab !== 'undefined' && alphaTab.midi && alphaTab.midi.MidiEventType) {
-            if (alphaTab.midi.MidiEventType.NoteOn !== undefined) {
-                noteOnType = alphaTab.midi.MidiEventType.NoteOn;
-            }
-            if (alphaTab.midi.MidiEventType.NoteOff !== undefined) {
-                noteOffType = alphaTab.midi.MidiEventType.NoteOff;
+        // never fire. The enum values in alphaTab.midi.MidiEventType are
+        // NOT the raw MIDI status bytes (NoteOn != 0x90 in 1.3.x); we
+        // must read them dynamically. Previous waves guessed 0x90/0x80
+        // which silently dropped every event.
+        //
+        // To stay robust across AlphaTab minor versions we spray ALL
+        // numeric values exposed by the enum into the filter (plus the
+        // raw MIDI bytes as a safety net). pmHandleMidiEvent already
+        // filters internally on NoteOn / NoteOff, so extra event types
+        // passing through is harmless.
+        var midiEventFilter = [];
+        var midiEventTypeEnum = null;
+        if (typeof alphaTab !== 'undefined') {
+            if (alphaTab.midi && alphaTab.midi.MidiEventType) {
+                midiEventTypeEnum = alphaTab.midi.MidiEventType;
+            } else if (alphaTab.synth && alphaTab.synth.MidiEventType) {
+                midiEventTypeEnum = alphaTab.synth.MidiEventType;
             }
         }
+        if (midiEventTypeEnum) {
+            for (var mk in midiEventTypeEnum) {
+                var mv = midiEventTypeEnum[mk];
+                if (typeof mv === 'number' && midiEventFilter.indexOf(mv) === -1) {
+                    midiEventFilter.push(mv);
+                }
+            }
+        }
+        // Safety net: raw MIDI status bytes + a broad numeric range.
+        // Some builds key the filter by raw byte; others use a compact
+        // enum index (0..31). Push both to avoid guessing wrong.
+        for (var mi = 0; mi < 32; mi++) {
+            if (midiEventFilter.indexOf(mi) === -1) midiEventFilter.push(mi);
+        }
+        if (midiEventFilter.indexOf(0x80) === -1) midiEventFilter.push(0x80);
+        if (midiEventFilter.indexOf(0x90) === -1) midiEventFilter.push(0x90);
 
         var settings = {
             file: musicxmlUrl,
@@ -831,7 +878,7 @@ $theme_uri = get_stylesheet_directory_uri();
                 scrollMode: 1,
                 soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.1/dist/soundfont/sonivox.sf2',
                 scrollElement: document.getElementById('omr-at-viewport'),
-                midiEventsPlayedFilter: [noteOnType, noteOffType]
+                midiEventsPlayedFilter: midiEventFilter
             },
             display: {
                 layoutMode: 0,
@@ -965,6 +1012,26 @@ $theme_uri = get_stylesheet_directory_uri();
         atApi.playerStateChanged.on(function(e) {
             if (e.state === alphaTab.synth.PlayerState.Playing) {
                 atPlayIcon.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+                // Audio watchdog: if AlphaTab was muted (because we
+                // bridged audio to Tone.js Salamander) but no NoteOn
+                // reaches the sampler within 3 s of playback starting,
+                // assume the midi-events bridge is broken (filter enum
+                // mismatch, event shape change, etc.) and unmute
+                // AlphaTab so the user doesn't hear total silence. The
+                // user will hear Sonivox instead of Salamander — not
+                // ideal, but better than nothing.
+                var startCount = pmSampledNoteOnCount;
+                setTimeout(function () {
+                    if (pmSampledNoteOnCount === startCount
+                            && pmSamplerLoaded
+                            && atApi && typeof atApi.masterVolume !== 'undefined') {
+                        try {
+                            atApi.masterVolume = atVolume.value / 100;
+                        } catch (err) {}
+                        console.warn('[OMR] No NoteOn reached Salamander after 3 s — '
+                                     + 'falling back to AlphaTab Sonivox.');
+                    }
+                }, 3000);
             } else {
                 atPlayIcon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
                 // Clear piano + preview highlights when stopped/paused
