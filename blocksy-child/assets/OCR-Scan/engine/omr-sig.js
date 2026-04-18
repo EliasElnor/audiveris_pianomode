@@ -116,9 +116,17 @@
 
     /**
      * Main entry point.
+     *
+     * `staffProjections` (Wave 10) is the optional Phase 5b output from
+     * `OMR.StaffProjector.detectBarlines` — an array indexed parallel to
+     * `staves` where each entry carries `{barlines:[absX, ...],
+     * measures:[{x0,x1}, ...]}`. When present, its measures override
+     * the gridBars-derived ones because the projector operates on the
+     * full per-staff vertical ink density and catches barlines that
+     * `omr-grid-bars.js` can miss on low-contrast PDFs.
      */
     function buildSig(scale, staves, headers, heads, stems, beams, ledgers,
-                     rests, gridBars) {
+                     rests, gridBars, staffProjections) {
         if (!scale || !scale.valid) {
             return { systems: [] };
         }
@@ -195,8 +203,9 @@
         var chordTol = 0.5 * interline;
         var chords = mergeChords(events, chordTol);
 
-        // Step 3: build the system → measure structure from gridBars.
-        var systems = buildSystems(scale, staves, gridBars);
+        // Step 3: build the system → measure structure. Prefer Phase 5b
+        // StaffProjector output when present; fall back to gridBars.
+        var systems = buildSystems(scale, staves, gridBars, staffProjections);
 
         // Step 4: assign each event to its measure + voice.
         for (var ci = 0; ci < chords.length; ci++) {
@@ -426,15 +435,38 @@
     }
 
     // -------------------------------------------------------------------
-    // System / measure construction from Phase 5 GridBars output.
-    // If GridBars is missing, fall back to a single measure per staff.
+    // System / measure construction.
+    //
+    // Priority:
+    //   1. If Phase 5b StaffProjector produced barlines for the top
+    //      staff of each system, use its measures — these are computed
+    //      from the per-staff vertical ink projection and are far more
+    //      reliable than the global Phase 5 GridBars projection on
+    //      PDFs where each staff has different width/alignment.
+    //   2. Else if GridBars emitted systems with barlines, use them.
+    //   3. Else fall back to one measure per staff.
+    //
+    // StaffProjector output is indexed by `staff.id - 1`; we locate the
+    // entry for each system's anchor staff and translate its
+    // `{x0,x1}` measures into our measure shape.
     // -------------------------------------------------------------------
-    function buildSystems(scale, staves, gridBars) {
+    function buildSystems(scale, staves, gridBars, staffProjections) {
+        var projByStaffId = buildProjIndex(staffProjections);
+
         if (gridBars && gridBars.systems && gridBars.systems.length > 0) {
             return gridBars.systems.map(function (sys, idx) {
-                var measures = (sys.barlines || []).length > 0
-                    ? barlinesToMeasures(sys.staves[0], sys.barlines, idx)
-                    : [singleMeasure(sys.staves[0])];
+                var anchor    = sys.staves && sys.staves[0];
+                var projEntry = pickProjForStaff(projByStaffId, anchor);
+                var measures;
+                if (projEntry
+                        && projEntry.measures
+                        && projEntry.measures.length > 0) {
+                    measures = projMeasures(anchor, projEntry, idx);
+                } else if ((sys.barlines || []).length > 0) {
+                    measures = barlinesToMeasures(anchor, sys.barlines, idx);
+                } else {
+                    measures = [singleMeasure(anchor)];
+                }
                 return {
                     id:       idx + 1,
                     staves:   sys.staves,
@@ -442,14 +474,99 @@
                 };
             });
         }
-        // Fallback: each staff is its own system with one measure.
+        // Fallback: each staff is its own system, using its projector
+        // measures when present, else a single whole-staff measure.
         return staves.map(function (staff, idx) {
+            var projEntry = pickProjForStaff(projByStaffId, staff);
+            var measures;
+            if (projEntry
+                    && projEntry.measures
+                    && projEntry.measures.length > 0) {
+                measures = projMeasures(staff, projEntry, idx);
+            } else {
+                measures = [singleMeasure(staff)];
+            }
             return {
                 id:       idx + 1,
                 staves:   [staff],
-                measures: [singleMeasure(staff)]
+                measures: measures
             };
         });
+    }
+
+    // Index staff-projector entries by staff.id for O(1) lookup. Entries
+    // without a staffId are stored by position index as a fallback.
+    function buildProjIndex(staffProjections) {
+        if (!staffProjections || !staffProjections.length) return null;
+        var byId = { byId: {}, byPos: staffProjections };
+        for (var i = 0; i < staffProjections.length; i++) {
+            var p = staffProjections[i];
+            if (p && p.staffId !== undefined && p.staffId !== null) {
+                byId.byId[p.staffId] = p;
+            }
+        }
+        return byId;
+    }
+
+    function pickProjForStaff(projIndex, staff) {
+        if (!projIndex || !staff) return null;
+        if (staff.id !== undefined && projIndex.byId[staff.id]) {
+            return projIndex.byId[staff.id];
+        }
+        // Fallback: find by reference identity in the array.
+        for (var i = 0; i < projIndex.byPos.length; i++) {
+            var p = projIndex.byPos[i];
+            if (p && p.staff === staff) return p;
+        }
+        return null;
+    }
+
+    // Translate StaffProjector `{x0,x1}` measures (absolute image x)
+    // into our measure shape. If the first measure does not start at
+    // the staff's xLeft, prepend a header measure covering [xLeft, x0]
+    // so the staff header (clef/key/time) can land somewhere.
+    function projMeasures(staff, projEntry, sysIdx) {
+        var raw = projEntry.measures || [];
+        var out = [];
+        var xLeft  = staff ? staff.xLeft  : 0;
+        var xRight = staff ? staff.xRight : 0;
+        var cursor = xLeft;
+        for (var i = 0; i < raw.length; i++) {
+            var m = raw[i];
+            if (!m) continue;
+            var x0 = (typeof m.x0 === 'number') ? m.x0 : cursor;
+            var x1 = (typeof m.x1 === 'number') ? m.x1 : x0;
+            if (x1 <= x0) continue;
+            if (out.length === 0 && x0 > cursor + 1) {
+                // Leading header measure before the first barline.
+                out.push({
+                    index:  1,
+                    xLeft:  cursor,
+                    xRight: x0,
+                    voices: []
+                });
+            }
+            out.push({
+                index:  out.length + 1,
+                xLeft:  x0,
+                xRight: x1,
+                voices: []
+            });
+            cursor = x1;
+        }
+        // Trailing measure if projector stopped short of staff.xRight.
+        if (cursor < xRight - 1) {
+            out.push({
+                index:  out.length + 1,
+                xLeft:  cursor,
+                xRight: xRight,
+                voices: []
+            });
+        }
+        if (out.length === 0) {
+            out.push(singleMeasure(staff));
+        }
+        return out;
     }
 
     function barlinesToMeasures(staff, barlines, sysIdx) {
