@@ -575,8 +575,23 @@
             if (!removed[i]) result.push(hi);
         }
 
-        // Filter by minGrade.
-        return result.filter(function (h) { return h.grade >= C.minGrade; });
+        // Filter by minGrade AND by staff-band proximity. A head whose
+        // center is more than pitchRange interlines away from its own
+        // staff midline is almost certainly a parasite (title text,
+        // dynamics, lyrics). We already scan a pitchRange of ±5 (plus
+        // a couple via ledgers), so anything further is noise that
+        // slipped through via spurious distance-transform matches.
+        var parasiteGraded = result.filter(function (h) {
+            if (h.grade < C.minGrade) return false;
+            if (!h.staff || !h.staff.interline) return true;
+            var il = h.staff.interline;
+            var yMid = (h.staff.yTop + h.staff.yBottom) / 2;
+            var dy = Math.abs(h.y - yMid);
+            // Scanned range is ±5 interlines from mid; allow a small
+            // tolerance for ledger lines (roughly ±6.5 interlines).
+            return dy <= il * 6.5;
+        });
+        return parasiteGraded;
     }
 
     // -------------------------------------------------------------------
