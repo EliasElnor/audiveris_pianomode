@@ -2648,6 +2648,28 @@ OMR.Engine = {
                                     } else if (ultra && ultra.reason) {
                                         glReason = glReason + ' | ultraRelaxed: ' + ultra.reason;
                                     }
+                                    // Phase 4b: Hough-style horizontal line detector
+                                    // as a last resort before the legacy StaffDetector
+                                    // fallback. Filament-based retrieval collapses
+                                    // under antialiased PDFs whose staff lines are
+                                    // broken into many short fragments — the length
+                                    // filter kills 98 %+ of the candidates. Hough
+                                    // sidesteps that by operating on the raw
+                                    // horizontal projection, which fragmented lines
+                                    // still contribute to.
+                                    if ((!ctx.gridLines || ctx.gridLines.staves.length === 0)
+                                            && OMR.Hough && OMR.Hough.detectStaves) {
+                                        console.info('[OMR] Phase 4 ultraRelaxed pass failed; retrying Hough.');
+                                        var hough = OMR.Hough.detectStaves(
+                                            ctx.bin, ctx.w, ctx.h, ctx.scale);
+                                        if (hough && hough.staves && hough.staves.length > 0) {
+                                            ctx.gridLines = hough;
+                                            glReason = null;
+                                            console.info('[OMR] Phase 4 Hough recovered ' + hough.staves.length + ' staves.');
+                                        } else if (hough && hough.reason) {
+                                            glReason = glReason + ' | hough: ' + hough.reason;
+                                        }
+                                    }
                                 }
                             }
                         } catch (glErr) {
@@ -2750,6 +2772,33 @@ OMR.Engine = {
                             && ctx.gridBars.systems
                             && ctx.gridBars.systems.length > 0) {
                         ctx.systems = ctx.gridBars.systems;
+                    }
+
+                    // Phase 5b: StaffProjector — per-staff vertical
+                    // projection to locate barlines + stems. Feeds the
+                    // rhythm engine (Phase 13) with reliable measure cuts.
+                    // Output lives at ctx.staffProjections[i] for staff i.
+                    // Safe no-op when module isn't loaded.
+                    if (OMR.StaffProjector
+                            && typeof OMR.StaffProjector.detectBarlines === 'function'
+                            && ctx.staves && ctx.staves.length > 0
+                            && ctx.scale && ctx.scale.valid) {
+                        try {
+                            ctx.staffProjections = OMR.StaffProjector.detectBarlines(
+                                ctx.bin, ctx.w, ctx.h, ctx.staves, ctx.scale);
+                            var totalBars = 0;
+                            for (var spi = 0; spi < ctx.staffProjections.length; spi++) {
+                                var sp = ctx.staffProjections[spi];
+                                if (sp && sp.barlines) totalBars += sp.barlines.length;
+                            }
+                            if (totalBars > 0) {
+                                console.info('[OMR] Phase 5b StaffProjector: '
+                                             + totalBars + ' barlines across '
+                                             + ctx.staffProjections.length + ' staves.');
+                            }
+                        } catch (spErr) {
+                            ctx.staffProjections = null;
+                        }
                     }
                     return ctx;
                 });
