@@ -137,6 +137,11 @@ $theme_uri = get_stylesheet_directory_uri();
         <div class="pm-omr-preview" id="omr-preview" style="display:none;">
             <div class="pm-omr-preview-header">
                 <span>Detection Preview</span>
+                <div class="pm-omr-preview-nav" id="omr-preview-nav" style="display:none;">
+                    <button type="button" class="pm-omr-btn-small" id="omr-preview-prev" aria-label="Previous page">&#10094;</button>
+                    <span class="pm-omr-preview-page" id="omr-preview-page">Page 1 / 1</span>
+                    <button type="button" class="pm-omr-btn-small" id="omr-preview-next" aria-label="Next page">&#10095;</button>
+                </div>
                 <button type="button" class="pm-omr-preview-toggle" id="omr-preview-toggle">Hide</button>
             </div>
             <canvas id="omr-preview-canvas" style="width:100%; border-radius:8px;"></canvas>
@@ -210,6 +215,33 @@ $theme_uri = get_stylesheet_directory_uri();
                                 <input type="range" id="omr-at-volume" min="0" max="100" value="50" aria-label="Volume control">
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Piano options: octave range, labels, note naming -->
+                <div class="pm-omr-piano-options" id="omr-piano-options">
+                    <div class="pm-omr-piano-option">
+                        <label for="omr-piano-octaves">Octaves</label>
+                        <select id="omr-piano-octaves" aria-label="Piano octave range">
+                            <option value="5">5 (C2–C7)</option>
+                            <option value="7">7 (A0–C8)</option>
+                            <option value="full" selected>Full 88</option>
+                        </select>
+                    </div>
+                    <div class="pm-omr-piano-option">
+                        <label for="omr-piano-labels">Labels</label>
+                        <select id="omr-piano-labels" aria-label="Note label display">
+                            <option value="c">C only</option>
+                            <option value="all">All notes</option>
+                            <option value="white">White keys</option>
+                        </select>
+                    </div>
+                    <div class="pm-omr-piano-option">
+                        <label for="omr-piano-naming">Naming</label>
+                        <select id="omr-piano-naming" aria-label="Note naming convention">
+                            <option value="international">C D E F G A B</option>
+                            <option value="latin">Do Ré Mi Fa Sol La Si</option>
+                        </select>
                     </div>
                 </div>
 
@@ -569,6 +601,7 @@ $theme_uri = get_stylesheet_directory_uri();
 
             // Build the piano keyboard now that the result panel is visible
             if (!pianoBuilt && pianoEl) buildPiano();
+            syncPianoControls();
 
             // Defer AlphaTab init by one frame so the flex layout
             // inside .pm-omr-alphatab-wrap is fully resolved and
@@ -738,20 +771,38 @@ $theme_uri = get_stylesheet_directory_uri();
     // Route an AlphaTab midi event (command + data1 + data2) to the
     // Salamander sampler. Accepts both the raw MIDI status-byte form
     // and AlphaTab's richer event object with {type, noteKey, velocity}.
+    //
+    // Resolved NoteOn/NoteOff enum values — populated from
+    // alphaTab.midi.MidiEventType at init time so ev.type comparisons
+    // work against the actual numeric enum (1.3.x NoteOn is NOT 0x90).
+    var pmMidiTypeNoteOn = null;
+    var pmMidiTypeNoteOff = null;
+    function pmResolveMidiEnum() {
+        if (typeof alphaTab === 'undefined') return;
+        var enumSrc = (alphaTab.midi && alphaTab.midi.MidiEventType)
+                   || (alphaTab.synth && alphaTab.synth.MidiEventType);
+        if (!enumSrc) return;
+        if (enumSrc.NoteOn !== undefined)  pmMidiTypeNoteOn  = enumSrc.NoteOn;
+        if (enumSrc.NoteOff !== undefined) pmMidiTypeNoteOff = enumSrc.NoteOff;
+    }
+
     function pmHandleMidiEvent(ev) {
         if (!pmSampler || !pmSamplerLoaded) return;
+        if (pmMidiTypeNoteOn === null) pmResolveMidiEnum();
+
         // AlphaTab 1.3.x MidiEvent fields vary by subclass — common
         // ones: type (MidiEventType enum, small integer), command
         // (raw MIDI byte 0x80..0xFF on NoteOn/Off/CC/PC), data1, data2,
         // noteKey, velocity, channel. We read defensively.
         var note     = (ev.noteKey   !== undefined) ? ev.noteKey
+                     : (ev.noteNumber!== undefined) ? ev.noteNumber
                      : (ev.data1     !== undefined) ? ev.data1
                      : (ev.note      !== undefined) ? ev.note
                      : undefined;
         var velocity = (ev.velocity  !== undefined) ? ev.velocity
                      : (ev.data2     !== undefined) ? ev.data2
                      : undefined;
-        var cmd      = (ev.command   !== undefined) ? ev.command : ev.type;
+        var cmd      = (ev.command   !== undefined) ? ev.command : undefined;
         if (note === undefined || note < 0 || note > 127) return;
 
         // Channel 10 (index 9) = drums in GM — skip.
@@ -760,16 +811,23 @@ $theme_uri = get_stylesheet_directory_uri();
         if (channel === 9) return;
 
         var high = (typeof cmd === 'number') ? (cmd & 0xF0) : 0;
-        // Prefer AlphaTab's own NoteOn/NoteOff classification when it
-        // populates ev.isNoteOn (older builds). Otherwise derive from
-        // the raw MIDI high nibble, with velocity==0 treated as NoteOff.
+        // Detection order:
+        //  1. AlphaTab flags `isNoteOn`/`isNoteOff` (older builds).
+        //  2. Numeric ev.type === resolved enum value (1.3.x path).
+        //  3. Raw MIDI status byte (command field set by some events).
+        //  4. String fallback (very old / alt builds).
         var isNoteOn  = (ev.isNoteOn === true)
+                     || (pmMidiTypeNoteOn !== null && ev.type === pmMidiTypeNoteOn
+                         && (velocity === undefined || velocity > 0))
                      || (high === 0x90 && (velocity === undefined || velocity > 0))
-                     || (ev.type && ev.type === 'NoteOn');
+                     || (ev.type === 'NoteOn');
         var isNoteOff = (ev.isNoteOff === true)
+                     || (pmMidiTypeNoteOff !== null && ev.type === pmMidiTypeNoteOff)
+                     || (pmMidiTypeNoteOn !== null && ev.type === pmMidiTypeNoteOn
+                         && velocity === 0)
                      || (high === 0x80)
                      || (high === 0x90 && velocity === 0)
-                     || (ev.type && ev.type === 'NoteOff');
+                     || (ev.type === 'NoteOff');
 
         if (isNoteOn) {
             var name = midiToNoteName(note);
@@ -1177,10 +1235,42 @@ $theme_uri = get_stylesheet_directory_uri();
     var labelsLatin = ['Do', 'Ré', 'Mi', 'Fa', 'Sol', 'La', 'Si'];
     var pianoLabels = labelsInternational;
 
-    // Detect locale for solfege labels
+    // Piano display options — driven by the select controls above the
+    // keyboard. Persisted in localStorage so user preferences survive
+    // page reloads.
+    var pianoOpts = {
+        range:  'full',            // '5', '7' or 'full'
+        labels: 'c',               // 'c', 'all' or 'white'
+        naming: 'international'    // 'international' or 'latin'
+    };
+    try {
+        var stored = localStorage.getItem('pmOmrPianoOpts');
+        if (stored) {
+            var p = JSON.parse(stored);
+            if (p && typeof p === 'object') {
+                if (p.range)  pianoOpts.range  = p.range;
+                if (p.labels) pianoOpts.labels = p.labels;
+                if (p.naming) pianoOpts.naming = p.naming;
+            }
+        }
+    } catch(e) {}
+
+    function persistPianoOpts() {
+        try { localStorage.setItem('pmOmrPianoOpts', JSON.stringify(pianoOpts)); } catch(e) {}
+    }
+
+    // Detect locale for solfege labels — only applies when the user
+    // hasn't explicitly chosen a naming convention (first-visit default).
     (function detectNoteLocale() {
+        var hasStored = false;
+        try { hasStored = !!localStorage.getItem('pmOmrPianoOpts'); } catch(e) {}
+        if (hasStored) {
+            pianoLabels = (pianoOpts.naming === 'latin') ? labelsLatin : labelsInternational;
+            return;
+        }
         var lang = (navigator.language || navigator.userLanguage || '').toLowerCase().slice(0, 2);
         if (['fr', 'it', 'es', 'pt'].indexOf(lang) !== -1) {
+            pianoOpts.naming = 'latin';
             pianoLabels = labelsLatin;
             return;
         }
@@ -1196,13 +1286,24 @@ $theme_uri = get_stylesheet_directory_uri();
                         'CF','CG','CD','GA','CM','DJ','KM','MG','HT','GQ'
                     ];
                     if (latinCountries.indexOf(cc) !== -1) {
+                        pianoOpts.naming = 'latin';
                         pianoLabels = labelsLatin;
+                        syncPianoControls();
                         if (pianoBuilt) buildPiano();
                     }
                 })
                 .catch(function() {});
         } catch(e) {}
     })();
+
+    function syncPianoControls() {
+        var octSel = document.getElementById('omr-piano-octaves');
+        var labSel = document.getElementById('omr-piano-labels');
+        var namSel = document.getElementById('omr-piano-naming');
+        if (octSel) octSel.value = pianoOpts.range;
+        if (labSel) labSel.value = pianoOpts.labels;
+        if (namSel) namSel.value = pianoOpts.naming;
+    }
 
     function isBlackKey(midi) {
         return [1, 3, 6, 8, 10].indexOf(midi % 12) !== -1;
@@ -1217,12 +1318,23 @@ $theme_uri = get_stylesheet_directory_uri();
     function buildPiano() {
         pianoKeys = [];
         pianoEl.innerHTML = '';
+        pianoLabels = (pianoOpts.naming === 'latin') ? labelsLatin : labelsInternational;
 
-        var noteIndex = { 'C': 0, 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'A': 5, 'B': 6 };
-        var startPitch = 21; // A0
-        var endPitch = 108;  // C8
+        // Range selection: '5' = C2..C7 (61 keys), '7' = A0..C8 (88 keys,
+        // same as full), 'full' = A0..C8. We keep the default as full so
+        // the historic 88-key behaviour is preserved unless the user picks
+        // 5 explicitly.
+        var startPitch, endPitch;
+        if (pianoOpts.range === '5') {
+            startPitch = 36;  // C2
+            endPitch   = 96;  // C7
+        } else {
+            startPitch = 21;  // A0
+            endPitch   = 108; // C8
+        }
 
-        // Create all 88 keys using wrapper approach (like sightreading)
+        var whitePitchClasses = { 0:0, 2:1, 4:2, 5:3, 7:4, 9:5, 11:6 };
+
         for (var pitch = startPitch; pitch <= endPitch; pitch++) {
             var black = isBlackKey(pitch);
             var noteName = midiToNoteName(pitch);
@@ -1237,12 +1349,36 @@ $theme_uri = get_stylesheet_directory_uri();
             key.setAttribute('data-midi', pitch);
             key.setAttribute('data-note', noteName);
 
-            // Add label on C notes (white keys only)
-            if (!black && noteName.indexOf('C') === 0 && noteName.indexOf('#') === -1) {
+            // Labels: 'c' (default — only C notes), 'white' (every white
+            // key), 'all' (every key including sharps). Sharp keys get
+            // the accidental glyph so Latin and International users both
+            // see "C#" / "Do#" without extra lookups.
+            var shouldLabel = false;
+            if (pianoOpts.labels === 'all') {
+                shouldLabel = true;
+            } else if (pianoOpts.labels === 'white') {
+                shouldLabel = !black;
+            } else {
+                shouldLabel = !black && noteName.indexOf('C') === 0
+                              && noteName.indexOf('#') === -1;
+            }
+            if (shouldLabel) {
+                var pc = pitch % 12;
+                var octave = Math.floor(pitch / 12) - 1;
+                var labelText;
+                if (black) {
+                    // Name sharps after the white below (C#, D#, ...)
+                    var base = whitePitchClasses[(pitch - 1) % 12];
+                    labelText = (base !== undefined)
+                              ? (pianoLabels[base] + '#' + octave)
+                              : noteName;
+                } else {
+                    var idx = whitePitchClasses[pc];
+                    labelText = pianoLabels[idx] + octave;
+                }
                 var label = document.createElement('span');
                 label.className = 'pm-piano-label';
-                var oct = parseInt(noteName.replace('C', ''), 10);
-                label.textContent = pianoLabels[0] + oct;
+                label.textContent = labelText;
                 key.appendChild(label);
             }
 
@@ -1298,8 +1434,10 @@ $theme_uri = get_stylesheet_directory_uri();
         var containerWidth = pianoWrap.clientWidth;
         if (containerWidth === 0) return false;
 
-        // Count white keys: 52 for full 88-key piano
-        var whiteKeyCount = 52;
+        // Count white keys in the current range.
+        //   full / 7 (A0..C8) → 52 white
+        //   5       (C2..C7) → 36 white
+        var whiteKeyCount = (pianoOpts.range === '5') ? 36 : 52;
         var availableWidth = containerWidth - 16; // padding
         var whiteKeyWidth = availableWidth / whiteKeyCount;
         var blackKeyWidth = whiteKeyWidth * 0.62;
@@ -1397,6 +1535,87 @@ $theme_uri = get_stylesheet_directory_uri();
         }
         highlightedNoteIndices = [];
     }
+
+    // -------------------------------------------------------
+    // Piano option select listeners — rebuild the keyboard when the
+    // range / labels / naming change. Changes are persisted so the
+    // user's picks survive page reloads.
+    // -------------------------------------------------------
+    (function wirePianoOptions() {
+        var octSel = document.getElementById('omr-piano-octaves');
+        var labSel = document.getElementById('omr-piano-labels');
+        var namSel = document.getElementById('omr-piano-naming');
+        syncPianoControls();
+        function onChange() {
+            if (octSel) pianoOpts.range  = octSel.value;
+            if (labSel) pianoOpts.labels = labSel.value;
+            if (namSel) pianoOpts.naming = namSel.value;
+            pianoLabels = (pianoOpts.naming === 'latin') ? labelsLatin : labelsInternational;
+            persistPianoOpts();
+            if (pianoBuilt) buildPiano();
+        }
+        if (octSel) octSel.addEventListener('change', onChange);
+        if (labSel) labSel.addEventListener('change', onChange);
+        if (namSel) namSel.addEventListener('change', onChange);
+    })();
+
+    // -------------------------------------------------------
+    // Detection preview — multi-page navigation. Populated by
+    // drawPreview when lastResult.pages is present (stitched PDF
+    // scans produce one canvas per page of the original PDF).
+    // -------------------------------------------------------
+    (function wirePreviewNav() {
+        var navWrap = document.getElementById('omr-preview-nav');
+        var prev    = document.getElementById('omr-preview-prev');
+        var next    = document.getElementById('omr-preview-next');
+        var label   = document.getElementById('omr-preview-page');
+        if (!navWrap || !prev || !next || !label) return;
+        var previewPageIdx = 0;
+
+        function currentPages() {
+            if (!lastResult) return null;
+            if (lastResult.pagePreviews && lastResult.pagePreviews.length > 1) {
+                return lastResult.pagePreviews;
+            }
+            return null;
+        }
+        function renderPreviewPage() {
+            var pages = currentPages();
+            if (!pages) { navWrap.style.display = 'none'; return; }
+            navWrap.style.display = '';
+            if (previewPageIdx < 0) previewPageIdx = 0;
+            if (previewPageIdx >= pages.length) previewPageIdx = pages.length - 1;
+            label.textContent = 'Page ' + (previewPageIdx + 1) + ' / ' + pages.length;
+
+            var ctx = previewCanvas.getContext('2d');
+            var page = pages[previewPageIdx];
+            previewCanvas.width  = page.canvas.width;
+            previewCanvas.height = page.canvas.height;
+            ctx.drawImage(page.canvas, 0, 0);
+            previewBaseImage = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+            previewHighlightCtx = ctx;
+        }
+        prev.addEventListener('click', function () {
+            previewPageIdx--;
+            renderPreviewPage();
+        });
+        next.addEventListener('click', function () {
+            previewPageIdx++;
+            renderPreviewPage();
+        });
+        // Hook drawPreview so page nav appears when relevant.
+        var origDraw = drawPreview;
+        drawPreview = function (result) {
+            previewPageIdx = 0;
+            origDraw(result);
+            if (result && result.pagePreviews && result.pagePreviews.length > 1) {
+                navWrap.style.display = '';
+                label.textContent = 'Page 1 / ' + result.pagePreviews.length;
+            } else {
+                navWrap.style.display = 'none';
+            }
+        };
+    })();
 
 })();
 </script>
