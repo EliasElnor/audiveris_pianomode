@@ -113,7 +113,40 @@
     function computeFromReference(reference, width, height, mask) {
         mask = mask || DEFAULT_MASK;
         var normalizer = mask[0][2];
-        var out = new DistanceTable(width, height, normalizer);
+        // Guard against pathological inputs — the Int32Array alloc inside
+        // DistanceTable throws "Invalid array length" if width*height is
+        // negative, non-finite, or absurdly large. On very big rescaled
+        // PDF pages (≥120M px, ~480 MB Int32Array) we refuse the alloc.
+        if (!reference || !isFinite(width) || !isFinite(height)
+                || width <= 0 || height <= 0
+                || width * height > 120000000
+                || reference.length < width * height) {
+            return {
+                data:       new Int32Array(0),
+                width:      0,
+                height:     0,
+                normalizer: normalizer,
+                getWidth:   function () { return 0; },
+                getHeight:  function () { return 0; },
+                getValue:   function () { return VALUE_UNKNOWN; },
+                getPixelDistance: function () { return -1; }
+            };
+        }
+        var out;
+        try {
+            out = new DistanceTable(width, height, normalizer);
+        } catch (allocErr) {
+            return {
+                data:       new Int32Array(0),
+                width:      0,
+                height:     0,
+                normalizer: normalizer,
+                getWidth:   function () { return 0; },
+                getHeight:  function () { return 0; },
+                getValue:   function () { return VALUE_UNKNOWN; },
+                getPixelDistance: function () { return -1; }
+            };
+        }
         var data = out.data;
 
         var x, y, i, n = width * height;
