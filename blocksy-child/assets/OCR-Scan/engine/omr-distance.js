@@ -234,6 +234,11 @@
         if (yMax >= height) yMax = height - 1;
         var w2 = xMax - xMin + 1;
         var h2 = yMax - yMin + 1;
+        // Defensive guard: degenerate rectangles (empty template range)
+        // would otherwise raise "Invalid typed array length".
+        if (w2 <= 0 || h2 <= 0) {
+            return { data: new Int32Array(0), width: 0, height: 0, normalizer: normalizer };
+        }
         var sub = new Uint8Array(w2 * h2);
         for (var y = yMin; y <= yMax; y++) {
             for (var x = xMin; x <= xMax; x++) {
