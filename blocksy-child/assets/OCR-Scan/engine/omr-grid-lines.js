@@ -134,14 +134,20 @@
             cc.meanThicknessAbsFloor = 4;
         }
         if (opts && opts.ultraRelaxed) {
-            cc.maxSlopeDeviation     = 0.08;   // ~4.5 degrees
-            cc.maxLineResidual       = 3.5;    // very wiggly antialiased lines
-            cc.maxVerticalGap        = 3;      // bridge 2-row breaks
-            cc.minRunPerInterline    = 0.15;   // accept even 3 px runs on small int
-            cc.voteRatio             = 0.20;   // 20% of slices is enough
-            cc.minLengthPerInterline = 3.5;    // short staves (fragmented scans)
-            cc.maxThicknessPerInterline = 0.6;
-            cc.meanThicknessAbsFloor = 5;
+            // "Last resort" preset — when strict + relaxed both failed.
+            // We essentially drop the straightness + slope filters: on
+            // low-DPI PDFs where lines are antialiased to 1 px, any
+            // 2-3 px wiggle or 0.08 rad (~5°) tilt is noise, not a real
+            // non-staff filament. We rely on the 5-line comb voting to
+            // reject false positives instead.
+            cc.maxSlopeDeviation     = 0.20;   // ~11 degrees — effectively off
+            cc.maxLineResidual       = 8.0;    // very wiggly antialiased lines
+            cc.maxVerticalGap        = 4;      // bridge 3-row breaks
+            cc.minRunPerInterline    = 0.10;   // accept 2 px runs on small int
+            cc.voteRatio             = 0.15;   // 15% of slices is enough
+            cc.minLengthPerInterline = 3.0;    // short staves (fragmented scans)
+            cc.maxThicknessPerInterline = 0.7;
+            cc.meanThicknessAbsFloor = 6;
         }
         return cc;
     }
@@ -224,7 +230,19 @@
         }
 
         // ---- step 4: global sheet slope ----
-        var sheetSlope = computeSheetSlope(filaments);
+        // Weighted mean is fine on strict PDFs where > 95 % of
+        // filaments belong to real staff lines. In relaxed/ultraRelaxed
+        // mode we also keep a lot of short fragments whose slopes are
+        // computed from only a few points, so we use the MEDIAN slope
+        // (robust to antialiasing outliers) — this stops a single
+        // 0.15-rad fragment from dragging the sheet slope off the
+        // musical mean.
+        var sheetSlope;
+        if (opts && (opts.relaxed || opts.ultraRelaxed)) {
+            sheetSlope = computeMedianSlope(filaments);
+        } else {
+            sheetSlope = computeSheetSlope(filaments);
+        }
 
         // ---- step 5: slope deviation filter ----
         filaments = filaments.filter(function (f) {
@@ -445,6 +463,24 @@
             sumW  += w;
         }
         return sumW > 0 ? (sumWS / sumW) : 0;
+    }
+
+    // Median slope of the longest 50 % filaments — robust to the
+    // handful of outlier slopes antialiased PDF lines emit when the
+    // filament factory fuses two diagonal pixel runs.
+    function computeMedianSlope(filaments) {
+        if (filaments.length === 0) return 0;
+        var byLen = filaments.slice().sort(function (a, b) {
+            return b.getLength() - a.getLength();
+        });
+        var take = Math.max(1, Math.ceil(byLen.length * 0.5));
+        var slopes = [];
+        for (var i = 0; i < take; i++) slopes.push(byLen[i].getSlope());
+        slopes.sort(function (a, b) { return a - b; });
+        var mid = Math.floor(slopes.length / 2);
+        return (slopes.length % 2 === 1)
+            ? slopes[mid]
+            : 0.5 * (slopes[mid - 1] + slopes[mid]);
     }
 
     // -------------------------------------------------------------------
