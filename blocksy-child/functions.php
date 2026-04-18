@@ -428,7 +428,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.25.0' );
+    define( 'PIANOMODE_OMR_VER', '6.26.0' );
 }
 
 /**
@@ -516,12 +516,36 @@ function pianomode_enqueue_omr_scripts() {
         false
     );
 
-    // 5. Phase 5: BarsRetriever + StaffProjector — barline detection and
-    //    system assembly (grand staff grouping). Depends on Phase 4 for
-    //    Staff inputs.
+    // 4b. Phase 4b: Hough-style horizontal line detector — fallback
+    //     for PDF rasters where LinesRetriever's filaments collapse
+    //     under the length filter (antialiasing fragments staff lines).
+    //     Emits the same Staff[] shape so Phase 5..14 consume it
+    //     identically. Depends on grid-lines for pairStavesIntoSystems.
+    wp_enqueue_script(
+        'pm-omr-hough',
+        $base_uri . '/engine/omr-hough.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 5. Phase 5: BarsRetriever — barline detection and system assembly
+    //    (grand staff grouping). Depends on Phase 4 for Staff inputs.
     wp_enqueue_script(
         'pm-omr-grid-bars',
         $base_uri . '/engine/omr-grid-bars.js',
+        [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
+        PIANOMODE_OMR_VER,
+        false
+    );
+
+    // 5b. Phase 5b: StaffProjector — per-staff 1-D projection of vertical
+    //     artefacts (barlines, stems, thin verticals). Used by the
+    //     measure-boundary detector so the rhythm engine gets reliable
+    //     measure cuts instead of compressing notes.
+    wp_enqueue_script(
+        'pm-omr-staff-projector',
+        $base_uri . '/engine/omr-staff-projector.js',
         [ 'pm-omr-core', 'pm-omr-scale', 'pm-omr-grid-lines' ],
         PIANOMODE_OMR_VER,
         false
@@ -712,7 +736,9 @@ function pianomode_enqueue_omr_scripts() {
             'pm-omr-distance',
             'pm-omr-filaments',
             'pm-omr-grid-lines',
+            'pm-omr-hough',
             'pm-omr-grid-bars',
+            'pm-omr-staff-projector',
             'pm-omr-stems-seeds',
             'pm-omr-beams',
             'pm-omr-templates',
