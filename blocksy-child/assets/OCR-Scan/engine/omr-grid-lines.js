@@ -101,6 +101,7 @@
         // Filament building thresholds passed to FilamentFactory
         minRunPerInterline:       0.25,  // only count horizontal runs ≥ 0.25*int
         maxVerticalGap:           1,     // connect runs across ≤ N-row breaks
+        maxHorizontalGap:         0,     // 0 = strict overlap; relaxed bumps
 
         // Grand-staff pairing (PartsBuilder port). Audiveris pairs two
         // adjacent staves into one Part when their vertical gap is below
@@ -127,6 +128,7 @@
             cc.maxSlopeDeviation     = 0.05;
             cc.maxLineResidual       = 2.0;
             cc.maxVerticalGap        = 2;
+            cc.maxHorizontalGap      = 2;     // bridge 2 px x-shift between rows
             cc.minRunPerInterline    = 0.20;
             cc.voteRatio             = 0.30;
             cc.minLengthPerInterline = 4.0;
@@ -143,6 +145,7 @@
             cc.maxSlopeDeviation     = 0.20;   // ~11 degrees — effectively off
             cc.maxLineResidual       = 8.0;    // very wiggly antialiased lines
             cc.maxVerticalGap        = 4;      // bridge 3-row breaks
+            cc.maxHorizontalGap      = 4;     // bridge 4 px x-shift between rows
             cc.minRunPerInterline    = 0.10;   // accept 2 px runs on small int
             cc.voteRatio             = 0.15;   // 15% of slices is enough
             cc.minLengthPerInterline = 3.0;    // short staves (fragmented scans)
@@ -195,8 +198,9 @@
         // ---- step 1: build horizontal filaments ----
         var filaments = OMR.Filaments.buildHorizontalFilaments(
             bin, width, height, {
-                minRunLength:   minRun,
-                maxVerticalGap: cc.maxVerticalGap
+                minRunLength:     minRun,
+                maxVerticalGap:   cc.maxVerticalGap,
+                maxHorizontalGap: cc.maxHorizontalGap
             });
         var totalBuilt = filaments.length;
         var tag = (opts && opts.ultraRelaxed) ? '[ultraRelaxed]'
