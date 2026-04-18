@@ -57,9 +57,18 @@ OMR.ImageProcessor = {
     // Audiveris targets interline ≈ 20 px (300 DPI scans). We render the
     // input at an adaptive scale so the sheet sits inside the calibration
     // sweet spot — Phase 2/4 thresholds are authored around this value.
+    //
+    // CAP on UPSCALE: when a PDF is rasterized at very low intrinsic
+    // resolution (e.g. probe interline=7 px on Brahms / Autumn Leaves)
+    // upscaling it 4× to hit interline=20 introduces severe antialiasing
+    // — staff lines turn into 5-row gradient bands and the filament
+    // factory can't recover them. We cap MAX_UPSCALE_FROM_PROBE at 2.5
+    // and accept that some thin PDFs run at interline=14-18 instead of
+    // exactly 20.  Phase 4 thresholds tolerate that range.
     TARGET_INTERLINE: 20,
     MIN_RENDER_SCALE: 0.6,
     MAX_RENDER_SCALE: 5.0,
+    MAX_UPSCALE_FROM_PROBE: 2.5,
     PROBE_MAX_WIDTH:  1800,
 
     // Probe a (gray) image, return the detected interline or 0 if we
@@ -205,6 +214,17 @@ OMR.ImageProcessor = {
                 };
             }
             var factor   = IP._targetScaleFactor(interline);
+            // Cap the *upscale* factor: 2.5× max relative to probeScale
+            // so we never produce a 4-5× blurry render. Downscale is OK
+            // (PDFs rendered too large get sharpened).
+            if (factor > IP.MAX_UPSCALE_FROM_PROBE) {
+                console.info('[OMR] PDF page ' + (pageIndex + 1)
+                             + ' upscale capped: probe interline='
+                             + interline + ', wanted factor='
+                             + factor.toFixed(2) + ', clamped to '
+                             + IP.MAX_UPSCALE_FROM_PROBE);
+                factor = IP.MAX_UPSCALE_FROM_PROBE;
+            }
             var newScale = IP._clampScale(probeScale * factor);
             // If the probe already landed inside ±15% of TARGET_INTERLINE,
             // skip the re-render — it would just burn CPU.
@@ -335,19 +355,16 @@ OMR.ImageProcessor = {
     MAX_STITCH_W:       4800,
     MAX_STITCH_H:       18000,
     STITCH_SEPARATOR:   40, // white px between pages
-    // Cover / blank / lyrics-only pages have no staff lines, so
+    // Cover / blank / lyrics-only pages have NO staff lines, so
     // `_loadPdfPageAdaptive` keeps them at probe scale and reports
-    // probeInterline = 0. Pages whose interline falls outside the
-    // musical range [11, 55] are almost always title-only or very
-    // heavily text-dominated — scanning them would produce phantom
-    // notes from text stems. We drop them before stitching.
-    MIN_VALID_INTERLINE: 11,
-    MAX_VALID_INTERLINE: 55,
+    // probeInterline = 0. Anything > 0 means staff lines were found
+    // — a small probe interline (e.g. 7 px on a tiny rasterized PDF)
+    // simply means the page was rendered at low resolution; the
+    // adaptive rescaler upscales it to ~20 px on the second pass.
+    // We MUST NOT use an interline floor here or we'd drop legitimate
+    // music pages that just happened to be rendered small.
     _isMusicPage: function(page) {
-        var il = page && page.probeInterline;
-        if (!il || il <= 0) return false;
-        var IP = OMR.ImageProcessor;
-        return il >= IP.MIN_VALID_INTERLINE && il <= IP.MAX_VALID_INTERLINE;
+        return !!(page && page.probeInterline && page.probeInterline > 0);
     },
     loadPDFStitched: function(file, onPageProgress) {
         var IP = OMR.ImageProcessor;
@@ -2007,6 +2024,26 @@ OMR.NoteDetector = {
                     ci = cj;
                 }
 
+                // Hard cap on events per measure. The legacy detector
+                // can emit 50+ "events" in a single measure when stems
+                // / fingerings / dynamics are mis-classified as heads,
+                // which crushes every note down to a 64th-note in the
+                // visual rendering. Cap at 16 chord positions and drop
+                // the lowest-confidence extras (we proxy confidence
+                // with `matchScore` falling back to isFilled+hasStem).
+                var MAX_CHORDS_PER_MEASURE = 16;
+                if (chordGroups.length > MAX_CHORDS_PER_MEASURE) {
+                    chordGroups.sort(function (a, b2) {
+                        var ah = a[0].head;
+                        var bh = b2[0].head;
+                        var as = (ah && typeof ah.matchScore === 'number') ? ah.matchScore : (a[0].hasStem ? 0.7 : 0.4);
+                        var bs = (bh && typeof bh.matchScore === 'number') ? bh.matchScore : (b2[0].hasStem ? 0.7 : 0.4);
+                        return bs - as;
+                    });
+                    chordGroups = chordGroups.slice(0, MAX_CHORDS_PER_MEASURE);
+                    chordGroups.sort(function (a, b2) { return a[0].x - b2[0].x; });
+                }
+
                 var totalBeats = 0;
                 for (var cg = 0; cg < chordGroups.length; cg++) {
                     totalBeats += chordGroups[cg][0].beats;
@@ -2530,7 +2567,13 @@ OMR.Engine = {
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
-                    OMR.ImageProcessor.cleanNoise(ctx.bin, ctx.w, ctx.h, 6);
+                    // Use minSize=3 instead of 6: on heavily antialiased
+                    // PDF rasters a thin staff-line segment can be a 4-5
+                    // pixel speckled CC, and cleanNoise(6) erases them
+                    // entirely. Setting minSize=3 still kills single
+                    // dust pixels but preserves the broken filaments
+                    // Phase 4 needs to bridge.
+                    OMR.ImageProcessor.cleanNoise(ctx.bin, ctx.w, ctx.h, 3);
                     report(2, 'Computing scale...', 22);
                     return ctx;
                 });
