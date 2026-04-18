@@ -64,14 +64,20 @@ OMR.ImageProcessor = {
 
     // Probe a (gray) image, return the detected interline or 0 if we
     // could not determine it. Runs on a Uint8ClampedArray/ImageData.
+    // Accepts interline values even when Scale.valid is false, because
+    // the "too small" / "too large" branches still report the measured
+    // interline — which is exactly what we need to rescale toward 20.
     _probeInterline: function(imageData, width, height) {
         try {
-            var gray = this.toGrayscale(imageData);
-            var t    = this.otsuThreshold(gray);
-            var bin  = this.binarize(gray, t);
+            var IP   = OMR.ImageProcessor;
+            var gray = IP.toGrayscale(imageData);
+            var t    = IP.otsuThreshold(gray);
+            var bin  = IP.binarize(gray, t);
             if (OMR.Scale && typeof OMR.Scale.build === 'function') {
                 var s = OMR.Scale.build(bin, width, height);
-                if (s && s.valid && s.interline > 0) return s.interline;
+                if (s && typeof s.interline === 'number' && s.interline > 0) {
+                    return s.interline;
+                }
             }
         } catch (e) { /* swallow — fall back to caller default */ }
         return 0;
@@ -83,19 +89,24 @@ OMR.ImageProcessor = {
     // avoid pathological zoom (blank pages, text-only pages).
     _targetScaleFactor: function(probeInterline) {
         if (probeInterline <= 0) return 1.0;
-        var f = this.TARGET_INTERLINE / probeInterline;
+        var f = OMR.ImageProcessor.TARGET_INTERLINE / probeInterline;
         if (!isFinite(f) || f <= 0) return 1.0;
         return f;
     },
 
     _clampScale: function(scale) {
-        if (scale < this.MIN_RENDER_SCALE) return this.MIN_RENDER_SCALE;
-        if (scale > this.MAX_RENDER_SCALE) return this.MAX_RENDER_SCALE;
+        var IP = OMR.ImageProcessor;
+        if (scale < IP.MIN_RENDER_SCALE) return IP.MIN_RENDER_SCALE;
+        if (scale > IP.MAX_RENDER_SCALE) return IP.MAX_RENDER_SCALE;
         return scale;
     },
 
     loadImage: function(file) {
-        var self = this;
+        // NOTE: do NOT rely on `this` — page-omr-scanner.php calls this
+        // method via a detached reference (var loadFn = …loadImage;
+        // loadFn(file)) which loses the receiver. Everything below goes
+        // through OMR.ImageProcessor directly.
+        var IP = OMR.ImageProcessor;
         return new Promise(function(resolve, reject) {
             var reader = new FileReader();
             reader.onload = function(e) {
@@ -104,8 +115,8 @@ OMR.ImageProcessor = {
                     // Stage 1: downscale preview to PROBE_MAX_WIDTH so the
                     // probe pass stays cheap and fits WebGL texture limits.
                     var probeScale = 1;
-                    if (img.width > self.PROBE_MAX_WIDTH) {
-                        probeScale = self.PROBE_MAX_WIDTH / img.width;
+                    if (img.width > IP.PROBE_MAX_WIDTH) {
+                        probeScale = IP.PROBE_MAX_WIDTH / img.width;
                     }
                     var pw = Math.round(img.width  * probeScale);
                     var ph = Math.round(img.height * probeScale);
@@ -115,14 +126,12 @@ OMR.ImageProcessor = {
                     var pctx = pcanvas.getContext('2d');
                     pctx.drawImage(img, 0, 0, pw, ph);
                     var pdata = pctx.getImageData(0, 0, pw, ph);
-                    var interline = self._probeInterline(pdata, pw, ph);
-                    // Compute final scale: probeScale * (20 / interline),
-                    // clamped to [MIN, MAX]. Fall back to legacy cap at 3000px.
-                    var factor = self._targetScaleFactor(interline);
-                    var scale  = self._clampScale(probeScale * factor);
+                    var interline = IP._probeInterline(pdata, pw, ph);
+                    var factor = IP._targetScaleFactor(interline);
+                    var scale  = IP._clampScale(probeScale * factor);
                     // Hard cap on output resolution — avoids 12k-wide canvases.
-                    if (img.width * scale > 4200) scale = 4200 / img.width;
-                    if (img.height * scale > 5600) scale = 5600 / img.height;
+                    if (img.width  * scale > 4800) scale = 4800 / img.width;
+                    if (img.height * scale > 6400) scale = 6400 / img.height;
                     var canvas = document.createElement('canvas');
                     canvas.width  = Math.round(img.width  * scale);
                     canvas.height = Math.round(img.height * scale);
@@ -171,12 +180,13 @@ OMR.ImageProcessor = {
     },
 
     // Probe at scale=1.5, read interline, re-render at scale targeting
-    // interline=20. Fallback to 3.0 if probe fails (blank/cover pages).
+    // interline=20. Fallback to probe render if probe returns no
+    // interline (blank / cover / lyrics-only pages).
     _loadPdfPageAdaptive: function(page, pageIndex) {
-        var self = this;
+        var IP = OMR.ImageProcessor;
         var probeScale = 1.5;
-        return self._renderPdfPage(page, probeScale).then(function(probe) {
-            var interline = self._probeInterline(
+        return IP._renderPdfPage(page, probeScale).then(function(probe) {
+            var interline = IP._probeInterline(
                 probe.imageData, probe.width, probe.height);
             if (interline <= 0) {
                 // Probe failed — this page probably has no staff (cover,
@@ -194,11 +204,11 @@ OMR.ImageProcessor = {
                     pageIndex:      pageIndex
                 };
             }
-            var factor   = self._targetScaleFactor(interline);
-            var newScale = self._clampScale(probeScale * factor);
+            var factor   = IP._targetScaleFactor(interline);
+            var newScale = IP._clampScale(probeScale * factor);
             // If the probe already landed inside ±15% of TARGET_INTERLINE,
             // skip the re-render — it would just burn CPU.
-            var ratio = interline / self.TARGET_INTERLINE;
+            var ratio = interline / IP.TARGET_INTERLINE;
             if (ratio >= 0.85 && ratio <= 1.15) {
                 console.info('[OMR] PDF page ' + (pageIndex + 1)
                              + ' probe interline=' + interline
@@ -215,11 +225,12 @@ OMR.ImageProcessor = {
             }
             // Avoid super-wide renders that crash canvas.
             var vp = page.getViewport({ scale: newScale });
-            if (vp.width > 4800) newScale = newScale * (4800 / vp.width);
+            if (vp.width  > 4800) newScale = newScale * (4800 / vp.width);
+            if (vp.height > 6400) newScale = newScale * (6400 / vp.height);
             console.info('[OMR] PDF page ' + (pageIndex + 1)
                          + ' probe interline=' + interline
                          + ' → re-rendering at scale=' + newScale.toFixed(3));
-            return self._renderPdfPage(page, newScale).then(function(final) {
+            return IP._renderPdfPage(page, newScale).then(function(final) {
                 return {
                     imageData: final.imageData,
                     width:     final.width,
@@ -234,7 +245,11 @@ OMR.ImageProcessor = {
     },
 
     loadPDF: function(file) {
-        var self = this;
+        // No `this` dependency — detached callers (page-omr-scanner.php:
+        // `var loadFn = PianoModeOMR.ImageProcessor.loadPDF`) would
+        // otherwise lose the receiver and trigger "Cannot read properties
+        // of undefined" inside the nested promise chain.
+        var IP = OMR.ImageProcessor;
         return new Promise(function(resolve, reject) {
             if (typeof pdfjsLib === 'undefined') {
                 reject(new Error('PDF.js library not loaded'));
@@ -245,7 +260,7 @@ OMR.ImageProcessor = {
                 var typedArray = new Uint8Array(e.target.result);
                 pdfjsLib.getDocument({ data: typedArray }).promise.then(function(pdf) {
                     return pdf.getPage(1).then(function(page) {
-                        return self._loadPdfPageAdaptive(page, 0);
+                        return IP._loadPdfPageAdaptive(page, 0);
                     }).then(function(result) {
                         result.pageCount = pdf.numPages;
                         resolve(result);
@@ -265,7 +280,7 @@ OMR.ImageProcessor = {
     // Returns { pages: [pageResult, ...], pageCount } where pageResult
     // carries probeInterline/renderScale/pageIndex.
     loadPDFAllPages: function(file, onPageProgress) {
-        var self = this;
+        var IP = OMR.ImageProcessor;
         return new Promise(function(resolve, reject) {
             if (typeof pdfjsLib === 'undefined') {
                 reject(new Error('PDF.js library not loaded'));
@@ -285,7 +300,7 @@ OMR.ImageProcessor = {
                                     onPageProgress(pageNo, total);
                                 }
                                 return pdf.getPage(pageNo).then(function (page) {
-                                    return self._loadPdfPageAdaptive(page, pageNo - 1);
+                                    return IP._loadPdfPageAdaptive(page, pageNo - 1);
                                 }).then(function (result) {
                                     pages.push(result);
                                 });
