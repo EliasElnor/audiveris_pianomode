@@ -76,6 +76,14 @@
         // Filament acceptance
         minLengthPerInterline:    5.0,   // staff is ≥ 5 interlines wide
         maxThicknessPerInterline: 0.4,   // reject ink blobs thicker than 0.4*int
+        //    We compare f.getMeanThickness() (weight/length) against this
+        //    bound. The old code used f.getThickness() which is the bounding-
+        //    box height — that reading is fragile because antialiasing fuses
+        //    adjacent rows together and inflates yMax-yMin, which killed
+        //    most filaments on PDF rasters.
+        meanThicknessAbsFloor:    3,     // always allow ≤ 3 px of mean ink
+                                         // (keeps very thin scans viable even
+                                         //  when interline is small)
         maxLineResidual:          1.25,  // px RMS (BasicLine.getMeanDistance)
         maxSlopeDeviation:        0.025, // radians
 
@@ -140,9 +148,19 @@
         }
         var cc        = makeConstants(opts);
         var interline = scale.interline;
+        var mainFore  = (scale.mainFore > 0) ? scale.mainFore : 2;
         var minRun    = Math.max(3, Math.round(cc.minRunPerInterline * interline));
         var minLen    = Math.round(cc.minLengthPerInterline    * interline);
-        var maxThick  = Math.max(2, Math.round(cc.maxThicknessPerInterline * interline));
+        // Bounding-box height (getThickness) is inflated by antialiasing that
+        // fuses adjacent rows — use mean thickness (weight/length) instead.
+        // Bound is the larger of (a) a fraction of interline and (b) a small
+        // multiple of the measured staff-line thickness (mainFore). The
+        // absolute floor keeps us viable on interlines < 10 (cue staves).
+        var meanThickBound = Math.max(
+            cc.meanThicknessAbsFloor,
+            Math.round(cc.maxThicknessPerInterline * interline),
+            Math.round(mainFore * 2.0)
+        );
 
         // ---- step 1: build horizontal filaments ----
         var filaments = OMR.Filaments.buildHorizontalFilaments(
@@ -155,8 +173,11 @@
 
         // ---- step 2: length + thickness filter ----
         filaments = filaments.filter(function (f) {
+            var t = (typeof f.getMeanThickness === 'function')
+                        ? f.getMeanThickness()
+                        : f.getThickness();
             return f.getLength() >= minLen
-                && f.getThickness() <= maxThick;
+                && t <= meanThickBound;
         });
         var afterLenThick = filaments.length;
 
