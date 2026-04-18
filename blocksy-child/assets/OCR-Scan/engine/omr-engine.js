@@ -54,27 +54,91 @@ var VERSION = OMR.VERSION || 'v6.1.0';
  * ========================================================================= */
 OMR.ImageProcessor = {
 
+    // Audiveris targets interline ≈ 20 px (300 DPI scans). We render the
+    // input at an adaptive scale so the sheet sits inside the calibration
+    // sweet spot — Phase 2/4 thresholds are authored around this value.
+    TARGET_INTERLINE: 20,
+    MIN_RENDER_SCALE: 0.6,
+    MAX_RENDER_SCALE: 5.0,
+    PROBE_MAX_WIDTH:  1800,
+
+    // Probe a (gray) image, return the detected interline or 0 if we
+    // could not determine it. Runs on a Uint8ClampedArray/ImageData.
+    _probeInterline: function(imageData, width, height) {
+        try {
+            var gray = this.toGrayscale(imageData);
+            var t    = this.otsuThreshold(gray);
+            var bin  = this.binarize(gray, t);
+            if (OMR.Scale && typeof OMR.Scale.build === 'function') {
+                var s = OMR.Scale.build(bin, width, height);
+                if (s && s.valid && s.interline > 0) return s.interline;
+            }
+        } catch (e) { /* swallow — fall back to caller default */ }
+        return 0;
+    },
+
+    // Given a probe interline at probeScale, return the rescale factor we
+    // need to multiply probeScale by so the second render lands at
+    // TARGET_INTERLINE. Clamped to [MIN_RENDER_SCALE, MAX_RENDER_SCALE] to
+    // avoid pathological zoom (blank pages, text-only pages).
+    _targetScaleFactor: function(probeInterline) {
+        if (probeInterline <= 0) return 1.0;
+        var f = this.TARGET_INTERLINE / probeInterline;
+        if (!isFinite(f) || f <= 0) return 1.0;
+        return f;
+    },
+
+    _clampScale: function(scale) {
+        if (scale < this.MIN_RENDER_SCALE) return this.MIN_RENDER_SCALE;
+        if (scale > this.MAX_RENDER_SCALE) return this.MAX_RENDER_SCALE;
+        return scale;
+    },
+
     loadImage: function(file) {
+        var self = this;
         return new Promise(function(resolve, reject) {
             var reader = new FileReader();
             reader.onload = function(e) {
                 var img = new Image();
                 img.onload = function() {
-                    var canvas = document.createElement('canvas');
-                    var scale = 1;
-                    if (img.width > 3000 || img.height > 3000) {
-                        scale = 3000 / Math.max(img.width, img.height);
+                    // Stage 1: downscale preview to PROBE_MAX_WIDTH so the
+                    // probe pass stays cheap and fits WebGL texture limits.
+                    var probeScale = 1;
+                    if (img.width > self.PROBE_MAX_WIDTH) {
+                        probeScale = self.PROBE_MAX_WIDTH / img.width;
                     }
-                    canvas.width = Math.round(img.width * scale);
+                    var pw = Math.round(img.width  * probeScale);
+                    var ph = Math.round(img.height * probeScale);
+                    var pcanvas = document.createElement('canvas');
+                    pcanvas.width  = pw;
+                    pcanvas.height = ph;
+                    var pctx = pcanvas.getContext('2d');
+                    pctx.drawImage(img, 0, 0, pw, ph);
+                    var pdata = pctx.getImageData(0, 0, pw, ph);
+                    var interline = self._probeInterline(pdata, pw, ph);
+                    // Compute final scale: probeScale * (20 / interline),
+                    // clamped to [MIN, MAX]. Fall back to legacy cap at 3000px.
+                    var factor = self._targetScaleFactor(interline);
+                    var scale  = self._clampScale(probeScale * factor);
+                    // Hard cap on output resolution — avoids 12k-wide canvases.
+                    if (img.width * scale > 4200) scale = 4200 / img.width;
+                    if (img.height * scale > 5600) scale = 5600 / img.height;
+                    var canvas = document.createElement('canvas');
+                    canvas.width  = Math.round(img.width  * scale);
                     canvas.height = Math.round(img.height * scale);
                     var ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    console.info('[OMR] Image rescaled: probeInterline='
+                                 + interline + ' → scale=' + scale.toFixed(3)
+                                 + ' (' + canvas.width + 'x' + canvas.height + ')');
                     resolve({
                         imageData: imageData,
-                        width: canvas.width,
-                        height: canvas.height,
-                        canvas: canvas
+                        width:     canvas.width,
+                        height:    canvas.height,
+                        canvas:    canvas,
+                        probeInterline: interline,
+                        renderScale:    scale
                     });
                 };
                 img.onerror = function() { reject(new Error('Failed to load image')); };
@@ -85,7 +149,92 @@ OMR.ImageProcessor = {
         });
     },
 
+    // Render one PDF.js page at `scale` and return { imageData, width,
+    // height, canvas }. Shared by loadPDF and loadPDFAllPages.
+    _renderPdfPage: function(page, scale) {
+        var viewport = page.getViewport({ scale: scale });
+        var canvas   = document.createElement('canvas');
+        canvas.width  = Math.round(viewport.width);
+        canvas.height = Math.round(viewport.height);
+        var ctx = canvas.getContext('2d');
+        return page.render({
+            canvasContext: ctx,
+            viewport:      viewport
+        }).promise.then(function() {
+            return {
+                imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
+                width:     canvas.width,
+                height:    canvas.height,
+                canvas:    canvas
+            };
+        });
+    },
+
+    // Probe at scale=1.5, read interline, re-render at scale targeting
+    // interline=20. Fallback to 3.0 if probe fails (blank/cover pages).
+    _loadPdfPageAdaptive: function(page, pageIndex) {
+        var self = this;
+        var probeScale = 1.5;
+        return self._renderPdfPage(page, probeScale).then(function(probe) {
+            var interline = self._probeInterline(
+                probe.imageData, probe.width, probe.height);
+            if (interline <= 0) {
+                // Probe failed — this page probably has no staff (cover,
+                // lyrics-only, blank). Return the probe as-is; upstream
+                // code sees scale.valid=false and skips the page.
+                console.info('[OMR] PDF page ' + (pageIndex + 1)
+                             + ' probe @1.5 found no interline; keeping probe render.');
+                return {
+                    imageData: probe.imageData,
+                    width:     probe.width,
+                    height:    probe.height,
+                    canvas:    probe.canvas,
+                    probeInterline: 0,
+                    renderScale:    probeScale,
+                    pageIndex:      pageIndex
+                };
+            }
+            var factor   = self._targetScaleFactor(interline);
+            var newScale = self._clampScale(probeScale * factor);
+            // If the probe already landed inside ±15% of TARGET_INTERLINE,
+            // skip the re-render — it would just burn CPU.
+            var ratio = interline / self.TARGET_INTERLINE;
+            if (ratio >= 0.85 && ratio <= 1.15) {
+                console.info('[OMR] PDF page ' + (pageIndex + 1)
+                             + ' probe interline=' + interline
+                             + ' close enough to target; keeping scale=' + probeScale);
+                return {
+                    imageData: probe.imageData,
+                    width:     probe.width,
+                    height:    probe.height,
+                    canvas:    probe.canvas,
+                    probeInterline: interline,
+                    renderScale:    probeScale,
+                    pageIndex:      pageIndex
+                };
+            }
+            // Avoid super-wide renders that crash canvas.
+            var vp = page.getViewport({ scale: newScale });
+            if (vp.width > 4800) newScale = newScale * (4800 / vp.width);
+            console.info('[OMR] PDF page ' + (pageIndex + 1)
+                         + ' probe interline=' + interline
+                         + ' → re-rendering at scale=' + newScale.toFixed(3));
+            return self._renderPdfPage(page, newScale).then(function(final) {
+                return {
+                    imageData: final.imageData,
+                    width:     final.width,
+                    height:    final.height,
+                    canvas:    final.canvas,
+                    probeInterline: interline,
+                    renderScale:    newScale,
+                    pageIndex:      pageIndex
+                };
+            });
+        });
+    },
+
     loadPDF: function(file) {
+        var self = this;
         return new Promise(function(resolve, reject) {
             if (typeof pdfjsLib === 'undefined') {
                 reject(new Error('PDF.js library not loaded'));
@@ -95,25 +244,58 @@ OMR.ImageProcessor = {
             reader.onload = function(e) {
                 var typedArray = new Uint8Array(e.target.result);
                 pdfjsLib.getDocument({ data: typedArray }).promise.then(function(pdf) {
-                    return pdf.getPage(1);
-                }).then(function(page) {
-                    var scale = 3.0;
-                    var viewport = page.getViewport({ scale: scale });
-                    var canvas = document.createElement('canvas');
-                    canvas.width = Math.round(viewport.width);
-                    canvas.height = Math.round(viewport.height);
-                    var ctx = canvas.getContext('2d');
-                    return page.render({
-                        canvasContext: ctx,
-                        viewport: viewport
-                    }).promise.then(function() {
-                        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                        resolve({
-                            imageData: imageData,
-                            width: canvas.width,
-                            height: canvas.height,
-                            canvas: canvas
-                        });
+                    return pdf.getPage(1).then(function(page) {
+                        return self._loadPdfPageAdaptive(page, 0);
+                    }).then(function(result) {
+                        result.pageCount = pdf.numPages;
+                        resolve(result);
+                    });
+                }).catch(function(err) {
+                    reject(new Error('PDF render failed: ' + err.message));
+                });
+            };
+            reader.onerror = function() { reject(new Error('Failed to read PDF file')); };
+            reader.readAsArrayBuffer(file);
+        });
+    },
+
+    // Audiveris processes every page in a PDF, automatically skipping
+    // pages whose Scale is invalid (covers, blanks, lyrics-only). We
+    // mirror that here so multi-page piano scores don't lose page 2+.
+    // Returns { pages: [pageResult, ...], pageCount } where pageResult
+    // carries probeInterline/renderScale/pageIndex.
+    loadPDFAllPages: function(file, onPageProgress) {
+        var self = this;
+        return new Promise(function(resolve, reject) {
+            if (typeof pdfjsLib === 'undefined') {
+                reject(new Error('PDF.js library not loaded'));
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                var typedArray = new Uint8Array(e.target.result);
+                pdfjsLib.getDocument({ data: typedArray }).promise.then(function(pdf) {
+                    var total = pdf.numPages;
+                    var pages = [];
+                    var chain = Promise.resolve();
+                    for (var i = 1; i <= total; i++) {
+                        (function (pageNo) {
+                            chain = chain.then(function () {
+                                if (typeof onPageProgress === 'function') {
+                                    onPageProgress(pageNo, total);
+                                }
+                                return pdf.getPage(pageNo).then(function (page) {
+                                    return self._loadPdfPageAdaptive(page, pageNo - 1);
+                                }).then(function (result) {
+                                    pages.push(result);
+                                });
+                            });
+                        })(i);
+                    }
+                    chain.then(function () {
+                        resolve({ pages: pages, pageCount: total });
+                    }).catch(function (err) {
+                        reject(new Error('PDF render failed: ' + (err && err.message)));
                     });
                 }).catch(function(err) {
                     reject(new Error('PDF render failed: ' + err.message));
