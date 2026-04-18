@@ -270,6 +270,15 @@
         var staves = clusterFilamentsIntoStavesWith(
             filaments, width, height, interline, cc);
 
+        // Fallback: ultraRelaxed mode may have too few filaments at any
+        // single sampling column to form a 5-tuple (when 5-9 survivors are
+        // split across 2 staves). Try a simpler y-gap grouping pass so we
+        // still emit staves rather than give up entirely.
+        if (staves.length === 0 && opts && opts.ultraRelaxed
+            && filaments.length >= cc.linesPerStaff) {
+            staves = groupFilamentsByYGap(filaments, width, interline);
+        }
+
         if (staves.length === 0) {
             if (OMR.debug && OMR.debug.push) {
                 OMR.debug.push('gridLines', renderFilamentsDebug(filaments));
@@ -633,6 +642,84 @@
         });
 
         // Order staves top-to-bottom and assign sequential ids.
+        staves.sort(function (a, b) { return a.yTop - b.yTop; });
+        for (var si = 0; si < staves.length; si++) staves[si].id = si + 1;
+        return staves;
+    }
+
+    // Last-resort grouping — when the 5-tuple vote fails at every column
+    // but the filament count is still sufficient. Sort filaments by y at
+    // their midpoint, walk top-to-bottom, and break into staff groups
+    // wherever a gap > 1.8*interline appears. Keep only groups of exactly
+    // 5 lines with all 4 consecutive spacings in [0.7, 1.3]*interline.
+    //
+    // This handles the case where ultraRelaxed survivors are 5-9 filaments
+    // split across 2 staves, so no single column has a full 5-tuple from
+    // either staff but the y-sorted list does.
+    function groupFilamentsByYGap(filaments, width, interline) {
+        if (filaments.length < 5) return [];
+        var xMid = Math.round(width / 2);
+        var withY = filaments.map(function (f) {
+            return { f: f, y: f.getYAtX(xMid) };
+        });
+        withY.sort(function (a, b) { return a.y - b.y; });
+
+        var groups = [];
+        var cur = [withY[0]];
+        var gapLimit = interline * 1.8;
+        for (var i = 1; i < withY.length; i++) {
+            var dy = withY[i].y - withY[i - 1].y;
+            if (dy > gapLimit) {
+                groups.push(cur);
+                cur = [];
+            }
+            cur.push(withY[i]);
+        }
+        groups.push(cur);
+
+        var staves = [];
+        var interMin = interline * 0.7;
+        var interMax = interline * 1.3;
+        for (var g = 0; g < groups.length; g++) {
+            var lines = groups[g];
+            if (lines.length < 5) continue;
+            if (lines.length > 5) {
+                // Pick 5 that best fit the interline band.
+                var filsOnly = lines.map(function (e) { return e.f; });
+                var picked   = pickBestFive(filsOnly, xMid, interline);
+                lines = picked.map(function (f) {
+                    return { f: f, y: f.getYAtX(xMid) };
+                });
+                lines.sort(function (a, b) { return a.y - b.y; });
+            }
+            var ok = true;
+            for (var t = 0; t < lines.length - 1; t++) {
+                var spacing = lines[t + 1].y - lines[t].y;
+                if (spacing < interMin || spacing > interMax) { ok = false; break; }
+            }
+            if (!ok) continue;
+
+            var lineFils = lines.map(function (e) { return e.f; });
+            var sx0 = -Infinity, sx1 = Infinity;
+            for (var li = 0; li < lineFils.length; li++) {
+                if (lineFils[li].xMin > sx0) sx0 = lineFils[li].xMin;
+                if (lineFils[li].xMax < sx1) sx1 = lineFils[li].xMax;
+            }
+            var slopeSum = 0;
+            for (var li2 = 0; li2 < lineFils.length; li2++) {
+                slopeSum += lineFils[li2].getSlope();
+            }
+            staves.push({
+                id:        0,
+                interline: interline,
+                lines:     lineFils,
+                xLeft:     sx0,
+                xRight:    sx1,
+                yTop:      lines[0].y,
+                yBottom:   lines[lines.length - 1].y,
+                slope:     slopeSum / lineFils.length
+            });
+        }
         staves.sort(function (a, b) { return a.yTop - b.yTop; });
         for (var si = 0; si < staves.length; si++) staves[si].id = si + 1;
         return staves;
