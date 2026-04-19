@@ -3236,12 +3236,17 @@ OMR.Engine = {
                 return self._yieldThen(function() {
                     if (!ctx.dt) {
                         // Legacy detect skipped — emit an empty shell that
-                        // the writer can still consume. Phase 14 MusicXML
-                        // reads from ctx.sig when available and ignores
-                        // this empty legacy detection.
+                        // the writer AND the UI can still consume. Phase
+                        // 14 MusicXML reads from ctx.sig when available.
+                        // v6.30.0: shape must match NoteDetector.detect
+                        // return (noteHeads, events, rests, barLines,
+                        // keySignature, timeSignature, measures) — otherwise
+                        // the UI crashes on result.events.length.
                         ctx.detection = {
-                            notes: [], beams: [], rests: [], barlines: [],
-                            clefs: [], keys: [], times: []
+                            noteHeads: [], events: [], rests: [], barLines: [],
+                            keySignature: { fifths: 0, mode: 'major' },
+                            timeSignature: { beats: 4, beatType: 4 },
+                            measures: []
                         };
                         report(4, 'Generating MusicXML...', 75);
                         return ctx;

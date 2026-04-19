@@ -2,8 +2,42 @@
 
 ## Current State (2026-04-19)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.29.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.30.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
+
+### Wave 13 hotfix (v6.30.0 — 2026-04-19)
+User reported after Wave 12 roll-out that every PDF (Chopin Op.28,
+Brahms waltz Op.39-15, Fur Elise) finished the pipeline but then
+crashed in the UI with `Cannot read properties of undefined (reading
+'length')` right after "Complete!". Root cause:
+
+- The Wave 12 DT-skip path built an empty legacy-detection shell
+  using field names from a DIFFERENT shape:
+  `{ notes, beams, rests, barlines, clefs, keys, times }`. The
+  downstream `resolve()` reads `ctx.detection.events`,
+  `ctx.detection.noteHeads`, `ctx.detection.barLines` (capital L),
+  `ctx.detection.keySignature`, `ctx.detection.timeSignature`,
+  `ctx.detection.measures` — all missing, so `result.events.length`
+  in page-omr-scanner.php crashed the UI after the engine reported
+  success.
+
+Fix (`omr-engine.js` line 3242): rewrote the empty shell to match
+the real NoteDetector.detect() return shape — `noteHeads`, `events`,
+`rests`, `barLines`, `keySignature`, `timeSignature`, `measures`.
+
+Belt-and-suspenders in `page-omr-scanner.php`: stat-panel reads now
+use `(result.X && result.X.length) || 0` fallbacks so a future shape
+drift can't crash the UI again.
+
+**Known residuals (Wave 14):**
+- Stitch-size cap still truncates to first chunk for very long PDFs.
+  Need per-page pipeline iteration with result merging so "any
+  length" works (user explicit demand: "qu'importe la longueur").
+- Load pipeline is fully sequential — probe+render per page chained.
+  Parallelizing the per-page renders would cut load time noticeably
+  on 4-6 page piano scores.
+- All Wave 12 Wave 13 residuals still open (live overlay, .omr
+  sidecar, classifier/CNN, Salamander preload).
 
 ### Wave 12 fixes (v6.29.0 — 2026-04-19)
 User report after Wave 11: "Sur les partitions c'est de la cacophonie !

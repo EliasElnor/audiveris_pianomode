@@ -589,11 +589,18 @@ $theme_uri = get_stylesheet_directory_uri();
             downloadMidi.href = result.midiUrl;
             downloadMidi.setAttribute('download', baseName + '.mid');
 
-            // Stats
+            // Stats — defensive so a missing field never crashes the UI.
+            var stavesLen = (result.staves && result.staves.length) || 0;
+            var eventsLen = (result.events && result.events.length) || 0;
+            var headsLen  = (result.newHeads && result.newHeads.heads
+                              && result.newHeads.heads.length) || 0;
+            var noteCount = (typeof result.noteCount === 'number')
+                ? result.noteCount
+                : Math.max(eventsLen, headsLen);
             statsPanel.innerHTML =
-                '<strong>' + result.noteCount + '</strong> notes detected in ' +
-                '<strong>' + result.staves.length + '</strong> staff(s) — ' +
-                result.events.length + ' musical events';
+                '<strong>' + noteCount + '</strong> notes detected in ' +
+                '<strong>' + stavesLen + '</strong> staff(s) — ' +
+                eventsLen + ' musical events';
 
             // Load in AlphaTab
             updateProgress(4, 'Score ready — loading player...', 100);
