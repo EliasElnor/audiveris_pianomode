@@ -145,27 +145,36 @@
         // two ~1 px peaks with a 1-2 px valley.
         rawPeaks = mergeClosePeaks(rawPeaks, cfg.mergeDxPx);
 
-        // Classify each peak + measure vertical extent.
+        // Classify each peak. v6.29.0 — measure vertical extent FIRST and
+        // let it drive the classification.  The previous width-first logic
+        // misclassified every thin barline (1-3 px, widthIL ≈ 0.1) as
+        // STEM_THIN / STEM, because a typical single barline is narrower
+        // than the 0.35 IL stemMax threshold. The fix: a peak whose vertical
+        // extent covers the full staff (≥ minBarExtIL * interline, with a
+        // small tolerance for antialiased gaps) is a BARLINE regardless
+        // of its x-width. Width then only disambiguates thin barline from
+        // double/repeat barline.
         var peaks = [];
+        var fullStaffExt = cfg.minBarExtIL * interline;
         for (var pi = 0; pi < rawPeaks.length; pi++) {
             var p = rawPeaks[pi];
             var widthPx = p.x1 - p.x0 + 1;
             var widthIL = widthPx / interline;
-            var kind;
-            if (widthIL <= cfg.stemThinMax)     kind = PEAK_KIND.STEM_THIN;
-            else if (widthIL <= cfg.stemMax)    kind = PEAK_KIND.STEM;
-            else if (widthIL <= cfg.barlineMax) kind = PEAK_KIND.BARLINE;
-            else                                kind = PEAK_KIND.DOUBLE;
-
-            // Measure vertical extent at peak center to separate genuine
-            // barlines from stems that happen to brush all 5 lines.
             var xc = Math.round((p.x0 + p.x1) / 2);
             var vext = measureVerticalExtent(
                 bin, width, height, xL + xc, staff, cfg.verticalTol);
-            if ((kind === PEAK_KIND.BARLINE || kind === PEAK_KIND.DOUBLE)
-                    && vext < cfg.minBarExtIL * interline) {
-                // Looks barline-shaped but doesn't extend far enough —
-                // reclassify as a thick stem.
+            var kind;
+            if (vext >= fullStaffExt) {
+                kind = (widthIL > cfg.barlineMax)
+                    ? PEAK_KIND.DOUBLE
+                    : PEAK_KIND.BARLINE;
+            } else if (widthIL <= cfg.stemThinMax) {
+                kind = PEAK_KIND.STEM_THIN;
+            } else if (widthIL <= cfg.stemMax) {
+                kind = PEAK_KIND.STEM;
+            } else {
+                // Fat peak but short vertical span — e.g. an articulation
+                // blob or accidental. Not a barline, not a stem.
                 kind = PEAK_KIND.STEM;
             }
 
@@ -251,17 +260,42 @@
 
     function measureVerticalExtent(bin, width, height, xAbs, staff, tol) {
         // Start from staff mid-y, walk up while column xAbs has ink; walk
-        // down likewise; return the span.
+        // down likewise; return the span.  v6.29.0 — tolerate up to
+        // `gapTol` consecutive inkless rows so a 1-2 px antialiased gap
+        // in the barline doesn't truncate the measured extent.
         var lines = staff.lines;
         var yMid = Math.round(
             0.5 * (lines[0].getYAtX(xAbs) + lines[lines.length - 1].getYAtX(xAbs)));
         if (yMid < 0 || yMid >= height) return 0;
+        var gapTol = 2;
         // Scan up
         var yUp = yMid;
-        while (yUp > 0 && columnHasInkAt(bin, width, yUp - 1, xAbs, tol)) yUp--;
+        var miss = 0;
+        while (yUp > 0) {
+            if (columnHasInkAt(bin, width, yUp - 1, xAbs, tol)) {
+                yUp--;
+                miss = 0;
+            } else {
+                miss++;
+                if (miss > gapTol) break;
+                yUp--;
+            }
+        }
+        yUp += miss;
         // Scan down
         var yDn = yMid;
-        while (yDn < height - 1 && columnHasInkAt(bin, width, yDn + 1, xAbs, tol)) yDn++;
+        miss = 0;
+        while (yDn < height - 1) {
+            if (columnHasInkAt(bin, width, yDn + 1, xAbs, tol)) {
+                yDn++;
+                miss = 0;
+            } else {
+                miss++;
+                if (miss > gapTol) break;
+                yDn++;
+            }
+        }
+        yDn -= miss;
         return yDn - yUp;
     }
 

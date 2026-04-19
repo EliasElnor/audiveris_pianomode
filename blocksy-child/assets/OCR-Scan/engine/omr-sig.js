@@ -457,16 +457,8 @@
             return gridBars.systems.map(function (sys, idx) {
                 var anchor    = sys.staves && sys.staves[0];
                 var projEntry = pickProjForStaff(projByStaffId, anchor);
-                var measures;
-                if (projEntry
-                        && projEntry.measures
-                        && projEntry.measures.length > 0) {
-                    measures = projMeasures(anchor, projEntry, idx);
-                } else if ((sys.barlines || []).length > 0) {
-                    measures = barlinesToMeasures(anchor, sys.barlines, idx);
-                } else {
-                    measures = [singleMeasure(anchor)];
-                }
+                var measures  = buildMeasuresForAnchor(
+                    anchor, projEntry, sys.barlines);
                 return {
                     id:       idx + 1,
                     staves:   sys.staves,
@@ -474,24 +466,71 @@
                 };
             });
         }
-        // Fallback: each staff is its own system, using its projector
-        // measures when present, else a single whole-staff measure.
+
+        // v6.29.0 — when gridBars is absent (Hough fallback path), derive
+        // the grand-staff grouping from the staves' own systemIdx tags
+        // (set by OMR.GridLines._pairStavesIntoSystems).  Previously we
+        // defaulted to "each staff = own system", which stripped the
+        // grand-staff pairing and caused bass-clef staves to render empty
+        // because upper/lower voice routing assumes two staves per system.
+        var haveIdx = false;
+        for (var bi = 0; bi < staves.length; bi++) {
+            if (staves[bi] && staves[bi].systemIdx !== undefined
+                    && staves[bi].systemIdx !== null) {
+                haveIdx = true;
+                break;
+            }
+        }
+        if (haveIdx) {
+            var grouped = {};
+            var order   = [];
+            for (var gi = 0; gi < staves.length; gi++) {
+                var st  = staves[gi];
+                var key = (st && (st.systemIdx !== undefined
+                                  && st.systemIdx !== null))
+                    ? st.systemIdx : gi;
+                if (!grouped[key]) {
+                    grouped[key] = { key: key, staves: [] };
+                    order.push(key);
+                }
+                grouped[key].staves.push(st);
+            }
+            return order.map(function (k, idx) {
+                var bag     = grouped[k];
+                var anchor  = bag.staves[0];
+                var projEntry = pickProjForStaff(projByStaffId, anchor);
+                var measures = buildMeasuresForAnchor(anchor, projEntry, null);
+                return {
+                    id:       idx + 1,
+                    staves:   bag.staves,
+                    measures: measures
+                };
+            });
+        }
+
+        // Ultimate fallback: each staff is its own system.
         return staves.map(function (staff, idx) {
             var projEntry = pickProjForStaff(projByStaffId, staff);
-            var measures;
-            if (projEntry
-                    && projEntry.measures
-                    && projEntry.measures.length > 0) {
-                measures = projMeasures(staff, projEntry, idx);
-            } else {
-                measures = [singleMeasure(staff)];
-            }
+            var measures  = buildMeasuresForAnchor(staff, projEntry, null);
             return {
                 id:       idx + 1,
                 staves:   [staff],
                 measures: measures
             };
         });
+    }
+
+    // Pick projector measures when present, else barline-derived measures,
+    // else a single whole-staff measure.  Shared by the three buildSystems
+    // branches so the measure contract is identical.
+    function buildMeasuresForAnchor(anchor, projEntry, barlines) {
+        if (projEntry && projEntry.measures && projEntry.measures.length > 0) {
+            return projMeasures(anchor, projEntry, 0);
+        }
+        if (barlines && barlines.length > 0) {
+            return barlinesToMeasures(anchor, barlines, 0);
+        }
+        return [singleMeasure(anchor)];
     }
 
     // Index staff-projector entries by staff.id for O(1) lookup. Entries

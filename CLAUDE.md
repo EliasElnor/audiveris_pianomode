@@ -2,8 +2,119 @@
 
 ## Current State (2026-04-19)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.28.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.29.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
+
+### Wave 12 fixes (v6.29.0 — 2026-04-19)
+User report after Wave 11: "Sur les partitions c'est de la cacophonie !
+Il mets bien un bass staff clé de fa mais aucune note dessus ... alpha
+tab n'a AUCUNE MESURE ... faudrait qu'on voit l'analyse se faire et
+évoluer sur la preview partition". Concrete defects reproduced:
+`RangeError: Invalid array length at Filament.include`, bass staff
+rendered empty despite bass clef, 2 barlines across 23 staves, page
+freeze at ~35 % "Removing staff lines". Wave 11's per-pass try/catch
+only masked the Filament crash; this wave digs to root cause.
+
+Per user explicit demand ("STP procède avec MOINS de commits ! ET
+CONSOLIDE BIEN TOUS LES FICHIER !") this wave ships as ONE commit
+covering all seven changed files.
+
+1. **Filament.include root-cause fix** (`omr-filaments.js`) — the
+   RangeError was a quadratic run-accumulation bug, not a transient.
+   `Filament.include(other)` re-pushed `other.runs` into `this.runs`
+   every time it was called, and `buildHorizontalFilaments` could
+   call it multiple times with the same victim because
+   `prevRuns[k].filament` was mutated DURING the fold. After the
+   first absorption, every subsequent `prev.filament` pointing at
+   the already-absorbed old filament doubled its run list again.
+   On dense scores the array doubled past 2^32-1 and threw.
+   Fixed by:
+     (a) `other._absorbed = true` flag — Filament.include now
+         bails idempotently when called twice on the same victim.
+     (b) `other.runs = []` clear after absorption — if something
+         still iterates the victim, it sees empty runs.
+     (c) Caller skips the O(N) `filaments.splice` when victim is
+         already absorbed, so the outer fold loop is O(N) total.
+2. **Scale lower bound 8 → 6** (`omr-scale.js` `C.minInterline`) —
+   Alexander_Gedike_Etude Cmajor op36-22 probes interline=3, 2.5×
+   upscale cap lands at interline=7, Wave 11's floor of 8 rejected
+   it. Templates are noisy below 6 but still produce a signal;
+   rejecting at 8 dumped the whole downstream pipeline. Below 6
+   we still reject (template pixel precision is gone).
+3. **Grand-staff pairing preserved through Phase 13**
+   (`omr-sig.js` `buildSystems`) — the "bass staff rendered but
+   empty" bug had a single root cause: when `ctx.gridBars` was
+   absent (Hough-fallback path), `buildSystems` fell back to
+   per-staff-systems, which stripped the grand-staff pairing set
+   by `_pairStavesIntoSystems`. Each staff became its own one-
+   staff system; the subsequent MusicXML emit then routed every
+   voice to staff 1 of each "part" and nothing reached the bass
+   staff. Fix: if any staff has `systemIdx` set (always true when
+   Hough ran), group staves by that index before falling back.
+   The `systemIdx`-driven grouping is what makes the bass clef
+   actually receive notes after Hough.
+4. **StaffProjector extent-first classification**
+   (`omr-staff-projector.js`) — previous classifier asked
+   "width ≤ stemThinMax?" FIRST, so every 1-3 px peak was labelled
+   STEM_THIN/STEM regardless of its vertical extent. Real
+   barlines are THIN but span the full staff height; the old
+   order demoted them all to stems. Flipped: measure vertical
+   extent first, any peak that spans ≥ cfg.fullStaffRatio · (5
+   interlines) is a BARLINE/DOUBLE regardless of width; thinner
+   extents fall through to STEM_THIN / STEM. Also added 2-px
+   `gapTol` hysteresis to `measureVerticalExtent` so antialiased
+   1-2 px breaks in the barline don't truncate the extent. On
+   the Chopin Op.28 regression (23 staves, 2 barlines found)
+   this now recovers the expected barline count per staff.
+5. **removeStaffLines handles Filament lines**
+   (`omr-engine.js` `removeStaffLines`) — this pass was a silent
+   no-op on new-pipeline staves because it treated `staff.lines[i]`
+   as an integer y-row, but the new pipeline stores Filament
+   objects there. Previously arithmetic like `y - thickness`
+   produced NaN, the inner loop never executed, the output
+   binary was identical to the input, and a downstream pass (DT
+   over a huge image) was the one locking up at "35 %". Added
+   dual-shape handling: detect `staff.left/right` vs
+   `staff.xLeft/xRight`, call `lineObj.getYAtX(x)` when available
+   (falls back to the integer path), derive `baseThick` from
+   `staff.lineThickness` or `staff.interline * 0.15`.
+6. **DT OOM / duplicate-work guard** (`omr-engine.js`) —
+   the legacy Distance-Table path (`computeBounded`) allocated a
+   `Uint32Array(w*h)` even when the new Phase 6 chamfer had
+   already run. On 2040×15980 stitched PDFs the redundant
+   `Uint32Array(32.5 million)` crashed the tab. Skip the legacy
+   DT when (a) `(w*h) > 60 Mpx` or (b) new-pipeline heads have
+   already been produced. Emit an empty-shell detection object
+   in that case so downstream SIG / emit still run.
+7. **Unified preview-canvas overlay** (`page-omr-scanner.php`
+   `drawPreview`) — user explicitly asked to SEE the analysis
+   ("faudrait qu'on voit l'analyse se faire et évoluer sur la
+   preview partition"). Rewrote `drawPreview` to handle BOTH
+   staff shapes (legacy integer lines + new-pipeline Filament
+   with `.getYAtX(x)`), overlay:
+     - staff lines in blue
+     - barlines (from `result.staffProjections[i].barlines`) in red
+     - measure vertical guides (from `result.gridBars.systems`)
+         in amber
+     - noteheads (`result.newHeads` preferred, falls back to
+         `result.noteHeads`) in green
+   `result.staffProjections` is now exposed in `Engine.process`'s
+   return so the overlay has the data.
+
+**Known residuals after Wave 12 (Wave 13 priority):**
+- Overlay is end-of-scan; user wanted PROGRESSIVE updates
+  ("faudrait qu'on voit l'analyse se faire ET ÉVOLUER"). Needs
+  the engine to expose per-phase snapshots via a callback so the
+  canvas can repaint as each phase finishes.
+- No classifier/CNN yet — geometric rules still over-detect
+  on ornaments/rests. See Wave 10 Priority 5.a.
+- Full per-page processing (drop the 14000 px stitch cap) still
+  deferred — needed for >10-page PDFs.
+- Salamander sample preload on file-pick (currently races
+  AlphaTab Sonivox on first Play).
+- Audiveris-style `.omr` sidecar import/transcribe/export
+  pipeline still just a one-shot render — user wants the full
+  three-phase architecture.
 
 ### Wave 11 fixes (v6.28.0 — 2026-04-19)
 User reports show FOUR concrete pipeline failures after Wave 10. Wave 11

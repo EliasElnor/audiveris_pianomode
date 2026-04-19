@@ -636,41 +636,146 @@ $theme_uri = get_stylesheet_directory_uri();
 
         previewPanel.style.display = 'block';
 
-        // We re-process to get the canvas — use the stored data
-        var isPDF = selectedFile.type === 'application/pdf' || selectedFile.name.toLowerCase().endsWith('.pdf');
-        var loadFn = isPDF ? PianoModeOMR.ImageProcessor.loadPDF : PianoModeOMR.ImageProcessor.loadImage;
+        // v6.29.0 — unified overlay renderer that handles BOTH staff shapes
+        // (legacy StaffDetector integer-y lines and the new pipeline's
+        // Filament / Hough-stub lines with getYAtX) and overlays the
+        // StaffProjector / GridBars measure cuts + Phase 8 noteheads
+        // regardless of which pipeline produced them.  The user asked to
+        // see the analysis evolving on the preview; this is the static
+        // end-of-scan version (live progressive overlay would require
+        // engine-internal hooks that don't exist yet).
+        var isPDF = selectedFile.type === 'application/pdf'
+            || selectedFile.name.toLowerCase().endsWith('.pdf');
+        var loadFn = isPDF
+            ? PianoModeOMR.ImageProcessor.loadPDF
+            : PianoModeOMR.ImageProcessor.loadImage;
 
         loadFn(selectedFile).then(function(loaded) {
-            previewCanvas.width = loaded.width;
+            previewCanvas.width  = loaded.width;
             previewCanvas.height = loaded.height;
             var ctx = previewCanvas.getContext('2d');
             ctx.drawImage(loaded.canvas, 0, 0);
 
-            // Draw staff lines in blue
-            ctx.strokeStyle = 'rgba(0, 120, 255, 0.5)';
-            ctx.lineWidth = 2;
+            // --- Staff lines (handle both shapes) ---
+            ctx.strokeStyle = 'rgba(0, 120, 255, 0.55)';
+            ctx.lineWidth   = 2;
+            var xLeftOf = function (st) {
+                if (typeof st.xLeft === 'number') return st.xLeft;
+                if (typeof st.left  === 'number') return st.left;
+                return 0;
+            };
+            var xRightOf = function (st) {
+                if (typeof st.xRight === 'number') return st.xRight;
+                if (typeof st.right  === 'number') return st.right;
+                return loaded.width;
+            };
+            var yAtOf = function (line, x, fallback) {
+                if (typeof line === 'number') return line;
+                if (line && typeof line.getYAtX === 'function') {
+                    var v = line.getYAtX(x);
+                    return isFinite(v) ? v : fallback;
+                }
+                if (line && typeof line._houghY === 'number') return line._houghY;
+                return fallback;
+            };
             for (var s = 0; s < result.staves.length; s++) {
                 var staff = result.staves[s];
+                if (!staff || !staff.lines) continue;
+                var xL = Math.max(0, xLeftOf(staff));
+                var xR = Math.min(loaded.width, xRightOf(staff));
                 for (var l = 0; l < staff.lines.length; l++) {
-                    var y = staff.lines[l];
+                    var y1 = yAtOf(staff.lines[l], xL, null);
+                    var y2 = yAtOf(staff.lines[l], xR, y1);
+                    if (y1 === null || !isFinite(y1)) continue;
                     ctx.beginPath();
-                    ctx.moveTo(0, y);
-                    ctx.lineTo(loaded.width, y);
+                    ctx.moveTo(xL, y1);
+                    ctx.lineTo(xR, y2);
                     ctx.stroke();
                 }
             }
 
-            // Draw detected noteheads in red/green
-            for (var i = 0; i < result.noteHeads.length; i++) {
-                var nh = result.noteHeads[i];
-                ctx.strokeStyle = nh.isFilled ? 'rgba(255, 60, 60, 0.8)' : 'rgba(60, 200, 60, 0.8)';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(nh.minX, nh.minY, nh.width, nh.height);
+            // --- Barlines from StaffProjector (Phase 5b) ---
+            var projs = result.staffProjections;
+            if (projs && projs.length) {
+                ctx.strokeStyle = 'rgba(215, 191, 129, 0.9)';
+                ctx.lineWidth   = 1.5;
+                for (var pi = 0; pi < projs.length; pi++) {
+                    var p = projs[pi];
+                    if (!p || !p.barlines) continue;
+                    var st = p.staff;
+                    if (!st) continue;
+                    var yTop = (typeof st.yTop === 'number') ? st.yTop : 0;
+                    var yBot = (typeof st.yBottom === 'number') ? st.yBottom : 0;
+                    if (yBot <= yTop) continue;
+                    for (var bi = 0; bi < p.barlines.length; bi++) {
+                        var bx = p.barlines[bi];
+                        ctx.beginPath();
+                        ctx.moveTo(bx, yTop - 4);
+                        ctx.lineTo(bx, yBot + 4);
+                        ctx.stroke();
+                    }
+                }
+            }
 
-                // Label with pitch
-                ctx.fillStyle = '#FFD700';
-                ctx.font = 'bold 12px monospace';
-                ctx.fillText(nh.pitchName || '', nh.minX, nh.minY - 4);
+            // --- Measures from gridBars.systems (Phase 5) ---
+            if (result.gridBars && result.gridBars.systems) {
+                ctx.strokeStyle = 'rgba(150, 100, 220, 0.4)';
+                ctx.lineWidth   = 1;
+                for (var gi = 0; gi < result.gridBars.systems.length; gi++) {
+                    var sys = result.gridBars.systems[gi];
+                    var sysStaves = sys.staves || [];
+                    if (sysStaves.length === 0) continue;
+                    var top = sysStaves[0];
+                    var bot = sysStaves[sysStaves.length - 1];
+                    var sy0 = (typeof top.yTop === 'number') ? top.yTop : 0;
+                    var sy1 = (typeof bot.yBottom === 'number') ? bot.yBottom : sy0;
+                    var bars = sys.barlines || [];
+                    for (var bj = 0; bj < bars.length; bj++) {
+                        var bxx = bars[bj].x || bars[bj].xMid || bars[bj].xLeft;
+                        if (!isFinite(bxx)) continue;
+                        ctx.beginPath();
+                        ctx.moveTo(bxx, sy0 - 2);
+                        ctx.lineTo(bxx, sy1 + 2);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // --- Noteheads: new-pipeline preferred, legacy fallback ---
+            var newHeadsArr = null;
+            if (result.newHeads) {
+                newHeadsArr = (result.newHeads.heads)
+                    ? result.newHeads.heads
+                    : (Array.isArray(result.newHeads) ? result.newHeads : null);
+            }
+            if (newHeadsArr && newHeadsArr.length > 0) {
+                ctx.lineWidth = 2;
+                for (var i = 0; i < newHeadsArr.length; i++) {
+                    var h = newHeadsArr[i];
+                    if (!h || !isFinite(h.x) || !isFinite(h.y)) continue;
+                    var il = (h.staff && h.staff.interline)
+                        ? h.staff.interline : 20;
+                    var rw = Math.max(4, Math.round(il * 0.7));
+                    var rh = Math.max(3, Math.round(il * 0.55));
+                    var isVoid = (h.shape === 'NOTEHEAD_VOID'
+                                  || h.shape === 'WHOLE_NOTE');
+                    ctx.strokeStyle = isVoid
+                        ? 'rgba(60, 200, 60, 0.85)'
+                        : 'rgba(255, 60, 60, 0.85)';
+                    ctx.strokeRect(h.x - rw / 2, h.y - rh / 2, rw, rh);
+                }
+            } else if (result.noteHeads && result.noteHeads.length > 0) {
+                for (var li = 0; li < result.noteHeads.length; li++) {
+                    var nh = result.noteHeads[li];
+                    ctx.strokeStyle = nh.isFilled
+                        ? 'rgba(255, 60, 60, 0.8)'
+                        : 'rgba(60, 200, 60, 0.8)';
+                    ctx.lineWidth   = 2;
+                    ctx.strokeRect(nh.minX, nh.minY, nh.width, nh.height);
+                    ctx.fillStyle = '#FFD700';
+                    ctx.font      = 'bold 12px monospace';
+                    ctx.fillText(nh.pitchName || '', nh.minX, nh.minY - 4);
+                }
             }
         });
     }

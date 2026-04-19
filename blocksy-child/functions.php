@@ -428,7 +428,7 @@ require_once get_stylesheet_directory() . '/assets/OCR-Scan/omr-admin.php';
  * Referenced by page-omr-scanner.php as well.
  */
 if ( ! defined( 'PIANOMODE_OMR_VER' ) ) {
-    define( 'PIANOMODE_OMR_VER', '6.28.0' );
+    define( 'PIANOMODE_OMR_VER', '6.29.0' );
 }
 
 /**

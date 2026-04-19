@@ -820,19 +820,63 @@ OMR.StaffDetector = {
     },
 
     removeStaffLines: function(bin, width, height, staves) {
+        // v6.29.0 — handle BOTH staff shapes:
+        //   * Legacy StaffDetector staves: staff.lines[i] is a plain integer
+        //     y, staff.left / staff.right / staff.lineThickness are numbers.
+        //   * New pipeline (GridLines filaments + Hough stubs):
+        //     staff.lines[i] is a Filament-like object with getYAtX(x),
+        //     staff.xLeft / staff.xRight / staff.interline are numbers.
+        //
+        // Before this fix the new pipeline's staff-line removal was a
+        // silent no-op (lineY arithmetic on an object returned NaN, loop
+        // conditions never held, cleaned === bin), which let head
+        // detection match templates on top of raw staff lines and
+        // pumped out a flood of false heads on every system.
         var cleaned = new Uint8Array(bin);
         for (var s = 0; s < staves.length; s++) {
             var staff = staves[s];
-            var maxThick = staff.lineThickness + 2;
+            if (!staff || !staff.lines) continue;
 
-            for (var lineIdx = 0; lineIdx < 5; lineIdx++) {
-                var lineY = staff.lines[lineIdx];
-                var searchTop = lineY - Math.ceil(maxThick / 2);
-                var searchBot = lineY + Math.ceil(maxThick / 2);
-                if (searchTop < 0) searchTop = 0;
-                if (searchBot >= height) searchBot = height - 1;
+            var xL, xR;
+            if (typeof staff.left === 'number' && typeof staff.right === 'number') {
+                xL = staff.left;
+                xR = staff.right;
+            } else {
+                xL = (staff.xLeft  | 0);
+                xR = (staff.xRight | 0);
+            }
+            if (xR <= xL) continue;
+            if (xL < 0) xL = 0;
+            if (xR >= width) xR = width - 1;
 
-                for (var x = staff.left; x <= staff.right; x++) {
+            var baseThick = (typeof staff.lineThickness === 'number')
+                ? staff.lineThickness
+                : ((staff.interline > 0)
+                    ? Math.max(1, Math.round(staff.interline * 0.15))
+                    : 2);
+            var maxThick = baseThick + 2;
+            var halfW    = Math.ceil(maxThick / 2);
+
+            for (var lineIdx = 0; lineIdx < 5 && lineIdx < staff.lines.length; lineIdx++) {
+                var lineObj = staff.lines[lineIdx];
+                var getY;
+                if (lineObj && typeof lineObj.getYAtX === 'function') {
+                    getY = function (line) { return function (x) {
+                        return line.getYAtX(x) | 0;
+                    }; }(lineObj);
+                } else if (typeof lineObj === 'number') {
+                    getY = function (y) { return function () { return y | 0; }; }(lineObj);
+                } else {
+                    continue;
+                }
+
+                for (var x = xL; x <= xR; x++) {
+                    var cy = getY(x);
+                    var searchTop = cy - halfW;
+                    var searchBot = cy + halfW;
+                    if (searchTop < 0) searchTop = 0;
+                    if (searchBot >= height) searchBot = height - 1;
+
                     var runTop = -1, runBot = -1;
                     for (var y = searchTop; y <= searchBot; y++) {
                         if (bin[y * width + x] === 1) {
@@ -842,15 +886,16 @@ OMR.StaffDetector = {
                     }
                     if (runTop === -1) continue;
                     var runLen = runBot - runTop + 1;
+                    if (runLen > maxThick) continue;
 
-                    if (runLen <= maxThick) {
-                        var hasAbove = (runTop > 0 && bin[(runTop - 1) * width + x] === 1);
-                        var hasBelow = (runBot < height - 1 && bin[(runBot + 1) * width + x] === 1);
-                        if (!(hasAbove && hasBelow)) {
-                            for (var ey = runTop; ey <= runBot; ey++) {
-                                cleaned[ey * width + x] = 0;
-                            }
-                        }
+                    var hasAbove = (runTop > 0
+                                    && bin[(runTop - 1) * width + x] === 1);
+                    var hasBelow = (runBot < height - 1
+                                    && bin[(runBot + 1) * width + x] === 1);
+                    if (hasAbove && hasBelow) continue;
+
+                    for (var ey = runTop; ey <= runBot; ey++) {
+                        cleaned[ey * width + x] = 0;
                     }
                 }
             }
@@ -3160,6 +3205,28 @@ OMR.Engine = {
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
+                    // v6.29.0 — OOM guard.  The legacy distance-transform
+                    // allocates a Uint32Array(w*h) plus the detect() call
+                    // builds several Int32Arrays of the same size. On a
+                    // large stitched PDF (say 2500×15000 = 37 Mpx) these
+                    // peak at ~600 MB of typed-array memory which crashes
+                    // the tab on mid-range machines.  When Phase 8 heads
+                    // succeeded we already have the note list we need;
+                    // skip the legacy detector and fabricate an empty
+                    // detection shell so the downstream writer still runs.
+                    var px = ctx.w * ctx.h;
+                    var haveNewHeads = !!(ctx.heads
+                            && ((ctx.heads.heads && ctx.heads.heads.length > 0)
+                                || (Array.isArray(ctx.heads) && ctx.heads.length > 0)));
+                    var tooBig = px > 60000000;
+                    if (tooBig || haveNewHeads) {
+                        console.info('[OMR] Skipping legacy DT/detect ('
+                                     + (tooBig ? 'image too large' : 'new heads OK')
+                                     + '): ' + ctx.w + 'x' + ctx.h);
+                        ctx.dt = null;
+                        report(3, 'Detecting notes and symbols...', 55);
+                        return ctx;
+                    }
                     var dt = OMR.NoteDetector.computeDistanceTransform(ctx.cleanBin, ctx.w, ctx.h);
                     report(3, 'Detecting notes and symbols...', 55);
                     ctx.dt = dt;
@@ -3167,6 +3234,18 @@ OMR.Engine = {
                 });
             }).then(function(ctx) {
                 return self._yieldThen(function() {
+                    if (!ctx.dt) {
+                        // Legacy detect skipped — emit an empty shell that
+                        // the writer can still consume. Phase 14 MusicXML
+                        // reads from ctx.sig when available and ignores
+                        // this empty legacy detection.
+                        ctx.detection = {
+                            notes: [], beams: [], rests: [], barlines: [],
+                            clefs: [], keys: [], times: []
+                        };
+                        report(4, 'Generating MusicXML...', 75);
+                        return ctx;
+                    }
                     var detection = OMR.NoteDetector.detect(ctx.bin, ctx.cleanBin, ctx.dt, ctx.w, ctx.h, ctx.staves, ctx.staffSpacing);
                     report(4, 'Generating MusicXML...', 75);
                     ctx.detection = detection;
@@ -3252,6 +3331,7 @@ OMR.Engine = {
                     newStems: ctx.stems || null,
                     headers: ctx.headers || null,
                     restsAlters: ctx.restsAlters || null,
+                    staffProjections: ctx.staffProjections || null,
                     sig: ctx.sig || null,
                     musicxmlNew:     ctx.musicxmlNew     || null,
                     musicxmlNewBlob: ctx.musicxmlNewBlob || null,

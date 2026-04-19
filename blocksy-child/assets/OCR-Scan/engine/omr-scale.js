@@ -54,13 +54,15 @@
     // Constants mirror ScaleBuilder$Constants values. Ratios are the ones
     // Audiveris actually uses in production on typical 300 DPI scans.
     var C = {
-        // v6.28.0 — lowered 11 → 8. Multi-page PDF stitches can legally
-        // carry interline=10 when the stitch cap forced a smaller scale
-        // factor; rejecting them at 11 meant the whole downstream
-        // pipeline was skipped even though all phases work fine down
-        // to interline ~8. Below 8 the templates lose precision so
-        // we still reject.
-        minInterline:         8,      // pixels — reject sheets below this
+        // v6.29.0 — lowered 8 → 6. Multi-page stitched PDFs whose probe
+        // interline falls to 3 get rescaled by at most 2.5× (blur cap),
+        // which lands them at interline 7-8 — right at the old rejection
+        // threshold. Accepting down to 6 lets Phase 4+ attempt recovery
+        // instead of dumping the page outright. Templates degrade but
+        // still hit better than skipping everything. Below 6 we still
+        // reject because the 1-pixel staff line is indistinguishable
+        // from noise.
+        minInterline:         6,      // pixels — reject sheets below this
         maxInterline:         100,    // pixels — reject sheets above this
         maxBlackHeightRatio:  0.08,   // max black run vs image height
         maxWhiteHeightRatio:  0.25,   // max white run vs image height

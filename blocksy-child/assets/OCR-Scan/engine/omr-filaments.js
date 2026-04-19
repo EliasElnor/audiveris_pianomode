@@ -218,10 +218,21 @@
     };
 
     // Merge another filament in-place. Preserves the accumulated regression.
+    // v6.29.0 — guard against re-absorption. The caller (buildHorizontalFilaments)
+    // walks a row of prevRuns and may find several pr2 entries whose .filament
+    // still points to the same *old* filament F after F has already been
+    // absorbed into chosen.  Without this guard we'd re-push F.runs into
+    // chosen.runs once per remaining reference — a quadratic blow-up that
+    // triggered `RangeError: Invalid array length` on complex PDFs like
+    // Chopin Op.28 No.15.  The flag + runs-clear make re-inclusion a no-op
+    // and keep chosen.runs bounded by the image height.
     Filament.prototype.include = function (other) {
         if (!other || other === this) return;
-        for (var i = 0; i < other.runs.length; i++) {
-            var r = other.runs[i];
+        if (other._absorbed) return;
+        other._absorbed = true;
+        var runs = other.runs;
+        for (var i = 0; i < runs.length; i++) {
+            var r = runs[i];
             this.runs.push(r);
             this.weight += r.len;
             if (r.x < this.xMin)               this.xMin = r.x;
@@ -231,6 +242,7 @@
             var cx = r.x + (r.len - 1) / 2;
             this.line.includePoint(cx, r.y, r.len);
         }
+        other.runs = [];
     };
 
     // -------------------------------------------------------------------
@@ -312,9 +324,17 @@
                             if (pr2R < curL - maxHorizontalGap
                                     || pr2L > curR + maxHorizontalGap) continue;
                             if (pr2.filament && pr2.filament !== chosen) {
-                                chosen.include(pr2.filament);
-                                var idx = filaments.indexOf(pr2.filament);
-                                if (idx >= 0) filaments.splice(idx, 1);
+                                var victim = pr2.filament;
+                                // Filament.include is now idempotent via
+                                // _absorbed flag, so duplicate pr2 refs
+                                // to the same victim no longer blow up
+                                // chosen.runs.  We still skip the O(N)
+                                // filaments.splice in that case.
+                                if (!victim._absorbed) {
+                                    chosen.include(victim);
+                                    var idx = filaments.indexOf(victim);
+                                    if (idx >= 0) filaments.splice(idx, 1);
+                                }
                                 pr2.filament = chosen;
                             }
                         }
