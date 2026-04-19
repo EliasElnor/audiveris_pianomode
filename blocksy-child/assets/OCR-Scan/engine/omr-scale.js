@@ -54,7 +54,13 @@
     // Constants mirror ScaleBuilder$Constants values. Ratios are the ones
     // Audiveris actually uses in production on typical 300 DPI scans.
     var C = {
-        minInterline:         11,     // pixels — reject sheets below this
+        // v6.28.0 — lowered 11 → 8. Multi-page PDF stitches can legally
+        // carry interline=10 when the stitch cap forced a smaller scale
+        // factor; rejecting them at 11 meant the whole downstream
+        // pipeline was skipped even though all phases work fine down
+        // to interline ~8. Below 8 the templates lose precision so
+        // we still reject.
+        minInterline:         8,      // pixels — reject sheets below this
         maxInterline:         100,    // pixels — reject sheets above this
         maxBlackHeightRatio:  0.08,   // max black run vs image height
         maxWhiteHeightRatio:  0.25,   // max white run vs image height

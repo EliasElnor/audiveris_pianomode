@@ -1,9 +1,59 @@
 # CLAUDE.md — PianoMode OCR Scanner Project
 
-## Current State (2026-04-18)
+## Current State (2026-04-19)
 Branch: `claude/audiveris-integration-zOSh8`
-Cache buster: **v6.27.0** (sync'd in `omr-core.js` `OMR.VERSION` and
+Cache buster: **v6.28.0** (sync'd in `omr-core.js` `OMR.VERSION` and
 `functions.php` `PIANOMODE_OMR_VER`).
+
+### Wave 11 fixes (v6.28.0 — 2026-04-19)
+User reports show FOUR concrete pipeline failures after Wave 10. Wave 11
+fixes all four with consolidated edits — one commit covering every
+touched file (user explicit demand: "MOINS de commits").
+
+1. **"Invalid array length" cascades through Phase 4 chain**
+   (`omr-engine.js`) — the old monolithic try/catch around strict +
+   relaxed + ultraRelaxed + Hough meant one throw aborted the whole
+   chain. User saw "Phase 4 GridLines yielded no staves: exception:
+   Invalid array length" and ZERO staves, even though later passes
+   would have worked. Replaced with per-pass try/catch via the
+   `runPass` helper. Each retry reports its own crash and the chain
+   continues. Hough gets its own try/catch too.
+2. **Hough finds only 1 staff when sheet has many**
+   (`omr-hough.js`) — the sliding 5-peak window scorer kept the BEST
+   window per group and discarded the group after one emit. On a
+   piano score where dynamics/text between staves bridge the
+   `staffGapIL` split, all 40 peaks land in ONE group and only the
+   top staff is emitted. Now scores every window, sorts by
+   spacing-RMS, and greedily emits disjoint windows until no
+   non-overlapping window remains. Recovers 8 staves where it used
+   to recover 1.
+3. **Scale rejected at interline=10** (`omr-scale.js` `C.minInterline`
+   11 → 8). Stitched multi-page PDFs with scale-capped rasterisation
+   legitimately fall to interline=10; rejecting them at 11 dumped
+   the whole downstream pipeline. The templates still work down to
+   interline 8. Below that we still reject (template pixel precision
+   falls off).
+4. **Legacy StaffDetector finds 38 staves on 4-page Brahms**
+   (`omr-engine.js` `OMR.StaffDetector.detect`). Two root causes:
+   (a) `avgBlack = totalBlack / height` dilutes on tall stitched
+   sheets — page margins drop the threshold and text lines pass. Fix:
+   when height > 2000, use the top-25 % ink-heavy row mean × 0.4
+   instead. (b) The 5-tuple gap band `[3, 50]` was absolute px; fixed
+   to `[0.75·interline, 1.35·interline]` when `scaleHint.interline`
+   is present, which it always is via `ctx.scale`. Text-line peaks
+   (gap 5-8 px or 40+ px) no longer cluster with real staff lines.
+
+**Known residuals after Wave 11:**
+- Over-detection on rests/ornaments is reduced but not eliminated —
+  geometric rules will always have some false-positive floor. The
+  real cure is the classifier/* CNN port (Wave 12 priority 1).
+- Multi-page PDFs with >10 pages still stitch to ≤14000 px (Wave 9
+  memory cap). Full-page-per-pass rendering + per-page accumulation
+  is needed for real long-form support (Wave 12 priority 2).
+- Salamander-piano sample load still races AlphaTab's Sonivox
+  fallback on first scan ("No NoteOn reached Salamander after 3 s").
+  Wave 12 should consider preloading samples earlier in the page
+  lifecycle (on file-pick, not on Play).
 
 **STATUS:** Audiveris-port pipeline is authoritative (14 phases enabled by
 default via `OMR.flags`; legacy v6 heuristics fallback when new phases fail).

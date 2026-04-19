@@ -176,15 +176,20 @@
         var interMin = interline * cfg.interlineMin;
         var interMax = interline * cfg.interlineMax;
 
+        // v6.28.0 — extract ALL non-overlapping 5-tuples per group, not
+        // just one. On a piano score with 8 staves, the 40 peaks often
+        // fall into one big group (dynamics/text between staves can
+        // bridge the `staffGapIL` splits) and the old "one best 5-tuple
+        // per group" stopped after the top staff.  Now we score every
+        // sliding window in each group, sort by spacing-rms, and greedily
+        // emit the best disjoint windows until no candidate remains
+        // whose 5 indices don't overlap an already-accepted window.
         var rawStaves = [];
         for (var gi = 0; gi < groups.length; gi++) {
             var g = groups[gi];
             if (g.length < 5) continue;
-            // Prefer a 5-peak window whose spacings average closest to
-            // interline. We slide a window of 5 and accept the first
-            // that passes; equal-quality windows are resolved by lowest
-            // rms(spacing − interline).
-            var best = null;
+
+            var windows = [];
             for (var s = 0; s + 5 <= g.length; s++) {
                 var ok = true;
                 var sq = 0;
@@ -193,13 +198,23 @@
                     if (dy < interMin || dy > interMax) { ok = false; break; }
                     sq += (dy - interline) * (dy - interline);
                 }
-                if (ok && (best === null || sq < best.sq)) {
-                    best = { start: s, sq: sq };
-                }
+                if (ok) windows.push({ start: s, sq: sq });
             }
-            if (!best) continue;
-            var lineYs = g.slice(best.start, best.start + 5);
-            rawStaves.push({ lineYs: lineYs });
+            if (windows.length === 0) continue;
+
+            windows.sort(function (a, b) { return a.sq - b.sq; });
+
+            var taken = new Uint8Array(g.length);
+            for (var wi = 0; wi < windows.length; wi++) {
+                var ws = windows[wi].start;
+                var collision = false;
+                for (var tt = 0; tt < 5; tt++) {
+                    if (taken[ws + tt]) { collision = true; break; }
+                }
+                if (collision) continue;
+                for (var tt2 = 0; tt2 < 5; tt2++) taken[ws + tt2] = 1;
+                rawStaves.push({ lineYs: g.slice(ws, ws + 5) });
+            }
         }
 
         if (rawStaves.length === 0) {

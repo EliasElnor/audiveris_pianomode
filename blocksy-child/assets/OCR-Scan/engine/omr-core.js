@@ -29,7 +29,7 @@
     // Shared version string. Every module reads OMR.VERSION for logging.
     // BUMP this on every Phase commit along with PIANOMODE_OMR_VER in
     // functions.php so the ?ver=X.Y.Z cache buster stays consistent.
-    OMR.VERSION = 'v6.27.0';
+    OMR.VERSION = 'v6.28.0';
 
     // Feature flags — each Phase flips the corresponding flag to true once
     // its replacement module is ready and validated against the legacy code.

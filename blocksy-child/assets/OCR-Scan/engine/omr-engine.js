@@ -616,16 +616,44 @@ OMR.StaffDetector = {
             hProj[y] = count;
         }
 
+        // v6.28.0 — on tall stitched sheets (4+ pages, height > 2000)
+        // the avgBlack denominator dilutes over page margins and forces
+        // lineThreshold below text-line ink density, which is why the
+        // user sees "38 staves" detected on a 4-page piano PDF. Restrict
+        // avgBlack to the top quartile of row densities so only actual
+        // ink-heavy rows anchor the threshold.
         var totalBlack = 0;
-        for (y = 0; y < height; y++) totalBlack += hProj[y];
-        var avgBlack = totalBlack / height;
-        // Width-floor tuned for 300dpi image scans. On PDFs rendered at
-        // scale 3.0 the pages can be very wide (2000+ px) and staff lines
-        // rarely span a full 15% of that width once margins are cropped,
-        // so we use a softer floor. "relaxed" drops it further for retry.
+        var nz = 0;
+        for (y = 0; y < height; y++) {
+            totalBlack += hProj[y];
+            if (hProj[y] > 0) nz++;
+        }
+        var avgBlack;
+        if (height > 2000 && nz > 0) {
+            var sorted = Array.prototype.slice.call(hProj).sort(function (a, b) { return b - a; });
+            var topN = Math.max(1, Math.floor(nz * 0.25));
+            var topSum = 0;
+            for (i = 0; i < topN && i < sorted.length; i++) topSum += sorted[i];
+            avgBlack = topSum / topN * 0.4;   // scaled down so real staff lines still pass
+        } else {
+            avgBlack = totalBlack / height;
+        }
         var widthFloorRatio = opts.relaxed ? 0.03 : 0.06;
         var mulFactor       = opts.relaxed ? 1.3  : 2.0;
         var lineThreshold = Math.max(avgBlack * mulFactor, width * widthFloorRatio);
+
+        // v6.28.0 — spacing hint from Phase 3 scale builder. When
+        // available it constrains the 5-tuple gap search to
+        // [0.75, 1.35]·interline instead of the old absolute [3, 50]
+        // band which over-collects text lines and decorative staves on
+        // tall stitched PDFs.
+        var hintedInterline = 0;
+        if (scaleHint && typeof scaleHint === 'object'
+                && scaleHint.interline > 0) {
+            hintedInterline = scaleHint.interline | 0;
+        } else if (typeof scaleHint === 'number' && scaleHint > 0) {
+            hintedInterline = scaleHint | 0;
+        }
 
         var lineRows = [];
         for (y = 0; y < height; y++) {
@@ -665,11 +693,19 @@ OMR.StaffDetector = {
                 var bestJ = -1;
                 var bestDist = Infinity;
 
+                // v6.28.0 — when we have an interline from the scale
+                // builder, enforce gap ∈ [0.75, 1.35]·interline. Without
+                // a hint we fall back to the legacy [3, 50] absolute
+                // band (still used for older callers with no scaleHint).
+                var gapMin = hintedInterline > 0
+                    ? Math.max(3, Math.round(hintedInterline * 0.75)) : 3;
+                var gapMax = hintedInterline > 0
+                    ? Math.max(gapMin + 1, Math.round(hintedInterline * 1.35)) : 50;
                 for (j = lastIdx + 1; j < lineSegments.length && j <= lastIdx + 4; j++) {
                     if (used[j]) continue;
                     var gap = lineSegments[j].y - group[group.length - 1].y;
-                    if (gap < 3) continue;
-                    if (gap > 50) break;
+                    if (gap < gapMin) continue;
+                    if (gap > gapMax) break;
 
                     if (expectedSpacing > 0) {
                         var dev = Math.abs(gap - expectedSpacing);
@@ -678,7 +714,7 @@ OMR.StaffDetector = {
                             bestJ = j;
                         }
                     } else {
-                        if (gap < bestDist && gap >= 5 && gap <= 40) {
+                        if (gap < bestDist && gap >= gapMin && gap <= gapMax) {
                             bestDist = gap;
                             bestJ = j;
                         }
@@ -2618,63 +2654,61 @@ OMR.Engine = {
                     var glReason = null;
                     if (OMR.GridLines && typeof OMR.GridLines.retrieveStaves === 'function'
                             && ctx.scale && ctx.scale.valid) {
-                        try {
-                            ctx.gridLines = OMR.GridLines.retrieveStaves(
-                                ctx.bin, ctx.w, ctx.h, ctx.scale);
-                            if (ctx.gridLines && ctx.gridLines.reason) {
-                                glReason = ctx.gridLines.reason;
-                            }
-                            if (!ctx.gridLines
-                                    || !ctx.gridLines.staves
-                                    || ctx.gridLines.staves.length === 0) {
-                                console.info('[OMR] Phase 4 strict pass yielded no staves; retrying relaxed. Strict reason: ' + glReason);
-                                var relaxed = OMR.GridLines.retrieveStaves(
-                                    ctx.bin, ctx.w, ctx.h, ctx.scale, { relaxed: true });
-                                if (relaxed && relaxed.staves && relaxed.staves.length > 0) {
-                                    ctx.gridLines = relaxed;
-                                    glReason = null;
-                                    console.info('[OMR] Phase 4 relaxed pass recovered ' + relaxed.staves.length + ' staves.');
-                                } else {
-                                    if (relaxed && relaxed.reason) {
-                                        glReason = glReason + ' | relaxed: ' + relaxed.reason;
-                                    }
-                                    console.info('[OMR] Phase 4 relaxed pass yielded no staves; retrying ultraRelaxed.');
-                                    var ultra = OMR.GridLines.retrieveStaves(
-                                        ctx.bin, ctx.w, ctx.h, ctx.scale, { ultraRelaxed: true });
-                                    if (ultra && ultra.staves && ultra.staves.length > 0) {
-                                        ctx.gridLines = ultra;
-                                        glReason = null;
-                                        console.info('[OMR] Phase 4 ultraRelaxed pass recovered ' + ultra.staves.length + ' staves.');
-                                    } else if (ultra && ultra.reason) {
-                                        glReason = glReason + ' | ultraRelaxed: ' + ultra.reason;
-                                    }
-                                    // Phase 4b: Hough-style horizontal line detector
-                                    // as a last resort before the legacy StaffDetector
-                                    // fallback. Filament-based retrieval collapses
-                                    // under antialiased PDFs whose staff lines are
-                                    // broken into many short fragments — the length
-                                    // filter kills 98 %+ of the candidates. Hough
-                                    // sidesteps that by operating on the raw
-                                    // horizontal projection, which fragmented lines
-                                    // still contribute to.
-                                    if ((!ctx.gridLines || ctx.gridLines.staves.length === 0)
-                                            && OMR.Hough && OMR.Hough.detectStaves) {
-                                        console.info('[OMR] Phase 4 ultraRelaxed pass failed; retrying Hough.');
-                                        var hough = OMR.Hough.detectStaves(
-                                            ctx.bin, ctx.w, ctx.h, ctx.scale);
-                                        if (hough && hough.staves && hough.staves.length > 0) {
-                                            ctx.gridLines = hough;
-                                            glReason = null;
-                                            console.info('[OMR] Phase 4 Hough recovered ' + hough.staves.length + ' staves.');
-                                        } else if (hough && hough.reason) {
-                                            glReason = glReason + ' | hough: ' + hough.reason;
-                                        }
-                                    }
+                        // v6.28.0 — each retry wrapped in its own try/catch
+                        // so a crash in relaxed doesn't skip ultraRelaxed
+                        // and Hough. The old monolithic try/catch aborted
+                        // the whole chain on the first "Invalid array
+                        // length" and users saw nothing detected even
+                        // though Hough would have worked.
+                        var runPass = function (label, callOpts) {
+                            try {
+                                var r = OMR.GridLines.retrieveStaves(
+                                    ctx.bin, ctx.w, ctx.h, ctx.scale, callOpts);
+                                if (r && r.staves && r.staves.length > 0) {
+                                    console.info('[OMR] Phase 4 ' + label
+                                        + ' pass recovered ' + r.staves.length + ' staves.');
+                                    return r;
                                 }
+                                if (r && r.reason) {
+                                    glReason = (glReason ? glReason + ' | ' : '')
+                                        + label + ': ' + r.reason;
+                                }
+                                return null;
+                            } catch (e) {
+                                glReason = (glReason ? glReason + ' | ' : '')
+                                    + label + ' threw: ' + (e && e.message);
+                                console.warn('[OMR] Phase 4 ' + label + ' threw:', e);
+                                return null;
                             }
-                        } catch (glErr) {
-                            ctx.gridLines = null;
-                            glReason = 'exception: ' + (glErr && glErr.message);
+                        };
+
+                        ctx.gridLines = runPass('strict', undefined);
+                        if (!ctx.gridLines) {
+                            console.info('[OMR] Phase 4 strict yielded no staves; retrying relaxed.');
+                            ctx.gridLines = runPass('relaxed', { relaxed: true });
+                        }
+                        if (!ctx.gridLines) {
+                            console.info('[OMR] Phase 4 relaxed yielded no staves; retrying ultraRelaxed.');
+                            ctx.gridLines = runPass('ultraRelaxed', { ultraRelaxed: true });
+                        }
+                        if (!ctx.gridLines && OMR.Hough && OMR.Hough.detectStaves) {
+                            console.info('[OMR] Phase 4 filament chain failed; retrying Hough.');
+                            try {
+                                var hough = OMR.Hough.detectStaves(
+                                    ctx.bin, ctx.w, ctx.h, ctx.scale);
+                                if (hough && hough.staves && hough.staves.length > 0) {
+                                    ctx.gridLines = hough;
+                                    console.info('[OMR] Phase 4 Hough recovered '
+                                        + hough.staves.length + ' staves.');
+                                } else if (hough && hough.reason) {
+                                    glReason = (glReason ? glReason + ' | ' : '')
+                                        + 'hough: ' + hough.reason;
+                                }
+                            } catch (he) {
+                                glReason = (glReason ? glReason + ' | ' : '')
+                                    + 'hough threw: ' + (he && he.message);
+                                console.warn('[OMR] Phase 4 Hough threw:', he);
+                            }
                         }
                     } else if (!ctx.scale || !ctx.scale.valid) {
                         glReason = 'scale invalid (' + (ctx.scale ? ctx.scale.reason : 'null') + ')';
